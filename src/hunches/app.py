@@ -192,6 +192,7 @@ from hunches.screens.final import test_stage
 from hunches.screens.gold import GoldScreen
 from hunches.screens.search import SearchScreen
 from hunches.screens.taxonomy import TaxonomyScreen
+from hunches.screens.threshold import ThresholdScreen
 from hunches.screens.tune import TuneScreen
 
 # (number, name, ScreenClass). Each stage task changes exactly one line here.
@@ -202,7 +203,7 @@ STAGES = [
     (4, "Gold dev set", GoldScreen),
     (5, "Tuning loop", TuneScreen),
     (6, "Gold test set", test_stage),
-    (7, "Threshold", Placeholder),
+    (7, "Threshold", ThresholdScreen),
     (8, "Full run", Placeholder),
     (9, "Browse", Placeholder),
 ]
