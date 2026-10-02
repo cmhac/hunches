@@ -174,6 +174,8 @@ def test_first_incomplete_stage_all_nine():
     assert files.first_incomplete_stage() == 8
     files.append_jsonl("results.jsonl", {"id": "1"})
     assert files.first_incomplete_stage() == 8  # id 2 still missing
+    files.append_jsonl("results.jsonl", {"id": "2", "error": "boom"})
+    assert files.first_incomplete_stage() == 8  # error rows are retried, not done
     files.append_jsonl("results.jsonl", {"id": "2"})
     assert files.first_incomplete_stage() == 9
 

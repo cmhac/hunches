@@ -183,7 +183,7 @@ def first_incomplete_stage() -> int:
     5 `dev_done` false (tuning not accepted)
     6 fewer than SAMPLE_SIZE labelled gold rows with split "test", or `test_done` false
     7 `threshold_chosen` false or threshold.json missing
-    8 some candidate with max_similarity >= threshold.json["threshold"] has no row in results.jsonl
+    8 some candidate with max_similarity >= threshold.json["threshold"] has no successful row in results.jsonl (rows with an "error" key don't count)
     9 otherwise (browse)
     """
     state = read_state()
@@ -211,7 +211,8 @@ def first_incomplete_stage() -> int:
     if threshold_text is None or not state.threshold_chosen:
         return 7
     cutoff = json.loads(threshold_text)["threshold"]
-    done = {r["id"] for r in read_jsonl("results.jsonl")}
+    # error rows (failed items, retried by the next run) do not count as done
+    done = {r["id"] for r in read_jsonl("results.jsonl") if "error" not in r}
     if any(
         c["max_similarity"] >= cutoff and c["id"] not in done
         for c in read_jsonl("candidates.jsonl")

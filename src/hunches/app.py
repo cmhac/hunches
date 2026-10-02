@@ -190,6 +190,7 @@ class ChatPanel(Vertical):
 from hunches.screens.brief import BriefScreen
 from hunches.screens.final import test_stage
 from hunches.screens.gold import GoldScreen
+from hunches.screens.run import RunScreen
 from hunches.screens.search import SearchScreen
 from hunches.screens.taxonomy import TaxonomyScreen
 from hunches.screens.threshold import ThresholdScreen
@@ -204,7 +205,7 @@ STAGES = [
     (5, "Tuning loop", TuneScreen),
     (6, "Gold test set", test_stage),
     (7, "Threshold", ThresholdScreen),
-    (8, "Full run", Placeholder),
+    (8, "Full run", RunScreen),
     (9, "Browse", Placeholder),
 ]
 
