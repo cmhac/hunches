@@ -147,3 +147,41 @@ async def test_approve_blocked_without_files_and_resume_restores_chat(
         log = app.screen.query_one("#log", RichLog)
         assert any("multi please" in str(line.text) for line in log.lines)
         assert "layoff" in app.screen.query_one("#taxonomy", TextArea).text
+
+
+async def test_redesigned_panels_status_and_highlighting(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    files.write_text(
+        "taxonomy.yaml", "mode: single\n# note\nlabels:\n  - name: layoff\n"
+    )
+    files.write_text("prompt.md", "# Prompt\nClassify.\n")
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, TaxonomyScreen)
+        assert screen.query_one("ChatPanel").border_title == "chat · taxonomy"
+        assert (
+            screen.query_one("#taxonomy-panel").border_title
+            == "taxonomy.yaml (editable)"
+        )
+        assert screen.query_one("#prompt-panel").border_title == "prompt.md (editable)"
+        yaml_box, prompt_box = (
+            screen.query_one("#taxonomy", TextArea),
+            screen.query_one("#prompt", TextArea),
+        )
+        assert yaml_box.theme == prompt_box.theme == "hunches"
+        assert prompt_box.language == "markdown"
+        # keys sand (secondary), comments faint, headings primary bold
+        styles = yaml_box._theme.syntax_styles
+        assert styles["yaml.field"].color.get_truecolor().hex.upper() == "#D2BE94"
+        assert styles["comment"].color.get_truecolor().hex.upper() == "#5C6676"
+        heading = prompt_box._theme.syntax_styles["heading"]
+        assert heading.color.get_truecolor().hex.upper() == "#6EA8FE" and heading.bold
+        assert yaml_box._highlights  # tree-sitter really highlighted something
+
+        screen.query_one("#taxonomy", TextArea).text = "mode: [oops"
+        await pilot.pause()
+        status = screen.query_one("#status")
+        assert str(status.render()).startswith("taxonomy.yaml not saved: ")
+        assert status.has_class("warn")

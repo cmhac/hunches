@@ -1,8 +1,11 @@
 """The hunches Textual theme and label colours. Every key in `variables` was checked against
 textual 8.2.8 (textual/design.py)."""
 
+from rich.style import Style
 from textual.markup import escape
 from textual.theme import Theme
+from textual.widgets import TextArea
+from textual.widgets.text_area import TextAreaTheme
 
 LABEL_COLORS = [  # taxonomy.yaml order; off_topic always uses OFF_TOPIC_COLOR
     "#5CC8B4",
@@ -66,3 +69,35 @@ def label_tag(names: list[str], name: str) -> str:
         return f"[{OFF_TOPIC_COLOR}]■[/] [$text-muted]off_topic[/]"
     color = label_color(names.index(name), name) if name in names else OFF_TOPIC_COLOR
     return f"[{color}]■[/] {escape(name)}"
+
+
+def _style(color: str, bold: bool = False) -> Style:
+    return Style(color=color, bold=bold)
+
+
+# TextArea colours: yaml keys secondary, values strong, comments faint, markdown headings primary
+EDITOR = TextAreaTheme(
+    name="hunches",
+    base_style=Style(color="#EEF1F5", bgcolor="#0E1218"),
+    gutter_style=_style("#5C6676"),
+    cursor_style=Style(color="#0E1218", bgcolor="#6EA8FE"),
+    cursor_line_style=Style(bgcolor="#141A23"),
+    selection_style=Style(bgcolor="#1D2F4D"),
+    syntax_styles={
+        "yaml.field": _style("#D2BE94"),
+        "string": _style("#EEF1F5"),
+        "number": _style("#EEF1F5"),
+        "boolean": _style("#EEF1F5"),
+        "punctuation.delimiter": _style("#8C96A6"),
+        "comment": _style("#5C6676"),
+        "heading": _style("#6EA8FE", bold=True),
+        "heading.marker": _style("#6EA8FE", bold=True),
+    },
+)
+
+
+def editor(text_area: TextArea) -> TextArea:
+    """Give a TextArea the hunches colours."""
+    text_area.register_theme(EDITOR)
+    text_area.theme = "hunches"
+    return text_area
