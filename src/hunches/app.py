@@ -3,6 +3,7 @@ from typing import ClassVar
 
 from dotenv import load_dotenv
 from pydantic_ai import Agent
+from pydantic_ai.messages import TextPart, UserPromptPart
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
@@ -18,20 +19,6 @@ class Placeholder(Screen):
         yield StatusHeader()
         yield Static(f"Stage {self.app.stage} is not implemented yet.")  # ty: ignore[unresolved-attribute]
         yield Footer()
-
-
-# (number, name, ScreenClass). Each stage task changes exactly one line here.
-STAGES = [
-    (1, "Brief and seeds", Placeholder),
-    (2, "Search", Placeholder),
-    (3, "Taxonomy and prompt", Placeholder),
-    (4, "Gold dev set", Placeholder),
-    (5, "Tuning loop", Placeholder),
-    (6, "Gold test set", Placeholder),
-    (7, "Threshold", Placeholder),
-    (8, "Full run", Placeholder),
-    (9, "Browse", Placeholder),
-]
 
 
 class StatusHeader(Static):
@@ -157,6 +144,15 @@ class ChatPanel(Vertical):
         yield Static("", id="live")  # the reply being streamed
         yield Input(placeholder="Message the assistant", id="chat-input")
 
+    def on_mount(self) -> None:
+        log = self.query_one("#log", RichLog)
+        for message in self.history:  # restore a resumed conversation
+            for part in message.parts:
+                if isinstance(part, UserPromptPart):
+                    log.write(f"> {part.content}")
+                elif isinstance(part, TextPart):
+                    log.write(part.content)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if not text:
@@ -188,6 +184,23 @@ class ChatPanel(Vertical):
         model = self.agent.model
         name = model if isinstance(model, str) else getattr(model, "model_name", "?")
         cost.record(name, usage, cost.messages_dollars(new))
+
+
+# Stage screens import ChatPanel/confirm_approve from this module, so they are imported here.
+from hunches.screens.brief import BriefScreen
+
+# (number, name, ScreenClass). Each stage task changes exactly one line here.
+STAGES = [
+    (1, "Brief and seeds", BriefScreen),
+    (2, "Search", Placeholder),
+    (3, "Taxonomy and prompt", Placeholder),
+    (4, "Gold dev set", Placeholder),
+    (5, "Tuning loop", Placeholder),
+    (6, "Gold test set", Placeholder),
+    (7, "Threshold", Placeholder),
+    (8, "Full run", Placeholder),
+    (9, "Browse", Placeholder),
+]
 
 
 class HunchesApp(App):
