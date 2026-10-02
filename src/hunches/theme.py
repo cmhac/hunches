@@ -1,6 +1,7 @@
 """The hunches Textual theme and label colours. Every key in `variables` was checked against
 textual 8.2.8 (textual/design.py)."""
 
+from textual.markup import escape
 from textual.theme import Theme
 
 LABEL_COLORS = [  # taxonomy.yaml order; off_topic always uses OFF_TOPIC_COLOR
@@ -57,3 +58,11 @@ def label_color(index: int, name: str) -> str:
     if name == "off_topic":
         return OFF_TOPIC_COLOR
     return LABEL_COLORS[index % len(LABEL_COLORS)]
+
+
+def label_tag(names: list[str], name: str) -> str:
+    """Markup for a label: its coloured square, then the name verbatim. `names` is the taxonomy's label order."""
+    if name == "off_topic":
+        return f"[{OFF_TOPIC_COLOR}]■[/] [$text-muted]off_topic[/]"
+    color = label_color(names.index(name), name) if name in names else OFF_TOPIC_COLOR
+    return f"[{color}]■[/] {escape(name)}"

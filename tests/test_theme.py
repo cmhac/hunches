@@ -19,3 +19,13 @@ async def test_app_uses_hunches_theme_and_stylesheet(tmp_path, monkeypatch):
         assert app.theme == HUNCHES.name == "hunches"
         assert app.current_theme.primary == "#6EA8FE"
         assert app.screen.styles.background.hex.upper() == "#0E1218"
+
+
+def test_label_tag_markup():
+    from hunches.theme import label_tag
+
+    names = ["layoff_story", "hiring"]
+    assert label_tag(names, "hiring") == "[#E592B8]■[/] hiring"
+    assert label_tag(names, "off_topic") == "[#6B7585]■[/] [$text-muted]off_topic[/]"
+    assert label_tag(names, "removed") == "[#6B7585]■[/] removed"  # not in the taxonomy
+    assert label_tag(names, "a[b]") == "[#6B7585]■[/] a\\[b]"  # markup in names is escaped

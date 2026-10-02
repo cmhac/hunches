@@ -42,9 +42,10 @@ ChatPanel Input   { border: tall $border-blurred; }
 ChatPanel Input:focus { border: tall $border; }
 
 ModalScreen { background: $background 70%; align: center middle; }
-ModalScreen > Vertical {
-    width: 60; height: auto; max-height: 90%;
+ConfirmScreen > Vertical {
+    width: 58; height: auto; max-height: 90%;
     border: round $primary; background: $surface; padding: 1 2;
 }
+ConfirmScreen Horizontal { height: auto; align-horizontal: right; }
 
 Footer { background: $footer-background; }

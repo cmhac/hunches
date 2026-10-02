@@ -3,7 +3,9 @@ from typing import ClassVar
 
 from dotenv import load_dotenv
 from pydantic_ai import Agent
-from pydantic_ai.messages import TextPart, UserPromptPart
+from pydantic_ai.messages import TextPart, ToolReturnPart, UserPromptPart
+from rich.table import Table
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.markup import escape
@@ -21,6 +23,14 @@ class Placeholder(Screen):
         yield StatusHeader()
         yield Static(f"Stage {self.app.stage} is not implemented yet.")  # ty: ignore[unresolved-attribute]
         yield Footer()
+
+
+def panel(widget, title: str, subtitle: str = ""):
+    """Give a container the bordered, titled look from hunches.tcss."""
+    widget.add_class("panel")
+    widget.border_title = title
+    widget.border_subtitle = subtitle
+    return widget
 
 
 class StatusHeader(Static):
@@ -75,28 +85,63 @@ class StatusHeader(Static):
 class SetupScreen(Screen):
     """First run: write .hunches/config.toml."""
 
+    DEFAULT_CSS = """
+    SetupScreen #config { height: auto; }
+    SetupScreen .row { height: 1; }
+    SetupScreen .row Label { width: 16; color: $text-muted; }
+    SetupScreen .row Input, SetupScreen .row Select { width: 1fr; }
+    SetupScreen .gap { height: 1; }
+    SetupScreen #actions { height: 1; margin-top: 1; }
+    SetupScreen #error { margin-left: 2; }
+    """
+
     def compose(self) -> ComposeResult:
         c = files.Config()
         yield StatusHeader()
-        with Vertical():
-            yield Label("Set up hunches (writes .hunches/config.toml)")
-            yield Select(
-                [("Local (numpy)", "local"), ("S3 Vectors", "s3")],
-                value="local",
-                allow_blank=False,
-                id="backend",
+        yield Static("Set up hunches (writes .hunches/config.toml)", classes="note")
+        with panel(Vertical(id="config"), "config.toml"):
+            with Horizontal(classes="row"):
+                yield Label("backend")
+                yield Select(
+                    [("Local (numpy)", "local"), ("S3 Vectors", "s3")],
+                    value="local",
+                    allow_blank=False,
+                    compact=True,
+                    id="backend",
+                )
+            yield Static("", classes="gap")
+            for id_, placeholder in [
+                ("corpus_dir", "local: corpus directory"),
+                ("s3_bucket", "s3: bucket"),
+                ("s3_index", "s3: index"),
+            ]:
+                yield self.field(
+                    id_, Input(placeholder=placeholder, compact=True, id=id_)
+                )
+            yield Static("", classes="gap")
+            yield self.field(
+                "embedding_model",
+                Input(
+                    placeholder="e.g. openai:text-embedding-3-small",
+                    compact=True,
+                    id="embedding_model",
+                ),
             )
-            yield Input(placeholder="local: corpus directory", id="corpus_dir")
-            yield Input(placeholder="s3: bucket", id="s3_bucket")
-            yield Input(placeholder="s3: index", id="s3_index")
-            yield Input(
-                placeholder="embedding model (e.g. openai:text-embedding-3-small)",
-                id="embedding_model",
+            yield self.field(
+                "smart_model",
+                Input(value=c.smart_model, compact=True, id="smart_model"),
             )
-            yield Input(value=c.smart_model, id="smart_model")
-            yield Input(value=c.cheap_model, id="cheap_model")
-            yield Button("Save", id="save")
-            yield Label("", id="error")
+            yield self.field(
+                "cheap_model",
+                Input(value=c.cheap_model, compact=True, id="cheap_model"),
+            )
+        with Horizontal(id="actions"):
+            yield Button("Save", id="save", variant="primary", compact=True)
+            yield Label("", id="error", classes="error")
+        yield Footer()
+
+    def field(self, name: str, widget: Input) -> Horizontal:
+        return Horizontal(Label(name), widget, classes="row")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         value = lambda i: self.query_one(f"#{i}", Input).value.strip()
@@ -120,16 +165,19 @@ class SetupScreen(Screen):
 
 
 class ConfirmScreen(ModalScreen[bool]):
+    AUTO_FOCUS = "#yes"
+
     def __init__(self, question: str) -> None:
         super().__init__()
         self.question = question
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with Vertical() as box:
+            box.border_title = "Confirm"
             yield Label(self.question)
             with Horizontal():
-                yield Button("Approve", id="yes", variant="success")
                 yield Button("Cancel", id="no")
+                yield Button("Approve", id="yes", variant="success")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
@@ -161,6 +209,13 @@ class ChatPanel(Vertical):
         self.stage = stage
         self.agent = agent
         self.history = files.load_chat(stage)
+        self.turns = 0
+        model = agent.model
+        panel(
+            self,
+            f"chat · {stage}",
+            model if isinstance(model, str) else getattr(model, "model_name", "?"),
+        )
 
     def compose(self) -> ComposeResult:
         yield RichLog(wrap=True, markup=False, id="log")
@@ -168,24 +223,43 @@ class ChatPanel(Vertical):
         yield Input(placeholder="Message the assistant", id="chat-input")
 
     def on_mount(self) -> None:
-        log = self.query_one("#log", RichLog)
-        for message in self.history:  # restore a resumed conversation
+        self.write_messages(self.history)  # restore a resumed conversation
+
+    def say(self, gutter: str, color: str, text: str) -> None:
+        """One chat turn: a coloured gutter, the text wrapping beside it, a blank row before every turn but the first."""
+        if self.turns:
+            self.query_one("#log", RichLog).write("")
+        self.turns += 1
+        if not gutter:  # errors
+            self.query_one("#log", RichLog).write(Text(text, style=color))
+            return
+        grid = Table.grid()
+        grid.add_column(width=2)
+        grid.add_column(ratio=1)
+        grid.add_row(Text(gutter, style=color), Text(text))
+        self.query_one("#log", RichLog).write(grid, expand=True)
+
+    def write_messages(self, messages: list, users: bool = True) -> None:
+        theme = self.app.current_theme
+        for message in messages:
             for part in message.parts:
-                if isinstance(part, UserPromptPart):
-                    log.write(f"> {part.content}")
+                if isinstance(part, UserPromptPart) and users:
+                    self.say("› ", theme.primary, str(part.content))
                 elif isinstance(part, TextPart):
-                    log.write(part.content)
+                    self.say("│ ", theme.accent or "", part.content)
+                elif isinstance(part, ToolReturnPart):
+                    muted = theme.variables["text-muted"]
+                    self.say("↳ ", muted, f"{part.tool_name} · {part.content}")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if not text:
             return
         event.input.value = ""
-        self.query_one("#log", RichLog).write(f"> {text}")
+        self.say("› ", self.app.current_theme.primary, text)
         self.run_worker(self.reply(text), exclusive=True)
 
     async def reply(self, text: str) -> None:
-        log = self.query_one("#log", RichLog)
         live = self.query_one("#live", Static)
         try:
             async with self.agent.run_stream(
@@ -199,10 +273,10 @@ class ChatPanel(Vertical):
                 self.history = result.all_messages()
         except Exception as e:  # noqa: BLE001  network/auth errors should not kill the app
             live.update("")
-            log.write(f"Error: {e}")
+            self.say("", self.app.current_theme.error or "", f"Error: {e}")
             return
         live.update("")
-        log.write(reply)
+        self.write_messages(new, users=False)
         files.save_chat(self.stage, self.history)
         model = self.agent.model
         name = model if isinstance(model, str) else getattr(model, "model_name", "?")

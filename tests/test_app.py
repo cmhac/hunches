@@ -3,6 +3,7 @@ import json
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
+from textual.containers import Vertical
 from textual.widgets import Button, Input
 
 from hunches import cost, files
@@ -109,7 +110,7 @@ async def test_confirm_approve_sets_flag(tmp_path, monkeypatch):
         confirm_approve(app.screen, "seeds_approved", "Approve seeds?")
         await pilot.pause()
         assert not files.read_state().seeds_approved
-        await pilot.click(Button)  # first button is Approve
+        await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().seeds_approved
 
@@ -151,3 +152,126 @@ async def test_header_truncates_long_project_name(tmp_path, monkeypatch):
         await pilot.pause()
         assert "a-very-long-pro…" in header_text(app)
         assert "a-very-long-project" not in header_text(app)
+
+
+async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
+    make_project(tmp_path, monkeypatch)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        confirm_approve(app.screen, "seeds_approved", "Approve seeds?")
+        await pilot.pause()
+        modal = app.screen
+        assert [b.id for b in modal.query(Button)] == ["no", "yes"]  # Cancel, Approve
+        assert app.focused.id == "yes"
+        box = modal.query_one(Vertical)
+        assert box.border_title == "Confirm" and box.outer_size.width == 58
+        await pilot.press("enter")  # Approve is focused by default
+        await pilot.pause()
+        assert files.read_state().seeds_approved
+
+
+async def test_setup_screen_fits_80x24_in_a_config_panel(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        panel = screen.query_one("#config")
+        assert panel.border_title == "config.toml"
+        for id_ in ("corpus_dir", "s3_bucket", "s3_index", "embedding_model"):
+            widget = screen.query_one(f"#{id_}")
+            assert widget.size.height == 1  # compact
+            assert widget.region.bottom <= 23
+        assert screen.query_one("#save").region.bottom <= 23
+        await pilot.click("#save")
+        await pilot.pause()
+        error = screen.query_one("#error")
+        assert str(error.render()) == "Required: corpus_dir, embedding_model"
+        assert error.has_class("error")
+
+
+def log_lines(panel) -> list[str]:
+    return [strip.text.rstrip() for strip in panel.query_one("#log").lines]
+
+
+async def test_chat_panel_gutters_title_and_blank_rows(tmp_path, monkeypatch):
+    make_project(tmp_path, monkeypatch)
+    agent = Agent(TestModel(custom_output_text="hello there"))
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = ChatPanel("brief", agent)
+        await app.screen.mount(panel)
+        assert panel.border_title == "chat · brief"
+        assert panel.border_subtitle == "test"  # the model name
+        panel.query_one("#chat-input", Input).focus()
+        await pilot.press("h", "i", "enter", "y", "o", "enter")
+        await pilot.pause(0.5)
+        lines = log_lines(panel)
+        assert lines[:3] == ["› hi", "", "│ hello there"]
+        assert lines[3:6] == ["", "› yo", ""]  # one blank row between turns
+
+
+async def test_chat_panel_restores_history_with_tool_calls(tmp_path, monkeypatch):
+    make_project(tmp_path, monkeypatch)
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        ToolCallPart,
+        ToolReturnPart,
+        UserPromptPart,
+    )
+
+    files.save_chat(
+        "brief",
+        [
+            ModelRequest(parts=[UserPromptPart(content="find layoffs")]),
+            ModelResponse(
+                parts=[ToolCallPart(tool_name="propose_seeds", args={"seeds": ["a"]})]
+            ),
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="propose_seeds",
+                        content="Added 6 seeds.",
+                        tool_call_id="1",
+                    )
+                ]
+            ),
+            ModelResponse(parts=[TextPart(content="Done.")]),
+        ],
+    )
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = ChatPanel("brief", Agent(TestModel()))
+        await app.screen.mount(panel)
+        await pilot.pause()
+        assert log_lines(panel) == [
+            "› find layoffs",
+            "",
+            "↳ propose_seeds · Added 6 seeds.",
+            "",
+            "│ Done.",
+        ]
+
+
+async def test_chat_panel_error_line(tmp_path, monkeypatch):
+    make_project(tmp_path, monkeypatch)
+    agent = Agent(TestModel())
+
+    def boom(*a, **k):
+        raise RuntimeError("no key")
+
+    agent.run_stream = boom  # ty: ignore[invalid-assignment]
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = ChatPanel("brief", agent)
+        await app.screen.mount(panel)
+        panel.query_one("#chat-input", Input).focus()
+        await pilot.press("h", "enter")
+        await pilot.pause(0.3)
+        assert log_lines(panel)[-1] == "Error: no key"
