@@ -49,3 +49,7 @@ ConfirmScreen > Vertical {
 ConfirmScreen Horizontal { height: auto; align-horizontal: right; }
 
 Footer { background: $footer-background; }
+
+/* ProgressBar: primary while running, success at 100% */
+Bar > .bar--bar { color: $primary; background: $boost; }
+Bar > .bar--complete { color: $success; background: $boost; }
