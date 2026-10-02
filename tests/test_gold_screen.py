@@ -7,6 +7,7 @@ from textual.widgets import DataTable, Static
 
 from hunches import files
 from hunches.app import HunchesApp
+from hunches.classifier import Prediction
 from hunches.screens.gold import GoldScreen, draw
 
 
@@ -43,7 +44,7 @@ def model_answering(labels):
 
 def counts(screen):
     table = screen.query_one("#counts", DataTable)
-    return {str(r[0]): str(r[1]) for r in map(table.get_row_at, range(table.row_count))}
+    return {str(k.value): str(table.get_row(k)[1]) for k in table.rows}
 
 
 def test_draw_size_exclusion_and_reproducible():
@@ -150,3 +151,108 @@ def test_gold_file_is_jsonl():
     draw("dev", 2)
     lines = (files.root() / "gold.jsonl").read_text().splitlines()
     assert json.loads(lines[0])["labels"] == []
+
+
+def text(screen, id_):
+    return str(screen.query_one(id_, Static).render())
+
+
+def squashed(screen, id_):
+    return " ".join(text(screen, id_).split())
+
+
+async def test_redesigned_layout_80x24_single():
+    project("single")
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, GoldScreen)
+        assert text(screen, "#progress") == "dev set  item 1/50, 0 labelled"
+        item = screen.query_one("#item")
+        first = screen.rows[0]
+        assert item.border_title == f"item {first.id}"
+        assert "item" in text(screen, "#text")
+        labels = screen.query_one("#labels-panel")
+        assert labels.border_title == "labels · single"
+        assert labels.border_subtitle == "press a key to label"
+        counts_panel = screen.query_one("#counts-panel")
+        assert counts_panel.border_title == "counts"
+        assert counts_panel.border_subtitle == "0 of 50"
+        assert counts_panel.outer_size.width <= 30
+        rows = text(screen, "#labels").splitlines()
+        assert [r.split()[0] for r in rows] == ["1", "2", "0"]  # off_topic is last
+        assert all("○" in r for r in rows)
+        for widget in screen.query("#item, #labels-panel, #counts-panel"):
+            assert widget.region.bottom <= 23
+
+
+async def test_label_rows_marks_and_counts_subtitle():
+    project("single")
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, GoldScreen)
+        screen.model = model_answering(["a"])
+        await pilot.press("1")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.press("left")
+        rows = text(screen, "#labels").splitlines()
+        assert "●" in rows[0] and "○" in rows[1]  # the saved label is filled
+        assert screen.query_one("#counts-panel").border_subtitle == "1 of 50"
+        assert text(screen, "#progress") == "dev set  item 1/50, 1 labelled"
+
+
+async def test_multi_mode_uses_square_marks_and_hint():
+    project("multi")
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert screen.query_one("#labels-panel").border_title == "labels · multi"
+        assert (
+            screen.query_one("#labels-panel").border_subtitle
+            == "keys toggle, enter confirms"
+        )
+        await pilot.press("2")
+        rows = text(screen, "#labels").splitlines()
+        assert "□" in rows[0] and "■" in rows[1] and "□" in rows[2]
+
+
+async def test_prediction_line_variants():
+    project("single")
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, GoldScreen)
+        screen.rows[0].labels = ["a"]
+        screen.show()
+        assert text(screen, "#prediction") == "Model: (not classified)"
+        screen.predictions[screen.rows[0].id] = None
+        screen.show()
+        assert text(screen, "#prediction") == "Model: classifying..."
+        screen.predictions[screen.rows[0].id] = Prediction(None, error="boom")
+        screen.show()
+        assert text(screen, "#prediction") == "Model: failed (boom)"
+        assert screen.query_one("#prediction").has_class("error")
+        screen.predictions[screen.rows[0].id] = Prediction(["a"])
+        screen.show()
+        assert text(screen, "#prediction") == "Model: ■ a ✓ agrees"
+        screen.predictions[screen.rows[0].id] = Prediction(["b"])
+        screen.show()
+        assert squashed(screen, "#prediction") == "Model: ■ b DIFFERS"
+
+
+async def test_not_ready_notice():
+    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(4)
+        await pilot.pause()
+        notice = app.screen.query_one("#not-ready")
+        assert str(notice.render()) == "Finish stage 3 (taxonomy and prompt) first."
+        assert notice.has_class("warn")

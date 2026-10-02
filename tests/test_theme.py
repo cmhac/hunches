@@ -31,3 +31,14 @@ def test_label_tag_markup():
     assert (
         label_tag(names, "a[b]") == "[#6B7585]■[/] a\\[b]"
     )  # markup in names is escaped
+
+
+def test_label_text_for_tables():
+    from hunches.theme import label_text
+
+    names = ["layoff_story", "hiring"]
+    t = label_text(names, "hiring")
+    assert t.plain == "■ hiring" and t.spans[0].style == "#E592B8"
+    off = label_text(names, "off_topic")
+    assert off.plain == "■ off_topic" and "#8C96A6" in str(off.spans[-1].style)
+    assert label_text(names, "a[b]").plain == "■ a[b]"  # no markup parsing

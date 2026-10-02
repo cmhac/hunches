@@ -16,7 +16,7 @@ StatusHeader.-cost-unknown { background: $warning 20%; }
     border-subtitle-color: $text-muted;
     padding: 0 1;
 }
-.panel:focus-within { border: round $border; border-title-color: $primary; }
+.panel:focus-within, .panel.-focused { border: round $border; border-title-color: $primary; }
 
 /* One-line messages under a panel. Always prefixed with a word, never colour alone. */
 .note    { height: auto; color: $text-muted; }

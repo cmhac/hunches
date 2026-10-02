@@ -2,6 +2,7 @@
 textual 8.2.8 (textual/design.py)."""
 
 from rich.style import Style
+from rich.text import Text
 from textual.markup import escape
 from textual.theme import Theme
 from textual.widgets import TextArea
@@ -101,3 +102,10 @@ def editor(text_area: TextArea) -> TextArea:
     text_area.register_theme(EDITOR)
     text_area.theme = "hunches"
     return text_area
+
+
+def label_text(names: list[str], name: str) -> Text:
+    """label_tag for DataTable cells, which take Rich renderables (their strings use Rich markup)."""
+    color = label_color(names.index(name), name) if name in names else OFF_TOPIC_COLOR
+    muted = "#8C96A6" if name == "off_topic" else ""
+    return Text.assemble(("■", color), " ", (name, muted))
