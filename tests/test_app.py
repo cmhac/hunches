@@ -163,7 +163,7 @@ async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
         await pilot.pause()
         modal = app.screen
         assert [b.id for b in modal.query(Button)] == ["no", "yes"]  # Cancel, Approve
-        assert app.focused.id == "yes"
+        assert app.focused is not None and app.focused.id == "yes"
         box = modal.query_one(Vertical)
         assert box.border_title == "Confirm" and box.outer_size.width == 58
         await pilot.press("enter")  # Approve is focused by default

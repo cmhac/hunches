@@ -1,13 +1,17 @@
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Input, SelectionList, Static
+from textual.widgets.data_table import ColumnKey
 
 from hunches import files
-from hunches.app import StatusHeader
+from hunches.app import StatusHeader, panel
+from hunches.theme import label_text
 
 # Rendering 100k DataTable rows takes ~10 s, so only the first matches are drawn.
 MAX_ROWS = 1000
+NARROW = 100  # below this many columns the detail pane moves under the table
 
 
 class BrowseScreen(Screen):
@@ -15,11 +19,15 @@ class BrowseScreen(Screen):
 
     AUTO_FOCUS = "#table"
     DEFAULT_CSS = """
-    BrowseScreen #count { height: auto; padding: 0 1; }
     BrowseScreen #body { height: 1fr; }
-    BrowseScreen #labels { width: 24; height: 100%; }
-    BrowseScreen #table { width: 2fr; }
-    BrowseScreen #detail { width: 1fr; padding: 0 1; }
+    BrowseScreen #labels-panel { width: 24; height: 100%; }
+    BrowseScreen #main { width: 1fr; layout: horizontal; }
+    BrowseScreen #table-panel { width: 2fr; height: 100%; }
+    BrowseScreen #detail-panel { width: 1fr; height: 100%; }
+    BrowseScreen.-narrow #main { layout: vertical; }
+    BrowseScreen.-narrow #table-panel { width: 100%; height: 1fr; }
+    BrowseScreen.-narrow #detail-panel { width: 100%; height: 5; }
+    BrowseScreen #empty { color: $text-muted; }
     """
 
     def __init__(self) -> None:
@@ -28,22 +36,40 @@ class BrowseScreen(Screen):
         self.rows = [r for r in files.read_jsonl("results.jsonl") if "error" not in r]
         self.lower = [r["text"].lower() for r in self.rows]
         self.shown: list[int] = []  # indexes into self.rows, in table order
+        self.names = files.all_labels(files.read_taxonomy())
+        self.names += sorted(
+            {x for r in self.rows for x in r["labels"]} - set(self.names)
+        )
 
     def compose(self) -> ComposeResult:
-        names = files.all_labels(files.read_taxonomy())
-        names += sorted({x for r in self.rows for x in r["labels"]} - set(names))
         yield StatusHeader()
-        yield Static("", id="count", markup=False)
         yield Input(placeholder="Search text (case-insensitive)", id="search")
         with Horizontal(id="body"):
-            yield SelectionList[str](*[(n, n) for n in names], id="labels")
-            with Vertical():
-                yield DataTable(id="table", cursor_type="row")
-            yield Static("", id="detail", markup=False)
+            with panel(Vertical(id="labels-panel"), "labels"):
+                yield SelectionList[str](
+                    *[(label_text(self.names, n), n) for n in self.names], id="labels"
+                )
+            with Horizontal(id="main"):
+                with panel(Vertical(id="table-panel"), "results.jsonl"):
+                    yield DataTable(id="table", cursor_type="row")
+                    yield Static("", id="empty")
+                with panel(Vertical(id="detail-panel"), "item"):
+                    yield Static("", id="detail", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#table", DataTable).add_columns("ID", "Labels", "Sim", "Text")
+        table = self.query_one("#table", DataTable)
+        table.add_column("ID", width=8)
+        table.add_column("Labels", key="labels", width=30)
+        table.add_column(Text("Sim", justify="right"), width=7)
+        table.add_column("Text", key="text")
+        self.on_resize()
+
+    def on_resize(self) -> None:
+        narrow = self.size.width < NARROW
+        self.set_class(narrow, "-narrow")
+        table = self.query_one("#table", DataTable)
+        table.columns[ColumnKey("labels")].width = 16 if narrow else 30
         self.refresh_table()
 
     def refresh_table(self) -> None:
@@ -59,16 +85,36 @@ class BrowseScreen(Screen):
         self.shown = self.shown[:MAX_ROWS]
         table = self.query_one("#table", DataTable)
         table.clear()
+        # DataTable has no flex column: Text takes what the others leave (+2 padding per column)
+        table.columns[ColumnKey("text")].width = max(
+            10,
+            table.size.width
+            - 8
+            - table.columns[ColumnKey("labels")].width
+            - 7
+            - 4 * 2
+            - 2,
+        )
+        clip = lambda t: Text(t, no_wrap=True, overflow="ellipsis")
         table.add_rows(
             (
                 r["id"],
-                ", ".join(r["labels"]),
-                f"{r['max_similarity']:.3f}",
-                r["text"].replace("\n", " ")[:80],
+                clip("")
+                + Text(", ").join(label_text(self.names, n) for n in r["labels"]),
+                Text(f"{r['max_similarity']:.3f}", justify="right"),
+                clip(r["text"].replace("\n", " ")),
             )
             for r in (self.rows[i] for i in self.shown)
         )
-        self.query_one("#count", Static).update(
+        empty = self.query_one("#empty", Static)
+        table.display = bool(self.shown)
+        empty.display = not self.shown
+        empty.update(
+            "No results match."
+            if self.rows
+            else "results.jsonl is empty. Run stage 8 first."
+        )
+        self.query_one("#table-panel").border_subtitle = (
             f"Showing {len(self.shown)} of {len(self.rows)}"
             + (f" ({matches} match; refine the search)" if matches > MAX_ROWS else "")
         )
@@ -76,10 +122,13 @@ class BrowseScreen(Screen):
 
     def show_detail(self) -> None:
         table = self.query_one("#table", DataTable)
-        text = ""
+        row = None
         if self.shown and table.cursor_row < len(self.shown):
-            text = self.rows[self.shown[table.cursor_row]]["text"]
-        self.query_one("#detail", Static).update(text)
+            row = self.rows[self.shown[table.cursor_row]]
+        self.query_one("#detail", Static).update(row["text"] if row else "")
+        self.query_one("#detail-panel").border_title = (
+            f"item {row['id']}" if row else "item"
+        )
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self.refresh_table()

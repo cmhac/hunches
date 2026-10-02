@@ -53,3 +53,9 @@ Footer { background: $footer-background; }
 /* ProgressBar: primary while running, success at 100% */
 Bar > .bar--bar { color: $primary; background: $boost; }
 Bar > .bar--complete { color: $success; background: $boost; }
+
+/* Browse label filter: the X in the toggle is primary when the label is selected, faint when not */
+SelectionList > .selection-list--button { color: $text-disabled; background: $surface; }
+SelectionList > .selection-list--button-selected { color: $primary; background: $surface; }
+SelectionList > .selection-list--button-highlighted { color: $text-disabled; background: $boost; }
+SelectionList > .selection-list--button-selected-highlighted { color: $primary; background: $boost; }

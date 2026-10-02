@@ -8,6 +8,12 @@ from hunches import files
 from hunches.app import HunchesApp
 from hunches.screens.taxonomy import TaxonomyScreen
 
+
+def hexcolor(style) -> str:
+    assert style.color is not None
+    return style.color.get_truecolor().hex.upper()
+
+
 seen_instructions: list[str | None] = []
 
 
@@ -174,10 +180,10 @@ async def test_redesigned_panels_status_and_highlighting(tmp_path, monkeypatch):
         assert prompt_box.language == "markdown"
         # keys sand (secondary), comments faint, headings primary bold
         styles = yaml_box._theme.syntax_styles
-        assert styles["yaml.field"].color.get_truecolor().hex.upper() == "#D2BE94"
-        assert styles["comment"].color.get_truecolor().hex.upper() == "#5C6676"
+        assert hexcolor(styles["yaml.field"]) == "#D2BE94"
+        assert hexcolor(styles["comment"]) == "#5C6676"
         heading = prompt_box._theme.syntax_styles["heading"]
-        assert heading.color.get_truecolor().hex.upper() == "#6EA8FE" and heading.bold
+        assert hexcolor(heading) == "#6EA8FE" and heading.bold
         assert yaml_box._highlights  # tree-sitter really highlighted something
 
         screen.query_one("#taxonomy", TextArea).text = "mode: [oops"

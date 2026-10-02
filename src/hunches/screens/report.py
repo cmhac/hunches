@@ -2,6 +2,7 @@
 
 from rich.text import Text
 from textual.widgets import DataTable
+from textual.widgets.data_table import ColumnKey
 
 from hunches import metrics
 from hunches.theme import label_text
@@ -62,7 +63,9 @@ def disagreement_columns(table: DataTable) -> None:
 
 def fit_text_column(table: DataTable) -> None:
     """DataTable has no flex column: give Text whatever the fixed columns leave."""
-    table.columns["text"].width = max(10, table.size.width - 2 * 3 - 15 - 15 - 2)
+    table.columns[ColumnKey("text")].width = max(
+        10, table.size.width - 2 * 3 - 15 - 15 - 2
+    )
 
 
 def clipped(text: str) -> Text:

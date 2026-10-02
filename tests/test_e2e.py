@@ -147,7 +147,7 @@ async def test_all_nine_stages_with_resume():
         await app.workers.wait_for_complete()
         await pilot.pause()
         total = app.screen.query_one("#bands", DataTable).get_row_at(7)
-        assert list(total) == [
+        assert [str(c) for c in total] == [
             "Total",
             "110",
             "",
