@@ -1,0 +1,45 @@
+[project]
+name = "hunches"
+version = "0.1.0"
+description = "Interactive TUI toolkit for content analysis over an already-embedded corpus."
+readme = "README.md"
+authors = [{ name = "Chris Hacker", email = "c.m.hacker1997@gmail.com" }]
+requires-python = ">=3.12"
+# pydantic-ai: the slim package with provider extras (pydantic-ai-slim[anthropic,openai]) avoids
+# pulling every provider. Local Sentence Transformers embeddings come from the pydantic-ai-slim
+# extra "sentence-transformers" (needs Python < 3.14), exposed here as our optional extra "local".
+# The full `pydantic-ai` metapackage would also work but installs all providers.
+dependencies = [
+    "pydantic-ai-slim[anthropic,openai]",
+    "textual",
+    "numpy",
+    "genai-prices",
+    "pyyaml",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+s3 = ["boto3"]
+local = ["pydantic-ai-slim[sentence-transformers]"]
+
+[project.scripts]
+hunches = "hunches.app:main"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-textual-snapshot",
+    "ruff",
+    "ty",
+    "pre-commit",
+    "types-pyyaml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
