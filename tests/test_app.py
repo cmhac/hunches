@@ -45,7 +45,11 @@ async def test_starts_at_first_incomplete_stage(tmp_path, monkeypatch):
         await pilot.pause()
         assert app.stage == 1
     make_project(tmp_path, monkeypatch, seeds_approved=True)
-    files.write_text("candidates.jsonl", json.dumps({"id": "1"}) + "\n")
+    files.write_text(
+        "candidates.jsonl",
+        json.dumps({"id": "1", "text": "t", "max_similarity": 0.7, "best_seed": "s"})
+        + "\n",
+    )
     app = HunchesApp()
     async with app.run_test() as pilot:
         await pilot.pause()
