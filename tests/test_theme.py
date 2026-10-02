@@ -28,4 +28,6 @@ def test_label_tag_markup():
     assert label_tag(names, "hiring") == "[#E592B8]■[/] hiring"
     assert label_tag(names, "off_topic") == "[#6B7585]■[/] [$text-muted]off_topic[/]"
     assert label_tag(names, "removed") == "[#6B7585]■[/] removed"  # not in the taxonomy
-    assert label_tag(names, "a[b]") == "[#6B7585]■[/] a\\[b]"  # markup in names is escaped
+    assert (
+        label_tag(names, "a[b]") == "[#6B7585]■[/] a\\[b]"
+    )  # markup in names is escaped

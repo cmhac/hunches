@@ -99,3 +99,35 @@ async def test_resume_restores_chat_and_seeds(tmp_path, monkeypatch):
         log = app.screen.query_one("#log", RichLog)
         assert any("hello" in str(line.text) for line in log.lines)
         assert app.screen.query_one(StatusHeader)
+
+
+async def test_redesigned_layout_titles_empty_state_and_warning(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        pane = screen.query_one("#seeds-pane")
+        assert pane.border_title == "seeds.csv · 0"
+        assert screen.query_one("ChatPanel").border_title == "chat · brief"
+        empty = screen.query_one("#empty")
+        assert empty.display
+        assert "No seeds yet. Describe what to find in the chat" in str(empty.render())
+        assert not screen.query_one("#seeds").display
+        # two equal columns
+        assert screen.query_one("ChatPanel").size.width == pane.size.width
+
+        await pilot.press("f2")
+        await pilot.pause()
+        status = screen.query_one("#status")
+        assert str(status.render()) == "Add at least one seed first."
+        assert status.has_class("warn")
+
+        screen.add_seeds(["A", "B"])
+        await pilot.pause()
+        assert pane.border_title == "seeds.csv · 2"
+        assert not empty.display and screen.query_one("#seeds").display
+        screen.query_one("#seeds", DataTable).focus()
+        await pilot.pause()
+        assert pane.has_pseudo_class("focus-within")  # focus colours the panel border
