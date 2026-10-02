@@ -203,3 +203,17 @@ def test_first_incomplete_stage_stage8_ignores_below_threshold():
     )
     files.write_text("threshold.json", json.dumps({"threshold": 0.7}))
     assert files.first_incomplete_stage() == 9
+
+
+def test_first_incomplete_stage_unlabelled_gold_rows_do_not_count():
+    files.write_text("seeds.csv", "s")
+    files.write_state(State(seeds_approved=True, taxonomy_approved=True))
+    files.write_jsonl(
+        "candidates.jsonl", [{"id": "1", "text": "t", "max_similarity": 0.62}]
+    )
+    files.write_taxonomy(SINGLE)
+    files.write_text("prompt.md", "p")
+    files.write_gold(
+        [GoldRow(id=str(i), text="t", labels=[], split="dev") for i in range(50)]
+    )
+    assert files.first_incomplete_stage() == 4

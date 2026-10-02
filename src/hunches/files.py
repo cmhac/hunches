@@ -178,9 +178,10 @@ def first_incomplete_stage() -> int:
     1 seeds.csv missing or `seeds_approved` false
     2 candidates.jsonl missing or empty
     3 taxonomy.yaml or prompt.md missing, or `taxonomy_approved` false
-    4 fewer than SAMPLE_SIZE gold rows with split "dev"
+    4 fewer than SAMPLE_SIZE labelled gold rows with split "dev" (sampled rows are persisted
+      with empty labels, so unlabelled rows do not count)
     5 `dev_done` false (tuning not accepted)
-    6 fewer than SAMPLE_SIZE gold rows with split "test", or `test_done` false
+    6 fewer than SAMPLE_SIZE labelled gold rows with split "test", or `test_done` false
     7 `threshold_chosen` false or threshold.json missing
     8 some candidate with max_similarity >= threshold.json["threshold"] has no row in results.jsonl
     9 otherwise (browse)
@@ -197,11 +198,14 @@ def first_incomplete_stage() -> int:
         or not state.taxonomy_approved
     ):
         return 3
-    if sum(r["split"] == "dev" for r in gold) < SAMPLE_SIZE:
+    if sum(r["split"] == "dev" and bool(r["labels"]) for r in gold) < SAMPLE_SIZE:
         return 4
     if not state.dev_done:
         return 5
-    if sum(r["split"] == "test" for r in gold) < SAMPLE_SIZE or not state.test_done:
+    if (
+        sum(r["split"] == "test" and bool(r["labels"]) for r in gold) < SAMPLE_SIZE
+        or not state.test_done
+    ):
         return 6
     threshold_text = read_text("threshold.json")
     if threshold_text is None or not state.threshold_chosen:
