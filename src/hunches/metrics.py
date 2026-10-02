@@ -24,6 +24,12 @@ class Metrics:
     disagreements: list[int]  # indices where predicted != gold
     n: int
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Metrics":
+        """Inverse of dataclasses.asdict, for results stored as JSON."""
+        per_label = {k: LabelMetrics(**v) for k, v in d["per_label"].items()}
+        return cls(**{**d, "per_label": per_label})
+
 
 def _ratio(num: float, den: float) -> float:
     # every ratio with a zero denominator is defined as 0

@@ -4,12 +4,15 @@ from typing import ClassVar
 from pydantic_ai import Agent
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Label, Static, TextArea
+from textual.widgets import Button, DataTable, Footer, Static, TextArea
 
 from hunches import cost, files, metrics
-from hunches.app import StatusHeader, confirm_approve
+from hunches.app import StatusHeader, confirm_approve, panel
 from hunches.classifier import classify_many
+from hunches.screens import report
+from hunches.theme import editor
 
 MAX_SHOWN = 20  # disagreements the smart model sees
 METRICS = ["accuracy", "macro_f1", "micro_f1", "exact_match"]
@@ -30,14 +33,37 @@ def diff(old: str, new: str) -> str:
     )
 
 
+def diff_markup(old: str, new: str) -> str:
+    """The unified diff with + lines green, - lines red, @@ sand and the file headers muted."""
+    out = []
+    for line in diff(old, new).splitlines():
+        text = escape(line)
+        if line.startswith(("---", "+++")):
+            out.append(f"[$text-muted]{text}[/]")
+        elif line.startswith("+"):
+            out.append(f"[$success on #1C3322]{text}[/]")
+        elif line.startswith("-"):
+            out.append(f"[$error on #3E1826]{text}[/]")
+        elif line.startswith("@@"):
+            out.append(f"[$secondary]{text}[/]")
+        else:
+            out.append(text)
+    return "\n".join(out)
+
+
 class ProposalScreen(ModalScreen[str | None]):
     """Shows a diff against the current prompt; the proposal is editable. Dismisses with the text or None."""
 
+    AUTO_FOCUS = "#accept"
     DEFAULT_CSS = """
     ProposalScreen { align: center middle; }
-    ProposalScreen Vertical { width: 90%; height: 90%; background: $surface; padding: 1; }
-    ProposalScreen #diff { height: 1fr; overflow-y: auto; }
-    ProposalScreen TextArea { height: 1fr; }
+    ProposalScreen > Vertical {
+        width: 1fr; height: 1fr; margin: 1 2; border: round $primary; background: $surface; padding: 0 1;
+    }
+    ProposalScreen .panel { height: 1fr; }
+    ProposalScreen #diff-panel { overflow-y: auto; }
+    ProposalScreen TextArea { height: 1fr; border: none; padding: 0; }
+    ProposalScreen #buttons { height: auto; align-horizontal: right; }
     """
 
     def __init__(self, current: str, proposed: str) -> None:
@@ -46,16 +72,26 @@ class ProposalScreen(ModalScreen[str | None]):
         self.proposed = proposed
 
     def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label("Proposed prompt change (the proposal is editable)")
-            yield Static(diff(self.current, self.proposed), id="diff", markup=False)
-            yield TextArea(self.proposed, id="proposal")
-            with Horizontal():
-                yield Button("Accept", id="accept", variant="success")
+        with Vertical() as box:
+            box.border_title = "Proposed prompt change"
+            yield Static(
+                "Review the diff, edit the proposal if needed, then accept or reject.",
+                classes="note",
+            )
+            with panel(Vertical(id="diff-panel"), "diff · current → proposed"):
+                yield Static(diff_markup(self.current, self.proposed), id="diff")
+            with panel(Vertical(id="proposal-panel"), "proposal (editable)"):
+                yield editor(
+                    TextArea(self.proposed, language="markdown", id="proposal")
+                )
+            with Horizontal(id="buttons"):
                 yield Button("Reject", id="reject")
+                yield Button("Accept", id="accept", variant="success")
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        self.query_one("#diff", Static).update(diff(self.current, event.text_area.text))
+        self.query_one("#diff", Static).update(
+            diff_markup(self.current, event.text_area.text)
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(
@@ -77,11 +113,13 @@ class TuneScreen(Screen):
     ]
     AUTO_FOCUS = "#dis"
     DEFAULT_CSS = """
-    TuneScreen #metrics { height: auto; }
-    TuneScreen #note { height: auto; color: $warning; }
-    TuneScreen Horizontal { height: 1fr; }
-    TuneScreen DataTable { width: 2fr; }
-    TuneScreen #detail { width: 1fr; padding: 0 1; }
+    TuneScreen #metrics-panel { height: auto; }
+    TuneScreen #metrics-panel DataTable { height: auto; }
+    TuneScreen #summary, TuneScreen #trend, TuneScreen #note { height: auto; }
+    TuneScreen #body { height: 1fr; }
+    TuneScreen #dis-panel { width: 3fr; }
+    TuneScreen #text-panel { width: 2fr; }
+    TuneScreen #dis { height: 1fr; }
     """
 
     def __init__(self) -> None:
@@ -116,21 +154,35 @@ class TuneScreen(Screen):
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         if not self.ready:
-            yield Static("Finish stage 3 (taxonomy and prompt) first.")
+            yield Static(
+                "Finish stage 3 (taxonomy and prompt) first.",
+                id="not-ready",
+                classes="warn",
+            )
             yield Footer()
             return
-        yield Static("", id="metrics", markup=False)
-        with Horizontal():
-            yield DataTable(id="dis", cursor_type="row")
-            yield Static("", id="detail", markup=False)
+        with panel(Vertical(id="metrics-panel"), "dev set"):
+            yield Static("", id="summary")
+            yield DataTable(id="per-label")
+            yield Static("", id="trend", classes="note")
+        with Horizontal(id="body"):
+            with panel(Vertical(id="dis-panel"), "disagreements"):
+                yield DataTable(id="dis", cursor_type="row")
+            with panel(Vertical(id="text-panel"), "text"):
+                yield Static("", id="detail")
         yield Static("", id="note", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
         if not self.ready:
             return
-        self.query_one("#dis", DataTable).add_columns("Text", "Gold", "Predicted")
+        report.disagreement_columns(self.query_one("#dis", DataTable))
+        report.per_label_columns(self.query_one("#per-label", DataTable))
         self.rerun()
+
+    def on_resize(self) -> None:
+        if self.ready:
+            self.show()
 
     def rerun(self) -> None:
         """Classify the dev set with the current prompt; cached items are free."""
@@ -182,36 +234,48 @@ class TuneScreen(Screen):
 
     def show(self) -> None:
         m = self.metrics
-        lines = [
-            f"target: {self.config.target_metric} >= {self.config.target_score:.2f}"
-            + " (m: metric, +/-: score)"
-        ]
+        names = [lab.name for lab in self.taxonomy.labels]
+        target = self.config.target_metric
+        self.query_one(
+            "#metrics-panel"
+        ).border_subtitle = (
+            f"target {target} ≥ {self.config.target_score:.2f} · m metric · +/- score"
+        )
+        self.query_one("#summary", Static).update(
+            report.summary(m, target, self.config.target_score) if m else ""
+        )
+        per_label = self.query_one("#per-label", DataTable)
+        per_label.display = m is not None
         if m:
-            lines.append(
-                f"{self.config.target_metric} = {self.target():.3f}  "
-                f"{'PASS' if self.met() else 'FAIL'}   n={m.n}  "
-                f"exact-match {m.exact_match:.3f}  macro-F1 {m.macro_f1:.3f}  micro-F1 {m.micro_f1:.3f}"
-            )
-            lines += [
-                f"  {name:<20} P {x.precision:.2f}  R {x.recall:.2f}  F1 {x.f1:.2f}  (gold {x.gold_count})"
-                for name, x in m.per_label.items()
-            ]
-        if len(self.history) > 1:
-            lines.append("trend: " + " -> ".join(f"{v:.3f}" for v in self.history))
-        self.query_one("#metrics", Static).update("\n".join(lines))
+            report.fill_per_label(per_label, names, m)
+        self.query_one("#trend", Static).update(
+            "trend " + " → ".join(f"{v:.3f}" for v in self.history)
+            if len(self.history) > 1
+            else ""
+        )
         table = self.query_one("#dis", DataTable)
+        report.fit_text_column(table)
         table.clear()
-        for i in m.disagreements if m else []:
-            predicted = (
-                "failed" if i in self.errors else ", ".join(sorted(self.predicted[i]))
-            )
+        wrong = m.disagreements if m else []
+        self.query_one("#dis-panel").border_title = f"disagreements · {len(wrong)}"
+        for i in wrong:
+            predicted = "failed" if i in self.errors else self.predicted[i]
             table.add_row(
-                self.rows[i].text.replace("\n", " ")[:60],
-                ", ".join(self.rows[i].labels),
-                predicted,
+                report.clipped(self.rows[i].text),
+                report.tags(names, self.rows[i].labels),
+                report.tags(names, predicted),
                 key=str(i),
             )
-        self.query_one("#note", Static).update(self.run_note or self.note)
+        note = self.query_one("#note", Static)
+        text = self.run_note or self.note
+        note.update(text)
+        note.set_classes(
+            "note"
+            if text.startswith(("Running", "Dev run finished"))
+            else "error"
+            if "failed:" in text
+            else "warn"
+        )
         self.show_detail()
 
     def show_detail(self) -> None:
@@ -219,9 +283,9 @@ class TuneScreen(Screen):
         text = ""
         if self.metrics and table.row_count:
             i = int(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)  # ty: ignore[invalid-argument-type]
-            text = self.rows[i].text
+            text = escape(self.rows[i].text)
             if i in self.errors:
-                text += f"\n\nModel failed: {self.errors[i]}"
+                text += f"\n\n[$error]Model failed: {escape(self.errors[i])}[/]"
         self.query_one("#detail", Static).update(text)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
