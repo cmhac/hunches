@@ -3,7 +3,7 @@ import json
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from textual.widgets import DataTable, Input
+from textual.widgets import DataTable, Input, Static
 
 from hunches import files
 from hunches.app import HunchesApp
@@ -95,8 +95,8 @@ async def test_screen_classifies_and_saves_threshold(monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         table = app.screen.query_one("#bands", DataTable)
-        assert table.get_row_at(0)[:3] == ["0.600", "40", "30"]
-        assert table.get_row_at(1)[3] == "-"
+        assert [str(c) for c in table.get_row_at(0)[:3]] == ["0.600", "40", "30"]
+        assert str(table.get_row_at(1)[3]) == "-"
         app.screen.query_one("#cutoff", Input).value = "0.7"
         app.screen.action_save()
         await pilot.pause()
@@ -105,3 +105,71 @@ async def test_screen_classifies_and_saves_threshold(monkeypatch):
     assert len(data["bands"]) == 7
     assert files.read_state().threshold_chosen
     assert files.first_incomplete_stage() == 8
+
+
+async def test_redesigned_panel_notes_and_not_ready(monkeypatch):
+    real = threshold.classify_many
+    monkeypatch.setattr(
+        threshold,
+        "classify_many",
+        lambda texts, prompt, taxonomy, model: real(
+            texts, prompt, taxonomy, FunctionModel(classifier)
+        ),
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, ThresholdScreen)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        panel = screen.query_one("#bands-panel")
+        assert panel.border_title == "off-topic rate by band · test"
+        assert panel.border_subtitle == ""  # not sampling any more
+        table = screen.query_one("#bands", DataTable)
+        assert [str(c.label) for c in table.columns.values()] == [
+            "Band",
+            "Candidates",
+            "Sampled",
+            "Off-topic rate",
+            "Cumulative ≥ lower",
+        ]
+        assert [str(c) for c in table.get_row_at(6)] == [
+            "0.750+",
+            "10",
+            "10",
+            "50% (n=10)",
+            "10",
+        ]
+        note = screen.query_one("#note", Static)
+        assert str(note.render()).startswith("Sampled 40 items in ")
+        assert note.has_class("note")
+        screen.progress = (112, 210)
+        screen.show()
+        assert panel.border_subtitle == "sampling 112/210"
+        assert "Small samples are noisy" in str(screen.query_one("#explain").render())
+
+        screen.query_one("#cutoff", Input).value = "abc"
+        screen.action_save()
+        assert str(note.render()) == "Enter a number or pick a band with Enter."
+        assert note.has_class("warn")
+        screen.note = "Sampling failed: x"
+        screen.show()
+        assert note.has_class("error")
+
+        table.focus()
+        await pilot.press("enter")  # picks the band's lower bound
+        await pilot.pause()
+        assert screen.query_one("#cutoff", Input).value == "0.6"
+
+
+async def test_not_ready_notice():
+    (files.root() / "taxonomy.yaml").unlink()
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(7)
+        await pilot.pause()
+        notice = app.screen.query_one("#not-ready")
+        assert str(notice.render()) == "Finish stage 3 (taxonomy and prompt) first."
+        assert notice.has_class("warn")
