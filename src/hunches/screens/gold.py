@@ -242,6 +242,8 @@ class GoldScreen(Screen):
 
         def done(approved: bool | None) -> None:
             if approved:
-                self.app.goto_stage(self.app.stage + 1)  # ty: ignore[unresolved-attribute]
+                # the test split stays on stage 6, which now shows the evaluation
+                step = 1 if self.split == "dev" else 0
+                self.app.goto_stage(self.app.stage + step)  # ty: ignore[unresolved-attribute]
 
         self.app.push_screen(ConfirmScreen("All items labelled. Continue?"), done)
