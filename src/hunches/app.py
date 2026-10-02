@@ -6,10 +6,12 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import TextPart, UserPromptPart
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Label, RichLog, Select, Static
 
 from hunches import cost, files
+from hunches.theme import HUNCHES
 
 
 class Placeholder(Screen):
@@ -22,31 +24,52 @@ class Placeholder(Screen):
 
 
 class StatusHeader(Static):
-    """Project, stage and total cost. Every stage screen must yield one first in compose()."""
-
-    DEFAULT_CSS = """
-    StatusHeader { dock: top; height: 1; background: $primary; color: $text; padding: 0 1; }
-    """
+    """Project, stage stepper and total cost. Every stage screen must yield one first in compose()."""
 
     def on_mount(self) -> None:
         self.refresh_cost()
         # polling picks up cost.record() calls from anywhere, including worker threads
         self.set_interval(0.25, self.refresh_cost)
 
+    def on_resize(self) -> None:
+        self.refresh_cost()
+
     def refresh_cost(self) -> None:
         stage = getattr(self.app, "stage", 0)
         name = next((n for num, n, _ in STAGES if num == stage), "Setup")
+        project = Path.cwd().name
+        if len(project) > 16:
+            project = project[:15] + "…"
+        steps = [
+            "[$text-disabled]○[/]"
+            if num > stage
+            else "[$primary]◉[/]"
+            if num == stage
+            else "[$text-muted]●[/]"
+            for num, _, _ in STAGES
+        ]
+        stepper = "".join(steps)
+        left = f"[b $primary]hunches[/]  [#EEF1F5]{escape(project)}[/]  {stepper}  "
+        plain = f"hunches  {project}  {'●' * len(STAGES)}  "
+        if stage:
+            left += f"[b $primary]{stage}[/][$text-disabled]/{len(STAGES)}[/] {name}"
+            plain += f"{stage}/{len(STAGES)} {name}"
+        else:
+            left += name
+            plain += name
         dollars, unknown = cost.total()
-        text = f"hunches: {Path.cwd().name} | Stage {stage}/{len(STAGES)}: {name} | "
+        self.set_class(bool(unknown), "-cost-unknown")
         if unknown:
             # never show $0 (or a bare lower bound) for an unknown price
-            unknown_models = [
-                m for m, v in cost.breakdown().items() if v["dollars"] is None
-            ]
-            text += f"cost ? [b reverse] WARNING: cost unknown for {', '.join(unknown_models)} [/]"
+            models = [m for m, v in cost.breakdown().items() if v["dollars"] is None]
+            right_plain = f"cost ? · no price for {', '.join(models)}"
+            right = f"[b reverse $warning] {escape(right_plain)} [/]"
+            right_plain = f" {right_plain} "
         else:
-            text += f"cost ${dollars:.4f}"
-        self.update(text)
+            right_plain = f"cost ${dollars:.4f}"
+            right = f"[$text-muted]cost[/] [b #EEF1F5]${dollars:.4f}[/]"
+        pad = max(2, self.size.width - 2 - len(plain) - len(right_plain))
+        self.update(left + " " * pad + right)
 
 
 class SetupScreen(Screen):
@@ -213,6 +236,7 @@ STAGES = [
 
 class HunchesApp(App):
     TITLE = "hunches"
+    CSS_PATH = "hunches.tcss"
     BINDINGS: ClassVar = [
         ("q", "quit", "Quit"),
         ("n", "goto(1)", "Next stage"),
@@ -223,6 +247,8 @@ class HunchesApp(App):
     stage_shown = False
 
     def on_mount(self) -> None:
+        self.register_theme(HUNCHES)
+        self.theme = "hunches"
         if (files.root() / "config.toml").exists():
             self.goto_stage(files.first_incomplete_stage())
         else:

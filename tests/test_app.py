@@ -71,8 +71,9 @@ async def test_header_shows_unknown_cost_and_updates(tmp_path, monkeypatch):
         cost.record("mystery", RunUsage(input_tokens=1, output_tokens=1), None)
         await pilot.pause(0.6)
         text = header_text(app)
-        assert "cost ?" in text and "unknown for mystery" in text
+        assert "cost ? · no price for mystery" in text
         assert "$" not in text
+        assert app.screen.query_one(StatusHeader).has_class("-cost-unknown")
 
 
 async def test_header_known_cost(tmp_path, monkeypatch):
@@ -121,3 +122,32 @@ async def test_quit(tmp_path, monkeypatch):
         await pilot.press("q")
         await pilot.pause()
     assert app.return_code == 0
+
+
+async def test_header_stepper_and_stage_name(tmp_path, monkeypatch):
+    make_project(tmp_path, monkeypatch, seeds_approved=True)
+    files.write_text(
+        "candidates.jsonl",
+        json.dumps({"id": "1", "text": "t", "max_similarity": 0.7, "best_seed": "s"})
+        + "\n",
+    )
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        text = header_text(app)
+        assert text.startswith("hunches")
+        assert tmp_path.name[:15] + "…" in text
+        assert "●●◉○○○○○○" in text  # stage 3 of 9
+        assert "3/9 Taxonomy and prompt" in text
+        assert text.rstrip().endswith("cost $0.0000")
+
+
+async def test_header_truncates_long_project_name(tmp_path, monkeypatch):
+    long = tmp_path / "a-very-long-project-directory-name"
+    long.mkdir()
+    make_project(long, monkeypatch)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "a-very-long-pro…" in header_text(app)
+        assert "a-very-long-project" not in header_text(app)
