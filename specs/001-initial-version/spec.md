@@ -50,7 +50,7 @@ Search is brute-force cosine similarity in numpy (normalize, matrix multiply).
 All tracked in git. Layout is a starting point; the implementer may add, change or remove files as needed.
 
 ```
-config.toml        backend, paths, embedding_model, smart_model, cheap_model, dev_accuracy_target
+config.toml        backend, paths, embedding_model, smart_model, cheap_model, target_metric, target_score
 state.json         approval flags only (seeds_approved, taxonomy_approved, dev_done, test_done, threshold_chosen)
 brief.md           the user's original description of what to find (kept for transparency)
 chat/<stage>.json  agent message history (ModelMessagesTypeAdapter)
@@ -77,8 +77,8 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
 2. **Search.** Embed seeds, search, write `candidates.jsonl`. Show candidate counts per band.
 3. **Taxonomy and prompt.** The agent starts from `brief.md`, interviews the user (including whether each item should get one label or possibly several), and writes `taxonomy.yaml` and `prompt.md`. Chat history is saved in `chat/`.
 4. **Gold dev set.** Random sample of 50 candidates (without replacement). User labels each in the TUI. Labelling follows the taxonomy `mode` (see Classifier): one label, or any number of labels; `off_topic` is always exclusive. TUI shows a per-label count table updating as the user labels, so the user can see which labels are under-represented (draw more samples if needed). The classifier runs on the sample as it goes.
-5. **Tuning loop.** TUI shows accuracy on the dev set and a browsable list of all disagreements (predicted ≠ gold). A key press asks the smart model to propose a prompt edit; user approves or edits the diff, the dev set re-runs (cached, so cheap), and `prompt.md` is overwritten. Repeat until accuracy ≥ `dev_accuracy_target` (default 90%, user can change).
-6. **Gold test set.** Another 50 random candidates, disjoint from dev. User labels them. Run once and report accuracy on the test set. User can browse disagreements and go back to tuning (any prompt change invalidates the test result, which is shown as stale). User accepts when satisfied.
+5. **Tuning loop.** TUI shows the metrics on the dev set and a browsable list of all disagreements (predicted ≠ gold). A key press asks the smart model to propose a prompt edit; user approves or edits the diff, the dev set re-runs (cached, so cheap), and `prompt.md` is overwritten. Repeat until the target metric ≥ `target_score` (default 0.90, user can change in the TUI).
+6. **Gold test set.** Another 50 random candidates, disjoint from dev. User labels them. Run once and report all metrics on the test set. User can browse disagreements and go back to tuning (any prompt change invalidates the test result, which is shown as stale). User accepts when satisfied.
 7. **Threshold.** Classify ~30 random items from each similarity band. Show the off-topic rate per band. The user picks a cutoff, saved to `threshold.json`. "Off-topic" for this purpose means a predicted label set that is exactly `{off_topic}`.
 8. **Full run.** Candidates ≥ threshold are classified with the cheap model, appended to `results.jsonl` as they complete, resumable. Before starting, show a time estimate (items/sec measured from the earlier sample runs; every sample run records timing) and a cost estimate from sample usage. Show live progress, cost and ETA.
 9. **Browse.** Navigate and search `results.jsonl` in a DataTable with a search box and label filters.
@@ -90,7 +90,8 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
   - `multi`: **multi-label**, any number of labels per item.
   - In both modes `off_topic` is always available and always exclusive.
 - Cheap model through a pydantic-ai `Agent` with structured output: a list of labels drawn from the taxonomy plus `off_topic` (a `Literal` built from `taxonomy.yaml`). Validation: at least one label; if `off_topic` is present it is the only label; in `single` mode exactly one label. Gold labels follow the same rules. Internally every label is a list/set, so there is one code path for all modes.
-- Metrics: **exact-match accuracy** (predicted set equals gold set) is the headline number and what `dev_accuracy_target` applies to; in `single` mode this is plain accuracy. Also show per-label precision and recall. A disagreement is any item where the sets differ.
+- Metrics, always shown together: **exact-match accuracy** (predicted set equals gold set; plain accuracy in `single` mode), per-label precision/recall/F1, and **macro-F1** (unweighted mean of per-label F1, so rare labels count equally) and **micro-F1** (pooled counts). `off_topic` is a label like any other in these numbers. Defined and tested against hand-computed examples.
+- `target_metric` in `config.toml` picks which single number `target_score` applies to: `accuracy` (default in `single` mode), `macro_f1` (default in `multi` mode), `micro_f1`, or `exact_match`. The user can change it in the TUI. A disagreement is any item where the sets differ.
 - Call cache key: `sha256(model + prompt + text)`. Applies to classification and embeddings only, not to the chat agent.
 
 ## Cost and timing
@@ -118,4 +119,3 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
 
 - S3 Vectors `topK` maximum (see above).
 - Exact pydantic-ai names for embedding cost and usage; exact extras name for local Sentence Transformers.
-- Whether exact-match accuracy is too strict in `multi` mode (if it is, per-label F1 is the fallback; ask the user).
