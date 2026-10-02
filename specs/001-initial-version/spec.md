@@ -35,7 +35,7 @@ Two backends, selected by `config.toml`. The tool is read-only against both.
 
 Search is brute-force cosine similarity in numpy (normalize, matrix multiply).
 
-**S3 Vectors** (large corpora): Amazon S3 Vectors via `boto3` `s3vectors` `query_vectors`, cosine distance. Item `id` is the vector key; `text` is in vector metadata. Convert returned distance to similarity. `topK` limits must be checked in the AWS docs; if the per-query cap is lower than the number of hits above the floor, document the cap and fall back to the highest-scoring hits, and show a visible warning in the TUI.
+**S3 Vectors** (large corpora): Amazon S3 Vectors via `boto3` `s3vectors` `query_vectors`, cosine distance. Item `id` is the vector key; `text` is in vector metadata. Convert returned distance to similarity. `topK` is at most 10,000 per `QueryVectors` request (results come 100 per page, followed with `nextToken`; source: [S3 Vectors limitations](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-limitations.html)). If a seed reaches that cap before similarity drops below the floor, the highest-scoring hits are kept and the search screen shows a visible warning. The AWS docs do not define the cosine `distance` value, so `similarity = 1 - distance` is an unverified assumption (see Open items).
 
 **Embedding models.** The query embedding must come from the same model as the index. `meta.json` (local) or `config.toml` (S3) records the model; the tool refuses to search if `config.toml`'s `embedding_model` disagrees. Supported embedders are whatever `pydantic_ai.Embedder` supports; the documented list includes OpenAI `text-embedding-3-*` and local Sentence Transformers models from Hugging Face, which the tool can run locally for query embedding. The tool only embeds seed phrases (tens of short strings), so running a local model on CPU is fine; the first run downloads the model. Embeddings use `embed_query()`.
 
@@ -59,7 +59,7 @@ candidates.jsonl   id, text, max_similarity, best_seed
 taxonomy.yaml      `mode: single|multi`, labels with descriptions; "off_topic" is built in, not listed
 prompt.md          classifier prompt
 gold.jsonl         {id, text, labels: [...], split: "dev"|"test"}
-threshold.json     chosen similarity cutoff + the band sample results
+threshold.json     chosen similarity cutoff (key `threshold`) + the band sample results
 results.jsonl      {id, text, labels: [...], max_similarity}
 cost.json          running total and per-model breakdown
 cache/<sha256>.json  cached API calls
@@ -71,7 +71,7 @@ cache/<sha256>.json  cached API calls
 
 Every stage is a Textual `Screen`. The app header is always visible and shows project name, current stage and **total cost so far**. If any call's cost is `None` (model unknown to `genai-prices`), show a prominent warning in the header and display that cost as "?" — never $0.
 
-Resumability: on start, load `.hunches/` and go to the first incomplete stage. Completion is derived from files plus the flags in `state.json`. Everything a stage produces is written to disk as it is produced.
+Resumability: on start, load `.hunches/` and go to the first incomplete stage. Completion is derived from files plus the flags in `state.json`: stage 4 is complete at 50 or more labelled dev rows in `gold.jsonl`; `dev_done` means tuning was accepted in stage 5; stage 6 is complete at 50 or more labelled test rows plus `test_done`; stage 7 needs `threshold_chosen` and `threshold.json`; stage 8 is complete when every candidate at or above `threshold` has a successful row in `results.jsonl`. Everything a stage produces is written to disk as it is produced.
 
 1. **Brief and seeds.** User describes what they want to find. The smart-model agent asks follow-up questions in a chat panel and proposes seed phrases (statements that would be true of a matching item). User edits `seeds.csv` in a DataTable inside the TUI and approves.
 2. **Search.** Embed seeds, search, write `candidates.jsonl`. Show candidate counts per band.
@@ -81,7 +81,7 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
 6. **Gold test set.** Another 50 random candidates, disjoint from dev. User labels them. Run once and report all metrics on the test set. User can browse disagreements and go back to tuning (any prompt change invalidates the test result, which is shown as stale). User accepts when satisfied.
 7. **Threshold.** Classify ~30 random items from each similarity band. Show the off-topic rate per band. The user picks a cutoff, saved to `threshold.json`. "Off-topic" for this purpose means a predicted label set that is exactly `{off_topic}`.
 8. **Full run.** Candidates ≥ threshold are classified with the cheap model, appended to `results.jsonl` as they complete, resumable. Before starting, show a time estimate (items/sec measured from the earlier sample runs; every sample run records timing) and a cost estimate from sample usage. Show live progress, cost and ETA.
-9. **Browse.** Navigate and search `results.jsonl` in a DataTable with a search box and label filters.
+9. **Browse.** Navigate and search `results.jsonl` in a DataTable with a search box and label filters. At most 1000 matching rows are displayed (the count line says how many matched); refine the search to see others.
 
 ## Classifier
 
@@ -90,13 +90,13 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
   - `multi`: **multi-label**, any number of labels per item.
   - In both modes `off_topic` is always available and always exclusive.
 - Cheap model through a pydantic-ai `Agent` with structured output: a list of labels drawn from the taxonomy plus `off_topic` (a `Literal` built from `taxonomy.yaml`). Validation: at least one label; if `off_topic` is present it is the only label; in `single` mode exactly one label. Gold labels follow the same rules. Internally every label is a list/set, so there is one code path for all modes.
-- Metrics, always shown together: **exact-match accuracy** (predicted set equals gold set; plain accuracy in `single` mode), per-label precision/recall/F1, and **macro-F1** (unweighted mean of per-label F1, so rare labels count equally) and **micro-F1** (pooled counts). `off_topic` is a label like any other in these numbers. Defined and tested against hand-computed examples.
-- `target_metric` in `config.toml` picks which single number `target_score` applies to: `accuracy` (default in `single` mode), `macro_f1` (default in `multi` mode), `micro_f1`, or `exact_match`. The user can change it in the TUI. A disagreement is any item where the sets differ.
+- Metrics, always shown together: **exact-match accuracy** (predicted set equals gold set; plain accuracy in `single` mode), per-label precision/recall/F1, and **macro-F1** (unweighted mean of per-label F1 over the labels present in gold or predictions, so rare labels count equally and a label absent from both is not a zero) and **micro-F1** (pooled counts). `off_topic` is a label like any other in these numbers. Defined and tested against hand-computed examples.
+- `target_metric` in `config.toml` picks which single number `target_score` applies to: `accuracy` (default in `single` mode), `macro_f1` (default in `multi` mode), `micro_f1`, or `exact_match`. The default is resolved when the taxonomy is approved (stage 3), from `mode`; the user can change it in the TUI. A disagreement is any item where the sets differ.
 - Call cache key: `sha256(model + prompt + text)`. Applies to classification and embeddings only, not to the chat agent.
 
 ## Cost and timing
 
-- Sum `result.usage()` of every agent run and embedding call into `cost.json`; dollars come from `genai-prices` (via the pydantic-ai cost helpers). Cost survives resume.
+- Sum `result.usage` (a property in the current pydantic-ai, not a call) of every agent run and embedding call into `cost.json`; dollars come from `genai-prices` (via the pydantic-ai cost helpers). Cost survives resume.
 - Cached calls cost nothing and do not count toward throughput measurements.
 
 ## Testing
@@ -117,5 +117,11 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
 
 ## Open items for the implementer to flag, not guess
 
-- S3 Vectors `topK` maximum (see above).
-- Exact pydantic-ai names for embedding cost and usage; exact extras name for local Sentence Transformers.
+Resolved while implementing:
+
+- S3 Vectors `topK` maximum: 10,000 per `QueryVectors` request, 100 results per page ([limitations](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-limitations.html)). The code follows `nextToken` and warns when the cap is hit.
+- pydantic-ai 2.53 names: `EmbeddingResult.usage` is a field (`RequestUsage`); `EmbeddingResult.cost()` returns a `PriceCalculation` whose `.total_price` raises `LookupError` when the model is unpriced (we record that as unknown, shown as `?`); `AgentRunResult.usage` is a property. Extras: `anthropic`, `openai`, `sentence-transformers` (the last needs Python < 3.14; our optional extra `local` pulls it in).
+
+Still open:
+
+- The S3 Vectors cosine `distance` definition is not stated in the AWS docs, so `similarity = 1 - distance` is unverified. Check it against a real index (an item's own vector should return distance 0) before trusting S3 thresholds.
