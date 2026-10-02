@@ -275,3 +275,19 @@ async def test_chat_panel_error_line(tmp_path, monkeypatch):
         await pilot.press("h", "enter")
         await pilot.pause(0.3)
         assert log_lines(panel)[-1] == "Error: no key"
+
+
+async def test_header_keeps_cost_warning_visible_at_80_columns(tmp_path, monkeypatch):
+    make_project(tmp_path, monkeypatch)
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        cost.record(
+            "a-long-model-name", RunUsage(input_tokens=1, output_tokens=1), None
+        )
+        await pilot.pause(0.6)
+        text = header_text(app)
+        assert len(text) <= 80
+        assert (
+            "cost ? · no price for" in text
+        )  # the warning survives, the models list may be cut

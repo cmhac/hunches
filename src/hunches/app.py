@@ -50,36 +50,50 @@ class StatusHeader(Static):
         project = Path.cwd().name
         if len(project) > 16:
             project = project[:15] + "…"
-        steps = [
+        stepper = "".join(
             "[$text-disabled]○[/]"
             if num > stage
             else "[$primary]◉[/]"
             if num == stage
             else "[$text-muted]●[/]"
             for num, _, _ in STAGES
-        ]
-        stepper = "".join(steps)
-        left = f"[b $primary]hunches[/]  [#EEF1F5]{escape(project)}[/]  {stepper}  "
-        plain = f"hunches  {project}  {'●' * len(STAGES)}  "
-        if stage:
-            left += f"[b $primary]{stage}[/][$text-disabled]/{len(STAGES)}[/] {name}"
-            plain += f"{stage}/{len(STAGES)} {name}"
-        else:
-            left += name
-            plain += name
+        )
+
+        def left(with_name: bool) -> tuple[str, int]:
+            """Markup and plain length of everything left of the cost."""
+            text = f"[b $primary]hunches[/]  [#EEF1F5]{escape(project)}[/]  {stepper}"
+            width = len(f"hunches  {project}  ") + len(STAGES)
+            if stage:
+                text += f"  [b $primary]{stage}[/][$text-disabled]/{len(STAGES)}[/]"
+                width += len(f"  {stage}/{len(STAGES)}")
+                if with_name:
+                    text += f" {name}"
+                    width += 1 + len(name)
+            elif with_name:
+                text += f"  {name}"
+                width += 2 + len(name)
+            return text, width
+
         dollars, unknown = cost.total()
         self.set_class(bool(unknown), "-cost-unknown")
         if unknown:
             # never show $0 (or a bare lower bound) for an unknown price
             models = [m for m, v in cost.breakdown().items() if v["dollars"] is None]
-            right_plain = f"cost ? · no price for {', '.join(models)}"
-            right = f"[b reverse $warning] {escape(right_plain)} [/]"
-            right_plain = f" {right_plain} "
+            right_plain = f" cost ? · no price for {', '.join(models)} "
         else:
             right_plain = f"cost ${dollars:.4f}"
+        room = self.size.width - 2  # padding; 0 before the first layout
+        markup, width = left(True)
+        if room and width + 2 + len(right_plain) > room:
+            markup, width = left(False)  # drop the stage name first
+        if unknown and room and width + 2 + len(right_plain) > room:
+            right_plain = right_plain[: max(24, room - width - 2) - 2] + "… "
+        if unknown:
+            right = f"[b reverse $warning]{escape(right_plain)}[/]"
+        else:
             right = f"[$text-muted]cost[/] [b #EEF1F5]${dollars:.4f}[/]"
-        pad = max(2, self.size.width - 2 - len(plain) - len(right_plain))
-        self.update(left + " " * pad + right)
+        pad = max(2, room - width - len(right_plain))
+        self.update(markup + " " * pad + right)
 
 
 class SetupScreen(Screen):
@@ -92,6 +106,7 @@ class SetupScreen(Screen):
     SetupScreen .row Input, SetupScreen .row Select { width: 1fr; }
     SetupScreen .gap { height: 1; }
     SetupScreen #actions { height: 1; margin-top: 1; }
+    SetupScreen #save { width: 10; }
     SetupScreen #error { margin-left: 2; }
     """
 

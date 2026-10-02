@@ -87,7 +87,7 @@ class FinalScreen(Screen):
             self.action_rerun()
 
     def on_resize(self) -> None:
-        self.show()
+        self.call_after_refresh(self.show)  # needs the laid-out table width
 
     def stale(self) -> bool:
         return self.result is not None and self.result["prompt_hash"] != prompt_hash()

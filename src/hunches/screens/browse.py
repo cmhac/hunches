@@ -62,7 +62,9 @@ class BrowseScreen(Screen):
         table.add_column("ID", width=8)
         table.add_column("Labels", key="labels", width=30)
         table.add_column(Text("Sim", justify="right"), width=7)
-        table.add_column("Text", key="text")
+        table.add_column(
+            "Text", key="text", width=20
+        )  # fixed; refresh_table resizes it
         self.on_resize()
 
     def on_resize(self) -> None:
@@ -70,7 +72,9 @@ class BrowseScreen(Screen):
         self.set_class(narrow, "-narrow")
         table = self.query_one("#table", DataTable)
         table.columns[ColumnKey("labels")].width = 16 if narrow else 30
-        self.refresh_table()
+        self.call_after_refresh(
+            self.refresh_table
+        )  # the Text column needs the laid-out width
 
     def refresh_table(self) -> None:
         needle = self.query_one("#search", Input).value.strip().lower()
@@ -87,7 +91,7 @@ class BrowseScreen(Screen):
         table.clear()
         # DataTable has no flex column: Text takes what the others leave (+2 padding per column)
         table.columns[ColumnKey("text")].width = max(
-            10,
+            4,
             table.size.width
             - 8
             - table.columns[ColumnKey("labels")].width

@@ -41,7 +41,15 @@ class SearchScreen(Screen):
             yield Static("", id="seeds")
         yield Footer()
 
+    def tell(self, id_: str, text: str) -> None:
+        """Set one of the message lines; an empty one takes no row."""
+        label = self.query_one(id_, Label)
+        label.update(text)
+        label.display = bool(text)
+
     def on_mount(self) -> None:
+        for id_ in ("#done", "#warning", "#error"):
+            self.query_one(id_).display = False
         table = self.query_one("#bands", DataTable)
         table.add_column("Band", width=13)
         table.add_column(Text("Candidates", justify="right"))
@@ -58,7 +66,7 @@ class SearchScreen(Screen):
     def action_run(self) -> None:
         self.query_one("#run", Button).disabled = True
         for id_ in ("#error", "#warning", "#done"):
-            self.query_one(id_, Label).update("")
+            self.tell(id_, "")
         status = self.query_one("#status", Label)
         status.update("Searching...")
         status.set_classes("note")
@@ -76,19 +84,21 @@ class SearchScreen(Screen):
                     "the corpus was embedded with."
                 )
             status.update("")
-            self.query_one("#error", Label).update(message)
+            self.tell("#error", message)
         else:
             rows = files.read_jsonl("candidates.jsonl")
             status.update("")
-            self.query_one("#done", Label).update(
+            self.tell(
+                "#done",
                 f"Done. {len(rows):,} candidates written to candidates.jsonl. Re-running "
                 "overwrites it; gold labels refer to ids and stay valid, but refresh "
-                "sample sets if the candidate set changed a lot."
+                "sample sets if the candidate set changed a lot.",
             )
             if capped:
-                self.query_one("#warning", Label).update(
+                self.tell(
+                    "#warning",
                     f"WARNING: S3 returned its topK cap of {search.S3_TOP_K:,} hits for "
-                    "at least one seed; only the highest-scoring hits are kept."
+                    "at least one seed; only the highest-scoring hits are kept.",
                 )
             self.show(rows)
         self.query_one("#run", Button).disabled = False

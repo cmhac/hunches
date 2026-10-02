@@ -196,3 +196,13 @@ async def test_empty_states():
         assert str(screen.query_one("#empty", Static).render()) == (
             "results.jsonl is empty. Run stage 8 first."
         )
+
+
+@pytest.mark.parametrize("width", [80, 120])
+async def test_table_columns_fit_without_horizontal_scroll(width):
+    app = HunchesApp()
+    async with app.run_test(size=(width, 30)) as pilot:
+        screen = await open_browse(pilot, app)
+        await pilot.pause()
+        table = screen.query_one("#table", DataTable)
+        assert table.virtual_size.width <= table.size.width

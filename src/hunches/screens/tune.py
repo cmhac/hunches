@@ -182,7 +182,7 @@ class TuneScreen(Screen):
 
     def on_resize(self) -> None:
         if self.ready:
-            self.show()
+            self.call_after_refresh(self.show)  # needs the laid-out table width
 
     def rerun(self) -> None:
         """Classify the dev set with the current prompt; cached items are free."""

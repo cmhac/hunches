@@ -119,6 +119,8 @@ async def test_panels_notice_classes_and_empty_state():
     app = HunchesApp()
     async with app.run_test(size=(80, 24)) as pilot:
         screen = await open_search(pilot, app)
+        for id_ in ("#done", "#warning", "#error"):
+            assert not screen.query_one(id_).display  # empty messages take no row
         assert screen.query_one("#bands-panel").border_title == (
             "candidates.jsonl · by similarity band"
         )
@@ -140,7 +142,7 @@ async def test_panels_notice_classes_and_empty_state():
         assert not screen.query_one("#run", Button).disabled
         done = screen.query_one("#done")
         assert str(done.render()).startswith("Done. 4 candidates written")
-        assert done.has_class("ok")
+        assert done.has_class("ok") and done.display
         assert not str(screen.query_one("#status").render())
 
 

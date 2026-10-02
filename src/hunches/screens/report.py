@@ -56,7 +56,9 @@ def tags(names: list[str], labels: list[str] | set[str] | str) -> Text:
 
 
 def disagreement_columns(table: DataTable) -> None:
-    table.add_column("Text", key="text")
+    table.add_column(
+        "Text", key="text", width=20
+    )  # a fixed width; fit_text_column resizes it
     table.add_column("Gold", width=15)
     table.add_column("Predicted", width=15)
 
@@ -64,7 +66,7 @@ def disagreement_columns(table: DataTable) -> None:
 def fit_text_column(table: DataTable) -> None:
     """DataTable has no flex column: give Text whatever the fixed columns leave."""
     table.columns[ColumnKey("text")].width = max(
-        10, table.size.width - 2 * 3 - 15 - 15 - 2
+        4, table.size.width - 2 * 3 - 15 - 15 - 2
     )
 
 

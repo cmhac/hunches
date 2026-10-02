@@ -267,3 +267,33 @@ async def test_proposal_modal_layout_and_diff_lines():
         assert app.focused is not None and app.focused.id == "accept"
         diff = str(modal.query_one("#diff", Static).render())
         assert "-two" in diff and "+three" in diff and "@@" in diff
+
+
+async def test_disagreement_columns_fit_without_horizontal_scroll():
+    files.write_gold(
+        [
+            files.GoldRow(
+                id=str(i),
+                text=f"item {i} " + "long text " * 20,
+                labels=["b" if i % 2 else "a"],
+                split="dev",
+            )
+            for i in range(8)
+        ]
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, TuneScreen)
+        screen.model = FunctionModel(classifier)  # ty: ignore[invalid-assignment]
+        screen.rerun()
+        await settle(app, pilot)
+        await pilot.pause()
+        dis = screen.query_one("#dis", DataTable)
+        assert dis.row_count == 4
+        assert (
+            dis.virtual_size.width <= dis.size.width
+        )  # Gold and Predicted are visible

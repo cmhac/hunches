@@ -42,9 +42,20 @@ All of ruff, ty and pytest must pass before every commit. If these commands don'
 ## Layout (target)
 
 - `src/hunches/` — one module per concern (`files.py`, `cost.py`, `search.py`, `candidates.py`, `metrics.py`, `classifier.py`, `app.py`), screens in `src/hunches/screens/`
+- `src/hunches/theme.py` (colours, `label_tag`/`label_text`, the TextArea theme) and `src/hunches/hunches.tcss` (shared look); `screens/report.py` renders the metrics and disagreement tables shared by stages 5 and 6
 - `tests/` — mirrors the modules; one Pilot smoke test per screen
 - `examples/` — tiny sample project
 - `specs/` — specs and task files
+
+## TUI look
+
+Visual design comes from a design handoff (dark theme, panels, stage stepper); `theme.py` and `hunches.tcss` implement it. Rules to keep:
+
+- Every screen must work at 80×24; bigger terminals only grow the `1fr` regions.
+- One focus colour: only the focused panel gets the primary border (`.panel`, or `.-focused` for a region that has no focusable widget). App CSS beats `DEFAULT_CSS`, so shared look goes in `hunches.tcss` and per-screen layout in `DEFAULT_CSS`.
+- Never colour alone: pair it with a word or glyph (PASS, FAIL, STALE, DIFFERS, ■ label).
+- Labels render as `label_tag(...)` in Static markup and `label_text(...)` in DataTable cells (DataTable strings use Rich markup, Static uses Textual markup). Cost is `$0.0000`, unknown is `cost ?`.
+- DataTable has no flex column: give the Text column a fixed width and resize it after layout (`report.fit_text_column`).
 
 ## Testing notes
 
