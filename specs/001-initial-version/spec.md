@@ -56,7 +56,7 @@ brief.md           the user's original description of what to find (kept for tra
 chat/<stage>.json  agent message history (ModelMessagesTypeAdapter)
 seeds.csv          seed phrases (reviewed by the user)
 candidates.jsonl   id, text, max_similarity, best_seed
-taxonomy.yaml      labels with descriptions; "off_topic" is built in, not listed
+taxonomy.yaml      `mode: single|multi`, labels with descriptions; "off_topic" is built in, not listed
 prompt.md          classifier prompt
 gold.jsonl         {id, text, labels: [...], split: "dev"|"test"}
 threshold.json     chosen similarity cutoff + the band sample results
@@ -75,8 +75,8 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
 
 1. **Brief and seeds.** User describes what they want to find. The smart-model agent asks follow-up questions in a chat panel and proposes seed phrases (statements that would be true of a matching item). User edits `seeds.csv` in a DataTable inside the TUI and approves.
 2. **Search.** Embed seeds, search, write `candidates.jsonl`. Show candidate counts per band.
-3. **Taxonomy and prompt.** The agent starts from `brief.md`, interviews the user, and writes `taxonomy.yaml` and `prompt.md`. Chat history is saved in `chat/`.
-4. **Gold dev set.** Random sample of 50 candidates (without replacement). User labels each in the TUI. This is multi-label: any number of taxonomy labels, or `off_topic` alone. TUI shows a per-label count table updating as the user labels, so the user can see which labels are under-represented (draw more samples if needed). The classifier runs on the sample as it goes.
+3. **Taxonomy and prompt.** The agent starts from `brief.md`, interviews the user (including whether each item should get one label or possibly several), and writes `taxonomy.yaml` and `prompt.md`. Chat history is saved in `chat/`.
+4. **Gold dev set.** Random sample of 50 candidates (without replacement). User labels each in the TUI. Labelling follows the taxonomy `mode` (see Classifier): one label, or any number of labels; `off_topic` is always exclusive. TUI shows a per-label count table updating as the user labels, so the user can see which labels are under-represented (draw more samples if needed). The classifier runs on the sample as it goes.
 5. **Tuning loop.** TUI shows accuracy on the dev set and a browsable list of all disagreements (predicted ≠ gold). A key press asks the smart model to propose a prompt edit; user approves or edits the diff, the dev set re-runs (cached, so cheap), and `prompt.md` is overwritten. Repeat until accuracy ≥ `dev_accuracy_target` (default 90%, user can change).
 6. **Gold test set.** Another 50 random candidates, disjoint from dev. User labels them. Run once and report accuracy on the test set. User can browse disagreements and go back to tuning (any prompt change invalidates the test result, which is shown as stale). User accepts when satisfied.
 7. **Threshold.** Classify ~30 random items from each similarity band. Show the off-topic rate per band. The user picks a cutoff, saved to `threshold.json`. "Off-topic" for this purpose means a predicted label set that is exactly `{off_topic}`.
@@ -85,8 +85,12 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
 
 ## Classifier
 
-- Cheap model through a pydantic-ai `Agent` with structured output: a list of labels drawn from the taxonomy plus `off_topic` (a `Literal` built from `taxonomy.yaml`). Rule enforced in validation: if `off_topic` is present it is the only label; at least one label is required.
-- Metrics: **exact-match accuracy** (predicted set equals gold set) is the headline number and what `dev_accuracy_target` applies to. Also show per-label precision and recall. A disagreement is any item where the sets differ.
+- The user chooses the classification type per project; it is a single field `mode` in `taxonomy.yaml`:
+  - `single`: exactly one label per item. With one user label this is **binary** (that label vs `off_topic`); with several it is **multi-class**. Binary is not a separate mode.
+  - `multi`: **multi-label**, any number of labels per item.
+  - In both modes `off_topic` is always available and always exclusive.
+- Cheap model through a pydantic-ai `Agent` with structured output: a list of labels drawn from the taxonomy plus `off_topic` (a `Literal` built from `taxonomy.yaml`). Validation: at least one label; if `off_topic` is present it is the only label; in `single` mode exactly one label. Gold labels follow the same rules. Internally every label is a list/set, so there is one code path for all modes.
+- Metrics: **exact-match accuracy** (predicted set equals gold set) is the headline number and what `dev_accuracy_target` applies to; in `single` mode this is plain accuracy. Also show per-label precision and recall. A disagreement is any item where the sets differ.
 - Call cache key: `sha256(model + prompt + text)`. Applies to classification and embeddings only, not to the chat agent.
 
 ## Cost and timing
@@ -114,4 +118,4 @@ Resumability: on start, load `.hunches/` and go to the first incomplete stage. C
 
 - S3 Vectors `topK` maximum (see above).
 - Exact pydantic-ai names for embedding cost and usage; exact extras name for local Sentence Transformers.
-- Whether exact-match accuracy is too strict for multi-label (if it is, per-label F1 is the fallback; ask the user).
+- Whether exact-match accuracy is too strict in `multi` mode (if it is, per-label F1 is the fallback; ask the user).
