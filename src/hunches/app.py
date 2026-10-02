@@ -188,6 +188,7 @@ class ChatPanel(Vertical):
 
 # Stage screens import ChatPanel/confirm_approve from this module, so they are imported here.
 from hunches.screens.brief import BriefScreen
+from hunches.screens.browse import BrowseScreen
 from hunches.screens.final import test_stage
 from hunches.screens.gold import GoldScreen
 from hunches.screens.run import RunScreen
@@ -206,7 +207,7 @@ STAGES = [
     (6, "Gold test set", test_stage),
     (7, "Threshold", ThresholdScreen),
     (8, "Full run", RunScreen),
-    (9, "Browse", Placeholder),
+    (9, "Browse", BrowseScreen),
 ]
 
 
