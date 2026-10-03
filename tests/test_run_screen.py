@@ -14,6 +14,8 @@ from hunches.classifier import Prediction
 from hunches.screens import run
 from hunches.screens.run import RunScreen
 
+pytestmark = pytest.mark.usefixtures("system_ready")
+
 PROMPT = "Classify."
 
 

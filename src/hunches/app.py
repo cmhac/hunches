@@ -13,7 +13,7 @@ from textual.markup import escape
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Label, RichLog, Static
 
-from hunches import cost, files, system
+from hunches import cost, files, keys, system
 from hunches.theme import HUNCHES
 
 
@@ -230,7 +230,7 @@ from hunches.screens.project_settings import ProjectSettingsScreen
 from hunches.screens.projects import ProjectsScreen
 from hunches.screens.run import RunScreen
 from hunches.screens.search import SearchScreen
-from hunches.screens.system import SystemSettingsScreen
+from hunches.screens.system import RecommendationModal, SystemSettingsScreen
 from hunches.screens.taxonomy import TaxonomyScreen
 from hunches.screens.threshold import ThresholdScreen
 from hunches.screens.tune import TuneScreen
@@ -256,7 +256,9 @@ class HunchesApp(App):
         ("q", "quit", "Quit"),
         ("n", "goto(1)", "Next stage"),
         ("p", "goto(-1)", "Previous stage"),
-        ("f3", "settings", "Settings"),
+        ("f3", "settings", "Project settings"),
+        ("f4", "projects", "Projects"),
+        ("f5", "system_settings", "System settings"),
     ]
 
     stage = 0  # 1-9 once running
@@ -265,16 +267,22 @@ class HunchesApp(App):
     def on_mount(self) -> None:
         self.register_theme(HUNCHES)
         self.theme = "hunches"
-        if (files.root() / "config.toml").exists():
-            self.goto_stage(files.first_incomplete_stage())
-        elif (
-            system.read_system() is None
-        ):  # first run; task 09 completes the startup flow
-            self.push_screen(
-                SystemSettingsScreen(), lambda _: self.push_screen(ProjectsScreen())
-            )
+        current = system.read_system()
+        if current is None:  # first run
+            self.push_screen(SystemSettingsScreen(), lambda _: self.start())
+        elif system.recommended_changed(current):
+            self.push_screen(RecommendationModal(current), lambda _: self.start())
         else:
-            self.push_screen(ProjectsScreen())
+            self.start()
+
+    def start(self) -> None:
+        """Open the project in the current directory, or show Projects."""
+        if (files.root() / "config.toml").exists():
+            system.add_project(Path.cwd())
+            self.open_project(Path.cwd())
+            if self.stage:
+                return
+        self.push_screen(ProjectsScreen())
 
     def goto_stage(self, number: int) -> None:
         number = max(1, min(len(STAGES), number))
@@ -322,6 +330,28 @@ class HunchesApp(App):
         ):
             self.push_screen(ProjectSettingsScreen())
 
+    def action_projects(self) -> None:
+        """Not on a modal, over itself, or before first-run setup has written system.json."""
+        if (
+            not isinstance(self.screen, (ModalScreen, ProjectsScreen))
+            and system.read_system()
+        ):
+            self.push_screen(ProjectsScreen())
+
+    def action_system_settings(self) -> None:
+        if (
+            not isinstance(self.screen, (ModalScreen, SystemSettingsScreen))
+            and system.read_system()
+        ):
+            self.push_screen(SystemSettingsScreen())
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if (
+            action == "goto"
+        ):  # n/p mean nothing outside a project (Projects uses n for New)
+            return self.stage > 0 and not isinstance(self.screen, ProjectsScreen)
+        return True
+
     def action_goto(self, step: int) -> None:
         if self.stage and not isinstance(self.screen, ModalScreen):
             self.goto_stage(self.stage + step)
@@ -329,4 +359,5 @@ class HunchesApp(App):
 
 def main() -> None:
     load_dotenv()
+    keys.load_into_env()
     HunchesApp().run()

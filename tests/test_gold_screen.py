@@ -10,6 +10,8 @@ from hunches.app import HunchesApp
 from hunches.classifier import Prediction
 from hunches.screens.gold import GoldScreen, draw
 
+pytestmark = pytest.mark.usefixtures("system_ready")
+
 
 def project(mode="single", n=60, gold=()):
     files.write_config(

@@ -6,7 +6,7 @@
 
 ## Current state
 
-001 (stages 1-9) is implemented. 002 (system setup, projects, onboarding) is specified and being implemented task by task.
+001 (stages 1-9) and 002 (system setup, projects, onboarding; tasks 01-09) are implemented.
 
 - Source of truth for behaviour: `specs/001-initial-version/spec.md`, then `specs/002-onboarding-setup/spec.md` (which lists its explicit changes to 001)
 - Implementation plans: `specs/<spec>/tasks/README.md` (dependency order, human-only actions) and one file per task. 001: `01-…` to `18-…`; 002: `01-…` to `09-…`
@@ -42,6 +42,9 @@ All of ruff, ty and pytest must pass before every commit. If these commands don'
 ## Layout (target)
 
 - `src/hunches/` — one module per concern (`files.py`, `cost.py`, `search.py`, `candidates.py`, `metrics.py`, `classifier.py`, `app.py`), screens in `src/hunches/screens/`
+- System scope (per user, outside git): `system.py` (`system.json`, project/store lists, recommended models), `keys.py` (API keys: env > keyring), `models.py` (model list and prices for the pickers). `$HUNCHES_HOME` overrides the system directory
+- Screens added by 002: `screens/system.py` (system settings, recommendation modal), `screens/projects.py`, `screens/new_project.py`, `screens/project_settings.py`, `screens/paths.py` (`PathInput`, `PathPicker`), `screens/model_picker.py`
+- `HunchesApp.on_mount` runs the startup flow; always-on keys: `f3` project settings, `f4` Projects, `f5` System settings
 - `src/hunches/theme.py` (colours, `label_tag`/`label_text`, the TextArea theme) and `src/hunches/hunches.tcss` (shared look); `screens/report.py` renders the metrics and disagreement tables shared by stages 5 and 6
 - `tests/` — mirrors the modules; one Pilot smoke test per screen
 - `examples/` — tiny sample project

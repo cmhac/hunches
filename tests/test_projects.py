@@ -387,3 +387,12 @@ async def test_esc_returns_to_the_open_project_only(tmp_path, monkeypatch):
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, ProjectsScreen) and app.stage == 2
+
+
+async def test_footer_has_no_stage_keys_without_a_project(tmp_path):
+    register()
+    app = Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        keys = {k: b.binding.description for k, b in app.screen.active_bindings.items()}
+        assert keys["n"] == "New" and "p" not in keys

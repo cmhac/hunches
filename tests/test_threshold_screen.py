@@ -10,6 +10,8 @@ from hunches.app import HunchesApp
 from hunches.screens import threshold
 from hunches.screens.threshold import ThresholdScreen
 
+pytestmark = pytest.mark.usefixtures("system_ready")
+
 
 def classifier(messages, info: AgentInfo):
     """off_topic for even item numbers, "a" for odd ones."""

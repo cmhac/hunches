@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import yaml
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import Input, RichLog, TextArea
@@ -7,6 +8,8 @@ from textual.widgets import Input, RichLog, TextArea
 from hunches import files
 from hunches.app import HunchesApp
 from hunches.screens.taxonomy import TaxonomyScreen
+
+pytestmark = pytest.mark.usefixtures("system_ready")
 
 
 def hexcolor(style) -> str:

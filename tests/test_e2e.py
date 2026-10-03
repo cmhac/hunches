@@ -2,6 +2,8 @@
 
 import json
 import math
+import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -261,3 +263,50 @@ async def test_all_nine_stages_with_resume():
 
     # the stand-in model has no known price, so cost is unknown, never $0
     assert cost.total()[1]
+
+
+async def test_first_run_new_project_then_open_another_from_projects(
+    tmp_path, monkeypatch
+):
+    import os
+
+    from textual.widgets import Button
+
+    from hunches.screens.system import SystemSettingsScreen
+
+    system._path().unlink()  # undo the fixture: a true first run
+    other = tmp_path / "other"
+    shutil.copytree(tmp_path / "corpus", other / "corpus")
+    (other / ".hunches").mkdir()
+    files.write_config(
+        files.Config(
+            assistant_model="a",
+            classifier_model="c",
+            corpus_dir="corpus",
+            embedding_model="m",
+        ),
+        other,
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, SystemSettingsScreen)
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert app.stage == 0 and isinstance(app.screen, ProjectsScreen)
+        await pilot.press("n")
+        await pilot.pause()
+        app.screen.query_one("#corpus", Input).value = "corpus"
+        await pilot.pause()
+        await pilot.click("#create")
+        await pilot.pause()
+        assert app.stage == 1 and Path.cwd() == tmp_path
+        system.add_project(other)
+        await pilot.press("f4")
+        await pilot.pause()
+        table = app.screen.query_one(DataTable)
+        table.move_cursor(row=[r.value for r in table.rows].index(str(other)))
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.stage == 1 and isinstance(app.screen, BriefScreen)
+        assert os.getcwd() == str(other)

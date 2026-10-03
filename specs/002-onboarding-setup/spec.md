@@ -145,7 +145,7 @@ All screens follow `AGENTS.md` "TUI look": `StatusHeader` first, `panel(...)`, w
 ```
 main(): load_dotenv() → keys.load_into_env()
 on_mount:
-  system file missing                       → SystemSetupScreen (first run) → then continue below
+  system file missing                       → SystemSettingsScreen (first run) → then continue below
   recommendation changed                    → RecommendationModal → continue
   cwd has .hunches/config.toml              → register in system projects if absent; open it (stage = first incomplete)
   else                                      → ProjectsScreen
@@ -154,6 +154,8 @@ on_mount:
 Opening a project from anywhere is `HunchesApp.open_project(path)`: confirm if a worker is running (e.g. a stage-8 run: "A run is in progress; stop it and switch?"), cancel workers, `os.chdir(path)`, update `last_opened`, reset the screen stack to the project's first incomplete stage (`stage_shown = False` then `goto_stage`). This is the **only** place that changes cwd; all of `files.root()`, `cost.json`, gold sampling seeds (`Path.cwd().name`) stay cwd-relative. A project that cannot be opened (dir/config missing) produces an error message, never a traceback.
 
 Always-available keys from any screen (not while a modal is open or an Input has focus, same as `n`/`p`): **Projects** and **Settings**. Proposed: `f9` Projects, `f10` System settings (verify F-keys against terminals/tmux; fall back to `ctrl+`-chords other than `ctrl+p`). Footer lists them. Existing `q`, `n`, `p` unchanged.
+
+Implementation notes (task 09): chosen keys are `f4` Projects and `f5` System settings (next to `f2` approve and `f3` project settings; `f10` is taken by the menu bar in common terminals such as GNOME Terminal and `f9` by some multiplexers). They are app-level bindings, so they also work with an Input focused (unlike `n`/`p`); they are ignored on a modal, on the screen they open, and (Projects) before first-run setup has written `system.json`. They have not been tried in every terminal/multiplexer; a human should check. `n`/`p` (goto stage) are hidden and disabled via `check_action` when `stage == 0` or Projects is on top, which removes the footer clash with Projects' own `n` New. Startup: first run shows System settings, then continues; an unchanged-models recommendation bump is silent (`recommended_changed` is called exactly once); a `.hunches/` in cwd is registered with `system.add_project` and opened with `open_project`, so a cwd project that fails the health check (e.g. `MISSING CORPUS`) now shows an error and the Projects screen instead of opening as in 001.
 
 ### System setup / System settings (`SystemSettingsScreen`)
 

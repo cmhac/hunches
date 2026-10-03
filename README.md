@@ -12,21 +12,60 @@ uv tool install "hunches[s3]"    # adds boto3 for the S3 Vectors backend
 uv tool install "hunches[local]" # adds Sentence Transformers for local query embeddings (Python < 3.14)
 ```
 
-API keys come from the environment or a git-ignored `.env` in the project directory
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). Never commit them.
-
-## Run
-
-From the project directory (the one that contains, or should contain, `.hunches/`):
+## First run
 
 ```
 hunches
 ```
 
-The first run asks for the corpus location, the embedding model and the two model strings
-(`assistant_model`, `classifier_model`, as `provider:model`) and writes `.hunches/config.toml`. Later runs resume
-at the first incomplete stage. `n` / `p` move between stages, `q` quits. A tiny sample project is in
-`examples/sample`.
+The first run opens **System settings**: pick a provider (Anthropic or OpenAI), supply an API key if none is
+available, and accept the recommended assistant and classifier models (each chosen from a list, or any
+`provider:model` via Other...). Prices are shown beside every model. After that every run lands on **Projects**,
+unless the current directory already contains `.hunches/config.toml`: then that project is registered and opened
+directly, resuming at its first incomplete stage.
+
+## API keys
+
+Resolution order: process environment (including a git-ignored `.env`) first, then the OS keyring. Only
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are managed; System settings shows each as `ENV`, `KEYRING` or `MISSING`
+and can save or remove the keyring entry. At startup keyring keys are copied into the process environment, so child
+processes of hunches can see them. Keys are never written to a file by hunches and never committed. On systems
+without a keyring backend (headless Linux, containers, CI) the Save button is not offered: set the variables in the
+environment or a `.env` instead. Other providers work if you type their `provider:model` string and set their
+env var yourself.
+
+## Projects
+
+**Projects** lists every project hunches knows about with a health status (`OK`, `MISSING DIR`, `NO CONFIG`,
+`MISSING CORPUS`). `enter` opens one (hunches changes into its directory), `n` creates a new one, `e` edits its
+settings, `x` removes it from the list or deletes its `.hunches/` folder (never the corpus), `l` locates a moved
+project or corpus, `r` refreshes, `esc` goes back to the open project. **New project** asks for the location,
+backend (local corpus or S3 Vectors), corpus and embedding model; the assistant and classifier models are copied
+from the system defaults into the project, and later system changes never alter an existing project. **Project
+settings** edits them afterwards.
+
+## Keys
+
+| Key | Action |
+|-----|--------|
+| `f2` | Approve / finish the current stage (shown in the footer) |
+| `f3` | Project settings of the open project |
+| `f4` | Projects |
+| `f5` | System settings |
+| `n` / `p` | Next / previous stage (not on Projects, where `n` is New) |
+| `q` | Quit |
+
+The F-keys work from every screen, even with a text field focused, but not on top of a dialog.
+
+## System state vs project state
+
+System state (API keys in the keyring, default models, saved S3 stores, the project list) lives in `system.json`
+under your user config directory (`$HUNCHES_HOME` overrides it) and is never part of a project. Project state is
+only `.hunches/` in the project directory.
+
+## Run
+
+A tiny sample project is in `examples/sample`; run `hunches` from inside it to open it directly.
 
 ## Corpus formats
 
@@ -58,7 +97,7 @@ refuses to search otherwise. It only embeds your seed phrases.
 
 ## What to commit
 
-Everything in `.hunches/` is plain files and the only state: config, seeds, candidates, taxonomy, prompt, gold labels,
+System state is outside the repository, so there is nothing of it to commit. Everything in `.hunches/` is plain files and the only state: config, seeds, candidates, taxonomy, prompt, gold labels,
 threshold, results, chat history, cost and the call cache. The tool never runs git; you commit. If `cache/` grows
 too large, gitignore it. Keep `.env` out of git.
 

@@ -10,6 +10,8 @@ from hunches.app import HunchesApp
 from hunches.screens.final import FinalScreen
 from hunches.screens.gold import GoldScreen
 
+pytestmark = pytest.mark.usefixtures("system_ready")
+
 
 def classifier(messages, info: AgentInfo):
     """Answers "b" for item 0 and "a" for the rest, whatever the prompt says."""

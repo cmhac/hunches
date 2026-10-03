@@ -39,3 +39,26 @@ def no_keyring():
     from keyring.backends.fail import Keyring as FailKeyring
 
     keyring.set_keyring(FailKeyring())
+
+
+@pytest.fixture
+def system_ready(tmp_path):
+    """A finished first run (system.json, recommendation seen) and a stub corpus `c/` in tmp_path.
+
+    For tests whose project is tmp_path with `corpus_dir="c"`: startup opens it through
+    `open_project`, which refuses a project whose corpus files are missing.
+    """
+    from hunches import system
+
+    (tmp_path / "c").mkdir()
+    for name in ("vectors.npy", "items.jsonl", "meta.json"):
+        (tmp_path / "c" / name).write_text("x")
+
+    system.write_system(
+        system.System(
+            provider="anthropic",
+            assistant_model="a",
+            classifier_model="c",
+            recommendation_seen=system.RECOMMENDED_REVISION,
+        )
+    )

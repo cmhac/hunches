@@ -1,9 +1,12 @@
+import pytest
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import DataTable, Input, RichLog
 
 from hunches import candidates, files
 from hunches.app import HunchesApp, StatusHeader
 from hunches.screens.brief import BriefScreen
+
+pytestmark = pytest.mark.usefixtures("system_ready")
 
 
 async def stream(messages, info: AgentInfo):
