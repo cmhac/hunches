@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
+from pydantic_ai.settings import ModelSettings, ThinkingEffort
 
 OFF_TOPIC = "off_topic"
 SAMPLE_SIZE = 50  # gold rows per split (spec stages 4 and 6)
@@ -19,12 +20,36 @@ class Config(BaseModel):
     s3_bucket: str | None = None
     s3_index: str | None = None
     embedding_model: str = ""
-    smart_model: str = "anthropic:claude-sonnet-5-5"
-    cheap_model: str = "anthropic:claude-haiku-4-5"
+    s3_region: str | None = None  # None: boto3's default resolution
+    assistant_model: str = "anthropic:claude-sonnet-5-5"
+    assistant_thinking: ThinkingEffort | None = None  # None: no thinking setting
+    classifier_model: str = "anthropic:claude-haiku-4-5"
     target_metric: Literal["accuracy", "macro_f1", "micro_f1", "exact_match"] = (
         "accuracy"
     )
     target_score: float = 0.90
+
+    @model_validator(mode="before")
+    @classmethod
+    def _old_keys(cls, data):
+        # 001 wrote smart_model/cheap_model; a new key wins over an old one
+        if isinstance(data, dict):
+            data = dict(data)
+            for old, new in [
+                ("smart_model", "assistant_model"),
+                ("cheap_model", "classifier_model"),
+            ]:
+                if old in data:
+                    data.setdefault(new, data.pop(old))
+                    data.pop(old, None)
+        return data
+
+
+def thinking_settings(config: Config) -> ModelSettings | None:
+    """model_settings for assistant Agents; None leaves the provider's default."""
+    if config.assistant_thinking is None:
+        return None
+    return {"thinking": config.assistant_thinking}
 
 
 class State(BaseModel):

@@ -30,7 +30,7 @@ SIMS = [0.61] * 40 + [0.80] * 10
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     files.write_config(
-        files.Config(corpus_dir="c", embedding_model="m", cheap_model="test")
+        files.Config(corpus_dir="c", embedding_model="m", classifier_model="test")
     )
     files.write_text("seeds.csv", "seed\nx\n")
     files.write_state(

@@ -103,7 +103,7 @@ class ThresholdScreen(Screen):
         )
         with panel(
             Vertical(id="bands-panel"),
-            f"off-topic rate by band · {files.read_config().cheap_model}",
+            f"off-topic rate by band · {files.read_config().classifier_model}",
         ):
             yield DataTable(id="bands", cursor_type="row")
         yield Input(placeholder="cutoff, e.g. 0.65 (F2 saves)", id="cutoff")
@@ -170,7 +170,7 @@ class ThresholdScreen(Screen):
                 [by_id[x] for x in todo],
                 prompt,
                 taxonomy,
-                files.read_config().cheap_model,
+                files.read_config().classifier_model,
             ):
                 if (
                     p.labels is not None

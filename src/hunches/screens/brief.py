@@ -47,9 +47,11 @@ class BriefScreen(Screen):
         super().__init__()
         self.seeds: list[str] = []
         self.editing: int | None = None  # row being edited; None means a new seed
+        config = files.read_config()
         self.agent = Agent(
-            files.read_config().smart_model,
+            config.assistant_model,
             instructions=INSTRUCTIONS,
+            model_settings=files.thinking_settings(config),
             defer_model_check=True,
         )
 

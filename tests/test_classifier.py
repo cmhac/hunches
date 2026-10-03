@@ -87,6 +87,25 @@ async def test_prompt_change_misses_cache():
     assert p.labels == ["b"] and not p.cached
 
 
+async def test_classifier_model_change_misses_cache():
+    def named(name, label):
+        calls = []
+
+        def fn(messages, info: AgentInfo):
+            calls.append(1)
+            part = ToolCallPart(info.output_tools[0].name, {"response": [label]})
+            return ModelResponse(parts=[part])
+
+        return FunctionModel(fn, model_name=name), calls
+
+    old, old_calls = named("old-model", "a")
+    new, new_calls = named("new-model", "b")
+    await classify("text", "prompt", taxonomy(), old)
+    p = await classify("text", "prompt", taxonomy(), new)
+    assert p.labels == ["b"] and not p.cached  # never the old model's cached answer
+    assert len(old_calls) == 1 and len(new_calls) == 1
+
+
 async def test_classify_many_yields_all_and_records_one_timing():
     model = TestModel(custom_output_args=["a"])
     texts = ["t0", "t1", "t2", "t3"]

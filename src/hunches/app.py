@@ -143,12 +143,12 @@ class SetupScreen(Screen):
                 ),
             )
             yield self.field(
-                "smart_model",
-                Input(value=c.smart_model, compact=True, id="smart_model"),
+                "assistant_model",
+                Input(value=c.assistant_model, compact=True, id="assistant_model"),
             )
             yield self.field(
-                "cheap_model",
-                Input(value=c.cheap_model, compact=True, id="cheap_model"),
+                "classifier_model",
+                Input(value=c.classifier_model, compact=True, id="classifier_model"),
             )
         with Horizontal(id="actions"):
             yield Button("Save", id="save", variant="primary", compact=True)
@@ -167,8 +167,8 @@ class SetupScreen(Screen):
             "s3_bucket": value("s3_bucket") or None,
             "s3_index": value("s3_index") or None,
             "embedding_model": value("embedding_model"),
-            "smart_model": value("smart_model"),
-            "cheap_model": value("cheap_model"),
+            "assistant_model": value("assistant_model"),
+            "classifier_model": value("classifier_model"),
         }
         needed = ["corpus_dir"] if backend == "local" else ["s3_bucket", "s3_index"]
         missing = [k for k in [*needed, "embedding_model"] if not data[k]]

@@ -2,7 +2,7 @@
 
 An interactive terminal toolkit for content analysis over an already-embedded corpus:
 seed phrases, semantic search, candidates, an LLM classifier validated against a hand-labelled
-gold set, and classified output. A smart model talks to you; a cheap model does the bulk work.
+gold set, and classified output. An assistant model talks to you; a classifier model does the bulk work.
 
 ## Install
 
@@ -24,7 +24,7 @@ hunches
 ```
 
 The first run asks for the corpus location, the embedding model and the two model strings
-(`smart_model`, `cheap_model`, as `provider:model`) and writes `.hunches/config.toml`. Later runs resume
+(`assistant_model`, `classifier_model`, as `provider:model`) and writes `.hunches/config.toml`. Later runs resume
 at the first incomplete stage. `n` / `p` move between stages, `q` quits. A tiny sample project is in
 `examples/sample`.
 
@@ -46,14 +46,14 @@ refuses to search otherwise. It only embeds your seed phrases.
 
 ## Stages
 
-1. **Brief and seeds.** Describe what you want to find; the smart model asks questions and proposes seed phrases that you edit in a table and approve.
+1. **Brief and seeds.** Describe what you want to find; the assistant asks questions and proposes seed phrases that you edit in a table and approve.
 2. **Search.** Seeds are embedded and searched; every item with cosine similarity of at least 0.60 becomes a candidate (score = best seed). Counts per similarity band are shown.
-3. **Taxonomy and prompt.** The smart model interviews you (one label or several per item) and writes `taxonomy.yaml` and `prompt.md`. `off_topic` is built in and always exclusive.
-4. **Gold dev set.** You label 50 random candidates; the cheap model classifies as you go and per-label counts update live.
-5. **Tuning.** Metrics (accuracy, per-label P/R/F1, macro/micro-F1) and a list of disagreements. The smart model proposes prompt edits you accept or change until the target metric reaches the target score.
-6. **Gold test set.** 50 more labelled candidates, classified once to report held-out metrics. Changing the prompt marks the result stale.
+3. **Taxonomy and prompt.** The assistant interviews you (one label or several per item) and writes `taxonomy.yaml` and `prompt.md`. `off_topic` is built in and always exclusive.
+4. **Gold dev set.** You label 50 random candidates; the classifier model classifies as you go and per-label counts update live.
+5. **Tuning.** Metrics (accuracy, per-label P/R/F1, macro/micro-F1) and a list of disagreements. The assistant proposes prompt edits you accept or change until the target metric reaches the target score.
+6. **Gold test set.** 50 more labelled candidates, classified once to report held-out metrics. Changing the prompt or the classifier model marks the result stale.
 7. **Threshold.** About 30 items per similarity band are classified so you can see the off-topic rate per band and pick a cutoff.
-8. **Full run.** Candidates at or above the cutoff are classified with the cheap model, written to `results.jsonl` as they finish, with time and cost estimates first. Stop and resume freely.
+8. **Full run.** Candidates at or above the cutoff are classified with the classifier model, written to `results.jsonl` as they finish, with time and cost estimates first. Stop and resume freely.
 9. **Browse.** Search and filter `results.jsonl` (first 1000 matches are shown).
 
 ## What to commit

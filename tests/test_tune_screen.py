@@ -225,7 +225,7 @@ async def test_failed_item_detail_and_note_tones():
         for note, tone in [
             ("Dev run failed: x", "error"),
             ("Proposal failed: x", "error"),
-            ("Asking the smart model...", "warn"),
+            ("Asking the assistant...", "warn"),
             ("No disagreements to learn from.", "warn"),
         ]:
             screen.run_note, screen.note = "", note

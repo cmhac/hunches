@@ -27,7 +27,7 @@ def classifier(messages, info: AgentInfo):
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     files.write_config(
-        files.Config(corpus_dir="c", embedding_model="m", cheap_model="test")
+        files.Config(corpus_dir="c", embedding_model="m", classifier_model="test")
     )
     files.write_text("seeds.csv", "seed\nx\n")
     files.write_state(
@@ -44,7 +44,13 @@ def project(tmp_path, monkeypatch):
     files.write_text("threshold.json", json.dumps({"threshold": 0.65}))
     files.write_text(
         "test_result.json",
-        json.dumps({"prompt_hash": hashlib.sha256(PROMPT.encode()).hexdigest()}),
+        json.dumps(
+            {
+                "prompt_hash": hashlib.sha256(
+                    json.dumps([PROMPT, "test"]).encode()  # prompt, classifier_model
+                ).hexdigest()
+            }
+        ),
     )
     # items 0-5 are at or above the threshold, 6-7 below it
     files.write_jsonl(
@@ -232,7 +238,9 @@ async def test_redesigned_panels_subtitles_and_banner(monkeypatch):
         await pilot.press("s")
         warn = screen.query_one("#warn", Static)
         assert warn.display and warn.has_class("banner", "-warning")
-        assert str(warn.render()).startswith("WARNING: prompt.md differs")
+        assert str(warn.render()).startswith(
+            "WARNING: prompt.md or classifier model differs"
+        )
         await pilot.press("s")
         await pilot.pause(0.2)
         assert run_panel.border_subtitle == "running"

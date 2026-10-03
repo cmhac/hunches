@@ -14,7 +14,7 @@ from hunches.classifier import classify_many
 from hunches.screens import report
 from hunches.theme import editor
 
-MAX_SHOWN = 20  # disagreements the smart model sees
+MAX_SHOWN = 20  # disagreements the assistant sees
 METRICS = ["accuracy", "macro_f1", "micro_f1", "exact_match"]
 
 INSTRUCTIONS = """\
@@ -102,7 +102,7 @@ class ProposalScreen(ModalScreen[str | None]):
 
 
 class TuneScreen(Screen):
-    """Stage 5: dev-set metrics, disagreements, and smart-model prompt edits."""
+    """Stage 5: dev-set metrics, disagreements, and assistant prompt edits."""
 
     BINDINGS: ClassVar = [
         ("e", "propose", "Propose prompt edit"),
@@ -135,7 +135,7 @@ class TuneScreen(Screen):
         )
         self.prompt = files.read_text("prompt.md") or ""
         self.config = files.read_config()
-        self.model = self.config.cheap_model
+        self.model = self.config.classifier_model
         self.rows = [r for r in files.read_gold() if r.split == "dev" and r.labels]
         self.predicted: list[set[str]] = []
         self.errors: dict[int, str] = {}
@@ -145,9 +145,10 @@ class TuneScreen(Screen):
         self.history: list[float] = []  # target value after each prompt version
         self.note = ""
         self.agent = Agent(
-            self.config.smart_model,
+            self.config.assistant_model,
             instructions=INSTRUCTIONS,
             output_type=str,
+            model_settings=files.thinking_settings(self.config),
             defer_model_check=True,
         )
 
@@ -316,7 +317,7 @@ class TuneScreen(Screen):
             self.note = "No disagreements to learn from."
             self.show()
             return
-        self.note = "Asking the smart model..."
+        self.note = "Asking the assistant..."
         self.show()
         self.run_worker(self.propose(), exclusive=True)
 

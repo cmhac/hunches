@@ -34,14 +34,50 @@ def test_config_round_trip():
         s3_bucket="b",
         s3_index='i"x',
         embedding_model="openai:text-embedding-3-small",
-        cheap_model="openai:gpt-5-mini",
+        assistant_model="openai:gpt-5",
+        assistant_thinking="medium",
+        classifier_model="openai:gpt-5-mini",
+        s3_region="eu-west-1",
         target_metric="macro_f1",
         target_score=0.85,
     )
     files.ensure_root()
     files.write_config(config)
     assert files.read_config() == config
+    assert config.classifier_model == "openai:gpt-5-mini"
     assert Config().target_score == 0.90
+
+
+def test_old_model_keys_load_and_are_not_written_back():
+    files.write_text(
+        "config.toml",
+        'corpus_dir = "c"\nembedding_model = "m"\n'
+        'smart_model = "anthropic:big"\ncheap_model = "anthropic:small"\n',
+    )
+    config = files.read_config()
+    assert config.assistant_model == "anthropic:big"
+    assert config.classifier_model == "anthropic:small"
+    assert config.assistant_thinking is None  # old projects get no thinking
+    files.write_config(config)
+    text = (files.root() / "config.toml").read_text()
+    assert 'assistant_model = "anthropic:big"' in text
+    assert "smart_model" not in text and "cheap_model" not in text
+    assert "assistant_thinking" not in text and "s3_region" not in text
+
+
+def test_new_key_wins_over_old_key():
+    files.write_text(
+        "config.toml",
+        'embedding_model = "m"\nsmart_model = "old"\nassistant_model = "new"\n',
+    )
+    assert files.read_config().assistant_model == "new"
+
+
+def test_thinking_settings_only_when_set():
+    assert files.thinking_settings(Config()) is None
+    assert files.thinking_settings(Config(assistant_thinking="medium")) == {
+        "thinking": "medium"
+    }
 
 
 def test_state_round_trip():

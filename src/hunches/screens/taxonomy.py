@@ -53,9 +53,11 @@ class TaxonomyScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
+        config = files.read_config()
         self.agent = Agent(
-            files.read_config().smart_model,
+            config.assistant_model,
             instructions=build_instructions(),
+            model_settings=files.thinking_settings(config),
             defer_model_check=True,
         )
 

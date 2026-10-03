@@ -69,7 +69,7 @@ class GoldScreen(Screen):
             else files.Taxonomy(mode="single", labels=[])
         )
         self.prompt = files.read_text("prompt.md") or ""
-        self.model: str | Model = files.read_config().cheap_model
+        self.model: str | Model = files.read_config().classifier_model
         self.all = files.read_gold()
         self.rows = [r for r in self.all if r.split == split]
         self.predictions: dict[str, Prediction | None] = {}  # None while running
