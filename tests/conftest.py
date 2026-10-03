@@ -31,3 +31,11 @@ def isolated_system(tmp_path, monkeypatch):
     keyring.set_keyring(MemoryKeyring())
     yield
     keyring.set_keyring(previous)
+
+
+@pytest.fixture
+def no_keyring():
+    """The `fail` backend keyring picks on headless systems: every call raises NoKeyringError."""
+    from keyring.backends.fail import Keyring as FailKeyring
+
+    keyring.set_keyring(FailKeyring())
