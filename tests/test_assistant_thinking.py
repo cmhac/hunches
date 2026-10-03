@@ -23,20 +23,39 @@ def project(tmp_path, monkeypatch):
 @pytest.mark.parametrize("screen", SCREENS)
 def test_assistant_agent_gets_thinking_when_set(screen):
     files.write_config(
-        files.Config(corpus_dir="c", embedding_model="m", assistant_thinking="medium")
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+            assistant_thinking="medium",
+        )
     )
     assert screen().agent.model_settings == {"thinking": "medium"}
 
 
 @pytest.mark.parametrize("screen", SCREENS)
 def test_assistant_agent_has_no_settings_by_default(screen):
-    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+        )
+    )
     assert screen().agent.model_settings is None
 
 
 async def test_thinking_reaches_the_model_request():
     files.write_config(
-        files.Config(corpus_dir="c", embedding_model="m", assistant_thinking="high")
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+            assistant_thinking="high",
+        )
     )
     seen = []
 

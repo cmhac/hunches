@@ -20,7 +20,14 @@ async def stream(messages, info: AgentInfo):
 
 def setup(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+        )
+    )
 
 
 async def test_chat_proposes_seeds_and_edits_persist(tmp_path, monkeypatch):

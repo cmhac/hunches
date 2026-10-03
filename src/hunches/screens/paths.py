@@ -72,7 +72,8 @@ class PathPicker(ModalScreen[Path | None]):
     def __init__(self, start: str | Path = "") -> None:
         super().__init__()
         path = Path(start).expanduser()
-        self.start = path if path.is_dir() else Path.cwd()
+        # Path("") is "." and is_dir(): an empty input must root at the real cwd
+        self.start = path if start and path.is_dir() else Path.cwd()
 
     def compose(self) -> ComposeResult:
         with Vertical() as box:

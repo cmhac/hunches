@@ -26,7 +26,12 @@ def classifier(messages, info: AgentInfo):
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     files.write_config(
-        files.Config(corpus_dir="c", embedding_model="m", classifier_model="test")
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            corpus_dir="c",
+            embedding_model="m",
+            classifier_model="test",
+        )
     )
     files.write_text("seeds.csv", "seed\nx\n")
     files.write_state(
@@ -119,7 +124,12 @@ async def test_run_metrics_staleness_and_accept():
         await app.workers.wait_for_complete()
         assert not screen.stale()
         files.write_config(
-            files.Config(corpus_dir="c", embedding_model="m", classifier_model="other")
+            files.Config(
+                assistant_model="anthropic:claude-sonnet-5-5",
+                corpus_dir="c",
+                embedding_model="m",
+                classifier_model="other",
+            )
         )
         assert screen.stale()  # a classifier change alone marks the result STALE
         screen.show()
@@ -127,7 +137,12 @@ async def test_run_metrics_staleness_and_accept():
             "STALE: prompt.md or classifier model changed"
         )
         files.write_config(
-            files.Config(corpus_dir="c", embedding_model="m", classifier_model="test")
+            files.Config(
+                assistant_model="anthropic:claude-sonnet-5-5",
+                corpus_dir="c",
+                embedding_model="m",
+                classifier_model="test",
+            )
         )
         assert not screen.stale()
         await pilot.press("f2")

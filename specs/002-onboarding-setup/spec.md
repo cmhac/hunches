@@ -94,7 +94,7 @@ Verified 2026-10-03: all four IDs are in pydantic-ai's `KnownModelName`; `claude
 
 - `files.read_config` (via `Config`) accepts the old keys `smart_model`/`cheap_model` (migration on read via a `model_validator(mode="before")`); `write_config` only writes new names. A project written by 001 and never saved again keeps working.
 - An old project without `assistant_thinking` gets no thinking (preserves its behaviour); only new projects get the recommendation's thinking value.
-- Defaults in `Config` for the models are removed from `files.Config` (system settings is now the default source). Tests construct configs explicitly. Decision (task 03): the two model defaults stay in `Config` because `SetupScreen` and ~15 test fixtures still rely on them; remove them in task 06/09 when `SetupScreen` is replaced. `assistant_thinking` is typed as pydantic-ai's `ThinkingEffort` (`minimal|low|medium|high|xhigh`), so a bad value is rejected on read; the helper is `files.thinking_settings(config)`.
+- Defaults in `Config` for the models are removed from `files.Config` (system settings is now the default source). Tests construct configs explicitly. Done in task 06: `assistant_model` and `classifier_model` are required fields of `Config` (no defaults); test fixtures name their models. `assistant_thinking` is typed as pydantic-ai's `ThinkingEffort` (`minimal|low|medium|high|xhigh`), so a bad value is rejected on read; the helper is `files.thinking_settings(config)`.
 - Paths: `corpus_dir` is stored **relative to the project directory when the corpus is inside it, otherwise absolute**, so tracked configs stay portable. All path use stays relative to cwd (the project dir) because opening a project `chdir`s into it.
 - `config.toml` remains self-contained: bucket/index/region/embedding model are copied in, never referenced by store name.
 - Everywhere models are read (`brief.py`, `taxonomy.py`, `tune.py`, `gold.py`, `final.py`, `run.py`, `threshold.py`) the field names change. The assistant `Agent` sites (`brief.py`, `taxonomy.py`, `tune.py`) pass `model_settings={'thinking': ...}` when `assistant_thinking` is set; put that in one small helper in `files.py` or `system.py`, not a framework.
@@ -200,7 +200,9 @@ A form (not a wizard) on one screen:
 5. **Models** shown read-only from system settings (assistant, thinking, classifier, with a note "pinned for this project; change later in Project settings"). If a required key is missing for any of assistant/classifier/embedding providers: a visible blocking message and a button that opens System settings, then returns here keeping the form's values.
 6. **Create:** write `.hunches/config.toml` (self-contained, all fields), add the S3 store if requested, register the project in the system file, `open_project(location)` → stage 1.
 
-Required-field errors use the same inline error pattern as today's SetupScreen ("Required: …").
+Required-field errors use the same inline error pattern as 001's `SetupScreen` ("Required: …").
+
+Implementation notes (task 06): location is one `PathInput` prefilled with the current directory plus Browse (no separate "use current directory"/"another folder" radio: the prefill is the default and typing a path is "another folder"). The Browse button reads `Browse` without a `b` key hint, because a focused Input swallows `b`. `NewProjectScreen` itself registers the project (`system.add_project`) and calls `app.open_project`, so every caller (Projects `n`, first-run startup in task 09) just pushes the screen; the "already a project" button calls the same open. S3 saved-store picking prefills the fields and turns "Save this store" off (it is already saved); a new store is saved under the name `bucket/index` (same name replaces). The embedding model of an S3 project is chosen with the model picker (Pick button; the picker's provider is that of the current value, `openai` at first, and Other… reaches any string). Check store runs `get_index` in a thread worker and shows `dimension` and `distanceMetric` (a non-cosine metric gets a WARNING). The warning, Create and error line sit outside the scroll area so they stay visible at 80×24. A required key is missing when `keys.status` is `missing` for the provider of the assistant, the classifier or the embedding model; Create is refused with `BLOCKED: …` and the System settings button pushes `SystemSettingsScreen` over the form (values stay) and re-checks on return. `search.py` now passes `s3_region` to `boto3.client("s3vectors", region_name=…)`; before this task nothing read that field.
 
 ### Project settings (`ProjectSettingsScreen`)
 
@@ -242,7 +244,7 @@ Add `keyring` (current 25.7.0, Python ≥ 3.9) and `platformdirs` to `dependenci
 - **Exact keyring behaviour on headless systems** (which exception, which backend) must be taken from the keyring docs, not from this spec.
 - **F-key bindings** may be swallowed by terminals/multiplexers; confirm and pick alternatives.
 - **GPT-6 IDs and prices** must be re-verified at implementation time (the model landscape moves quickly). The author confirmed `gpt-6-sol`/`gpt-6-luna` on 2026-10-03; `genai-prices` also lists `gpt-6.1-sol`, which the author did not choose.
-- **S3 `get_index` argument names** (see New project).
+- **S3 `get_index` argument names** (see New project). Resolved in task 06 against botocore 1.43.108 (the installed boto3's `s3vectors` service model): `get_index(vectorBucketName=…, indexName=…)` (or `indexArn`), response `index` with `dimension` (integer) and `distanceMetric` (`euclidean` | `cosine`). Re-check against the AWS API reference if boto3 is upgraded.
 - **Needs a human:** real API keys, a real keyring, AWS credentials and an S3 Vectors index for the manual end-to-end check. Agents cannot fake these.
 
 ---

@@ -10,6 +10,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from hunches import files, system
 from hunches.app import StatusHeader
+from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.paths import PathPicker
 
 
@@ -77,6 +78,7 @@ class RemoveModal(ModalScreen[str | None]):
 class ProjectsScreen(Screen):
     stage_name = "Projects"
     BINDINGS: ClassVar = [
+        ("n", "new", "New"),
         ("r", "refresh", "Refresh"),
         ("x", "remove", "Remove"),
         ("l", "locate", "Locate"),
@@ -104,6 +106,9 @@ class ProjectsScreen(Screen):
         if not table.row_count:
             return None
         return str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+
+    def action_new(self) -> None:
+        self.app.push_screen(NewProjectScreen())
 
     def action_locate(self) -> None:
         path = self.current()

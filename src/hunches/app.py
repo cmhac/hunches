@@ -11,7 +11,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.markup import escape
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Input, Label, RichLog, Select, Static
+from textual.widgets import Button, Footer, Input, Label, RichLog, Static
 
 from hunches import cost, files, system
 from hunches.theme import HUNCHES
@@ -100,89 +100,6 @@ class StatusHeader(Static):
             right = f"[$text-muted]cost[/] [b #EEF1F5]${dollars:.4f}[/]"
         pad = max(2, room - width - len(right_plain))
         self.update(markup + " " * pad + right)
-
-
-class SetupScreen(Screen):
-    """First run: write .hunches/config.toml."""
-
-    DEFAULT_CSS = """
-    SetupScreen #config { height: auto; }
-    SetupScreen .row { height: 1; }
-    SetupScreen .row Label { width: 16; color: $text-muted; }
-    SetupScreen .row Input, SetupScreen .row Select { width: 1fr; }
-    SetupScreen .gap { height: 1; }
-    SetupScreen #actions { height: 1; margin-top: 1; }
-    SetupScreen #save { width: 10; }
-    SetupScreen #error { margin-left: 2; }
-    """
-
-    def compose(self) -> ComposeResult:
-        c = files.Config()
-        yield StatusHeader()
-        yield Static("Set up hunches (writes .hunches/config.toml)", classes="note")
-        with panel(Vertical(id="config"), "config.toml"):
-            with Horizontal(classes="row"):
-                yield Label("backend")
-                yield Select(
-                    [("Local (numpy)", "local"), ("S3 Vectors", "s3")],
-                    value="local",
-                    allow_blank=False,
-                    compact=True,
-                    id="backend",
-                )
-            yield Static("", classes="gap")
-            for id_, placeholder in [
-                ("corpus_dir", "local: corpus directory"),
-                ("s3_bucket", "s3: bucket"),
-                ("s3_index", "s3: index"),
-            ]:
-                yield self.field(
-                    id_, Input(placeholder=placeholder, compact=True, id=id_)
-                )
-            yield Static("", classes="gap")
-            yield self.field(
-                "embedding_model",
-                Input(
-                    placeholder="e.g. openai:text-embedding-3-small",
-                    compact=True,
-                    id="embedding_model",
-                ),
-            )
-            yield self.field(
-                "assistant_model",
-                Input(value=c.assistant_model, compact=True, id="assistant_model"),
-            )
-            yield self.field(
-                "classifier_model",
-                Input(value=c.classifier_model, compact=True, id="classifier_model"),
-            )
-        with Horizontal(id="actions"):
-            yield Button("Save", id="save", variant="primary", compact=True)
-            yield Label("", id="error", classes="error")
-        yield Footer()
-
-    def field(self, name: str, widget: Input) -> Horizontal:
-        return Horizontal(Label(name), widget, classes="row")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        value = lambda i: self.query_one(f"#{i}", Input).value.strip()
-        backend = self.query_one("#backend", Select).value
-        data = {
-            "backend": backend,
-            "corpus_dir": value("corpus_dir") or None,
-            "s3_bucket": value("s3_bucket") or None,
-            "s3_index": value("s3_index") or None,
-            "embedding_model": value("embedding_model"),
-            "assistant_model": value("assistant_model"),
-            "classifier_model": value("classifier_model"),
-        }
-        needed = ["corpus_dir"] if backend == "local" else ["s3_bucket", "s3_index"]
-        missing = [k for k in [*needed, "embedding_model"] if not data[k]]
-        if missing:
-            self.query_one("#error", Label).update(f"Required: {', '.join(missing)}")
-            return
-        files.write_config(files.Config.model_validate(data))
-        self.dismiss()
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -309,8 +226,10 @@ from hunches.screens.brief import BriefScreen
 from hunches.screens.browse import BrowseScreen
 from hunches.screens.final import test_stage
 from hunches.screens.gold import GoldScreen
+from hunches.screens.projects import ProjectsScreen
 from hunches.screens.run import RunScreen
 from hunches.screens.search import SearchScreen
+from hunches.screens.system import SystemSettingsScreen
 from hunches.screens.taxonomy import TaxonomyScreen
 from hunches.screens.threshold import ThresholdScreen
 from hunches.screens.tune import TuneScreen
@@ -346,8 +265,14 @@ class HunchesApp(App):
         self.theme = "hunches"
         if (files.root() / "config.toml").exists():
             self.goto_stage(files.first_incomplete_stage())
+        elif (
+            system.read_system() is None
+        ):  # first run; task 09 completes the startup flow
+            self.push_screen(
+                SystemSettingsScreen(), lambda _: self.push_screen(ProjectsScreen())
+            )
         else:
-            self.push_screen(SetupScreen(), lambda _: self.goto_stage(1))
+            self.push_screen(ProjectsScreen())
 
     def goto_stage(self, number: int) -> None:
         number = max(1, min(len(STAGES), number))

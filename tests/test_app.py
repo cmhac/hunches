@@ -12,7 +12,14 @@ from hunches.app import ChatPanel, HunchesApp, StatusHeader, confirm_approve
 
 def make_project(tmp_path, monkeypatch, **state):
     monkeypatch.chdir(tmp_path)
-    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+        )
+    )
     files.write_text("seeds.csv", "seed\nfoo\n")
     files.write_state(files.State(**state))
 
@@ -21,22 +28,25 @@ def header_text(app) -> str:
     return str(app.screen.query_one(StatusHeader).render())
 
 
-async def test_first_run_setup_then_stage_1(tmp_path, monkeypatch):
+async def test_not_in_a_project_shows_projects_or_first_run_setup(
+    tmp_path, monkeypatch
+):
+    from hunches import system
+    from hunches.screens.projects import ProjectsScreen
+    from hunches.screens.system import SystemSettingsScreen
+
     monkeypatch.chdir(tmp_path)
     app = HunchesApp()
-    async with app.run_test(size=(80, 40)) as pilot:
+    async with app.run_test() as pilot:
         await pilot.pause()
-        assert app.stage == 0
-        await pilot.click("#save")  # empty form is rejected
+        assert isinstance(app.screen, SystemSettingsScreen)  # no system.json yet
+    system.write_system(
+        system.System(provider="anthropic", assistant_model="a", classifier_model="c")
+    )
+    app = HunchesApp()
+    async with app.run_test() as pilot:
         await pilot.pause()
-        assert not (tmp_path / ".hunches" / "config.toml").exists()
-        app.screen.query_one("#corpus_dir", Input).value = "corpus"
-        app.screen.query_one("#embedding_model", Input).value = "openai:x"
-        app.screen.query_one("#save", Button).press()
-        await pilot.pause()
-        assert app.stage == 1
-    config = files.read_config()
-    assert config.corpus_dir == "corpus" and config.embedding_model == "openai:x"
+        assert isinstance(app.screen, ProjectsScreen) and app.stage == 0
 
 
 async def test_starts_at_first_incomplete_stage(tmp_path, monkeypatch):
@@ -169,26 +179,6 @@ async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
         await pilot.press("enter")  # Approve is focused by default
         await pilot.pause()
         assert files.read_state().seeds_approved
-
-
-async def test_setup_screen_fits_80x24_in_a_config_panel(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    app = HunchesApp()
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        screen = app.screen
-        panel = screen.query_one("#config")
-        assert panel.border_title == "config.toml"
-        for id_ in ("corpus_dir", "s3_bucket", "s3_index", "embedding_model"):
-            widget = screen.query_one(f"#{id_}")
-            assert widget.size.height == 1  # compact
-            assert widget.region.bottom <= 23
-        assert screen.query_one("#save").region.bottom <= 23
-        await pilot.click("#save")
-        await pilot.pause()
-        error = screen.query_one("#error")
-        assert str(error.render()) == "Required: corpus_dir, embedding_model"
-        assert error.has_class("error")
 
 
 def log_lines(panel) -> list[str]:

@@ -58,7 +58,7 @@ def search(
         raise ImportError("The S3 backend needs boto3: pip install hunches[s3]") from e
     if not (config.s3_bucket and config.s3_index):
         raise ValueError("config.toml: s3_bucket and s3_index are required for s3")
-    client = boto3.client("s3vectors")
+    client = boto3.client("s3vectors", region_name=config.s3_region)
     params = {
         "vectorBucketName": config.s3_bucket,
         "indexName": config.s3_index,

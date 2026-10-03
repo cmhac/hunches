@@ -21,9 +21,9 @@ class Config(BaseModel):
     s3_index: str | None = None
     embedding_model: str = ""
     s3_region: str | None = None  # None: boto3's default resolution
-    assistant_model: str = "anthropic:claude-sonnet-5-5"
+    assistant_model: str
     assistant_thinking: ThinkingEffort | None = None  # None: no thinking setting
-    classifier_model: str = "anthropic:claude-haiku-4-5"
+    classifier_model: str
     target_metric: Literal["accuracy", "macro_f1", "micro_f1", "exact_match"] = (
         "accuracy"
     )

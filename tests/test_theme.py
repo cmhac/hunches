@@ -12,7 +12,14 @@ def test_label_color_follows_taxonomy_order_and_wraps():
 
 async def test_app_uses_hunches_theme_and_stylesheet(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+        )
+    )
     app = HunchesApp()
     async with app.run_test() as pilot:
         await pilot.pause()

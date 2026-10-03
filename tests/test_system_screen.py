@@ -152,7 +152,14 @@ def test_thinking_choices_match_what_a_project_config_accepts():
     from hunches.screens.system import EFFORTS
 
     for effort in EFFORTS:
-        assert files.Config(assistant_thinking=effort).assistant_thinking == effort
+        assert (
+            files.Config(
+                assistant_model="anthropic:claude-sonnet-5-5",
+                classifier_model="anthropic:claude-haiku-4-5",
+                assistant_thinking=effort,
+            ).assistant_thinking
+            == effort
+        )
     for rec in system.RECOMMENDED.values():
         assert rec["thinking"] is None or rec["thinking"] in EFFORTS
 

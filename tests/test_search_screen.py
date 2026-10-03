@@ -39,7 +39,14 @@ def project(tmp_path, monkeypatch):
     items = [{"id": f"i{i}", "text": f"t{i}"} for i in range(5)]
     (corpus / "items.jsonl").write_text("".join(json.dumps(r) + "\n" for r in items))
     (corpus / "meta.json").write_text(json.dumps({"embedding_model": "m"}))
-    files.write_config(files.Config(corpus_dir=str(corpus), embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir=str(corpus),
+            embedding_model="m",
+        )
+    )
     files.write_text("seeds.csv", "seed\nalpha\n")
 
 
@@ -90,9 +97,16 @@ async def test_capped_warning_with_stubbed_s3(monkeypatch):
             return {"vectors": [v, {**v, "key": "b"}]}
 
     files.write_config(
-        files.Config(backend="s3", s3_bucket="b", s3_index="i", embedding_model="m")
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            backend="s3",
+            s3_bucket="b",
+            s3_index="i",
+            embedding_model="m",
+        )
     )
-    monkeypatch.setattr("boto3.client", lambda name: FakeS3())
+    monkeypatch.setattr("boto3.client", lambda name, **kw: FakeS3())
     monkeypatch.setattr(search, "S3_TOP_K", 2)
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -104,7 +118,14 @@ async def test_capped_warning_with_stubbed_s3(monkeypatch):
 
 
 async def test_embedding_model_mismatch_is_shown():
-    files.write_config(files.Config(corpus_dir="corpus", embedding_model="other-model"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="corpus",
+            embedding_model="other-model",
+        )
+    )
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await open_search(pilot, app)
@@ -147,7 +168,14 @@ async def test_panels_notice_classes_and_empty_state():
 
 
 async def test_mismatch_error_has_error_class():
-    files.write_config(files.Config(corpus_dir="corpus", embedding_model="other-model"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="corpus",
+            embedding_model="other-model",
+        )
+    )
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await open_search(pilot, app)

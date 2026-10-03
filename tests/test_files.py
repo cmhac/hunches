@@ -45,7 +45,7 @@ def test_config_round_trip():
     files.write_config(config)
     assert files.read_config() == config
     assert config.classifier_model == "openai:gpt-5-mini"
-    assert Config().target_score == 0.90
+    assert Config(assistant_model="a", classifier_model="c").target_score == 0.90
 
 
 def test_old_model_keys_load_and_are_not_written_back():
@@ -68,16 +68,20 @@ def test_old_model_keys_load_and_are_not_written_back():
 def test_new_key_wins_over_old_key():
     files.write_text(
         "config.toml",
-        'embedding_model = "m"\nsmart_model = "old"\nassistant_model = "new"\n',
+        'embedding_model = "m"\nclassifier_model = "c"\nsmart_model = "old"\n'
+        'assistant_model = "new"\n',
     )
     assert files.read_config().assistant_model == "new"
 
 
 def test_thinking_settings_only_when_set():
-    assert files.thinking_settings(Config()) is None
-    assert files.thinking_settings(Config(assistant_thinking="medium")) == {
-        "thinking": "medium"
-    }
+    assert (
+        files.thinking_settings(Config(assistant_model="a", classifier_model="c"))
+        is None
+    )
+    assert files.thinking_settings(
+        Config(assistant_model="a", classifier_model="c", assistant_thinking="medium")
+    ) == {"thinking": "medium"}
 
 
 def test_state_round_trip():
@@ -255,3 +259,11 @@ def test_first_incomplete_stage_unlabelled_gold_rows_do_not_count():
         [GoldRow(id=str(i), text="t", labels=[], split="dev") for i in range(50)]
     )
     assert files.first_incomplete_stage() == 4
+
+
+def test_models_have_no_default_so_system_settings_is_the_only_source():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Config()  # ty: ignore[missing-argument]

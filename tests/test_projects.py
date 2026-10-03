@@ -54,7 +54,13 @@ def make_project(base, name="proj", corpus=True, **config):
     """A project dir with .hunches/config.toml and (optionally) a complete local corpus."""
     project = base / name
     (project / ".hunches").mkdir(parents=True)
-    cfg = {"corpus_dir": "corpus", "embedding_model": "m", **config}
+    cfg = {
+        "corpus_dir": "corpus",
+        "embedding_model": "m",
+        "assistant_model": "test",
+        "classifier_model": "test",
+        **config,
+    }
     lines = "\n".join(f'{k} = "{v}"' for k, v in cfg.items())
     (project / ".hunches" / "config.toml").write_text(lines + "\n")
     if corpus:
