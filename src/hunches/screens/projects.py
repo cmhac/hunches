@@ -12,6 +12,7 @@ from hunches import files, system
 from hunches.app import StatusHeader
 from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.paths import PathPicker
+from hunches.screens.project_settings import ProjectSettingsScreen
 
 
 def describe(project: system.Project) -> tuple[list[str], str, str]:
@@ -79,6 +80,7 @@ class ProjectsScreen(Screen):
     stage_name = "Projects"
     BINDINGS: ClassVar = [
         ("n", "new", "New"),
+        ("e", "edit", "Edit"),
         ("r", "refresh", "Refresh"),
         ("x", "remove", "Remove"),
         ("l", "locate", "Locate"),
@@ -109,6 +111,15 @@ class ProjectsScreen(Screen):
 
     def action_new(self) -> None:
         self.app.push_screen(NewProjectScreen())
+
+    def action_edit(self) -> None:
+        """Open the project (cwd moves into it), then its settings on top."""
+        path = self.current()
+        if path is None:
+            return
+        self.app.open_project(path)  # ty: ignore[unresolved-attribute]
+        if Path.cwd().resolve() == Path(path).resolve():  # refused if unhealthy
+            self.app.push_screen(ProjectSettingsScreen())
 
     def action_locate(self) -> None:
         path = self.current()

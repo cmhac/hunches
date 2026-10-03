@@ -32,6 +32,31 @@ def check_corpus(corpus: Path) -> tuple[str, str]:
     return str(model), ""
 
 
+def stored_corpus(corpus: Path, project: Path) -> str:
+    """Relative to the project dir when the corpus is inside it (portable), else as typed."""
+    try:
+        return str(corpus.resolve().relative_to(project.resolve()))
+    except ValueError:
+        return str(corpus)
+
+
+def check_index(bucket: str, index: str, region: str | None) -> str:
+    """get_index on a store: dimension and metric, or the error text."""
+    try:
+        import boto3
+
+        found = boto3.client("s3vectors", region_name=region).get_index(
+            vectorBucketName=bucket, indexName=index
+        )["index"]
+        metric = found["distanceMetric"]
+        text = f"dimension {found['dimension']}, distance metric {metric}"
+        if metric != "cosine":
+            text = f"WARNING: distance metric is {metric}, not cosine ({text})"
+    except Exception as e:  # noqa: BLE001  credentials, network, missing index
+        text = f"ERROR: {e}"
+    return text
+
+
 class NewProjectScreen(Screen):
     stage_name = "New project"
     DEFAULT_CSS = """
@@ -224,18 +249,7 @@ class NewProjectScreen(Screen):
         self.show_store("checking…")
 
         def check() -> None:
-            try:
-                import boto3
-
-                found = boto3.client("s3vectors", region_name=region).get_index(
-                    vectorBucketName=bucket, indexName=index
-                )["index"]
-                metric = found["distanceMetric"]
-                text = f"dimension {found['dimension']}, distance metric {metric}"
-                if metric != "cosine":
-                    text = f"WARNING: distance metric is {metric}, not cosine ({text})"
-            except Exception as e:  # noqa: BLE001  credentials, network, missing index
-                text = f"ERROR: {e}"
+            text = check_index(bucket, index, region)
             self.app.call_from_thread(self.show_store, text)
 
         self.run_worker(check, thread=True)
@@ -284,11 +298,10 @@ class NewProjectScreen(Screen):
             if problem:
                 self.fail(f"Corpus: {problem}")
                 return
-            try:  # portable when the corpus lives inside the project
-                stored = str(corpus.resolve().relative_to(location.resolve()))
-            except ValueError:
-                stored = str(corpus)
-            fields |= {"corpus_dir": stored, "embedding_model": embedding}
+            fields |= {
+                "corpus_dir": stored_corpus(corpus, location),
+                "embedding_model": embedding,
+            }
         if self.missing_keys:
             self.fail("BLOCKED: add the missing API key in System settings")
             return

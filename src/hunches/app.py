@@ -226,6 +226,7 @@ from hunches.screens.brief import BriefScreen
 from hunches.screens.browse import BrowseScreen
 from hunches.screens.final import test_stage
 from hunches.screens.gold import GoldScreen
+from hunches.screens.project_settings import ProjectSettingsScreen
 from hunches.screens.projects import ProjectsScreen
 from hunches.screens.run import RunScreen
 from hunches.screens.search import SearchScreen
@@ -255,6 +256,7 @@ class HunchesApp(App):
         ("q", "quit", "Quit"),
         ("n", "goto(1)", "Next stage"),
         ("p", "goto(-1)", "Previous stage"),
+        ("f3", "settings", "Settings"),
     ]
 
     stage = 0  # 1-9 once running
@@ -312,6 +314,13 @@ class HunchesApp(App):
         system.touch_project(path)
         self.stage_shown = False
         self.goto_stage(files.first_incomplete_stage())
+
+    def action_settings(self) -> None:
+        """Project settings of the open project (not on top of a modal or itself)."""
+        if self.stage and not isinstance(
+            self.screen, (ModalScreen, ProjectSettingsScreen)
+        ):
+            self.push_screen(ProjectSettingsScreen())
 
     def action_goto(self, step: int) -> None:
         if self.stage and not isinstance(self.screen, ModalScreen):
