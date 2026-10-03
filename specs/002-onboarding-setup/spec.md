@@ -115,7 +115,7 @@ Users pick models from a list instead of typing exact strings; used by System se
   - One helper `price_label(model_string) -> str` (plain function) used everywhere so the wording lives in one place; unit-test it against hand-written expectations for a known, a tiered, and an unknown model.
 - Row also shows: model string, `deprecated` badge when flagged, and a `recommended` marker.
 - **Other…** accepts any `provider:model` string. Anything not in the list gets a visible `not in known list` note (warning, not an error: newer models or other providers may be valid).
-- Chat-only filtering: hide obviously unsuitable entries only if `KnownModelName` includes any (check; do not hand-maintain a deny list).
+- Chat-only filtering: hide obviously unsuitable entries only if `KnownModelName` includes any (check; do not hand-maintain a deny list). Checked 2026-10-03 (task 04): `KnownModelName` does include non-chat entries (e.g. `openai:gpt-audio-mini`, `openai:computer-use-preview`, `gateway/...`) but carries no metadata to tell them apart, so none are hidden; **Other…** and the visible list cover the rest. Type-to-filter was not implemented (the provider-filtered list is short).
 - The list is a Textual `Select` or a small modal with a `ListView`/`OptionList`, with type-to-filter if cheap; the implementer picks the simplest that works at 80×24.
 - Tests use a hand-built list/monkeypatched source; assert recommended entries are present in the real `KnownModelName` (this doubles as the "re-verify the four recommended IDs" check).
 
