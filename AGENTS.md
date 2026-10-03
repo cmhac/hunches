@@ -2,14 +2,14 @@
 
 ## What this repo is
 
-`hunches` is an interactive Textual TUI toolkit for content analysis over an already-embedded corpus: seed phrases → semantic search → candidates → LLM classifier validated against a hand-labelled gold set → classified output. A smart model talks to the user; a cheap model does bulk classification. Python package `hunches`, console script `hunches`.
+`hunches` is an interactive Textual TUI toolkit for content analysis over an already-embedded corpus: seed phrases → semantic search → candidates → LLM classifier validated against a hand-labelled gold set → classified output. An assistant model talks to the user; a classifier model does bulk classification (renamed from smart/cheap in 002). Python package `hunches`, console script `hunches`.
 
 ## Current state
 
-Spec and plan only. No code exists yet. Implementation follows the task files.
+001 (stages 1-9) is implemented. 002 (system setup, projects, onboarding) is specified and being implemented task by task.
 
-- Source of truth for behaviour: `specs/001-initial-version/spec.md`
-- Implementation plan: `specs/001-initial-version/tasks/README.md` (dependency order, human-only actions) and one file per task, `01-…` to `18-…`
+- Source of truth for behaviour: `specs/001-initial-version/spec.md`, then `specs/002-onboarding-setup/spec.md` (which lists its explicit changes to 001)
+- Implementation plans: `specs/<spec>/tasks/README.md` (dependency order, human-only actions) and one file per task. 001: `01-…` to `18-…`; 002: `01-…` to `09-…`
 
 **Before starting any work: read the spec, then your task file.** If a task file and the spec disagree, flag it instead of guessing. If the spec is wrong or incomplete, say so and update it in the same change.
 
