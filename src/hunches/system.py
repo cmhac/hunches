@@ -154,6 +154,16 @@ def delete_store(name: str) -> None:
     write_system(system)
 
 
+def rename_store(old: str, new: str) -> None:
+    system = _load()
+    if any(s.name == new for s in system.s3_stores):
+        raise ValueError(f"a store named {new!r} already exists")
+    for s in system.s3_stores:
+        if s.name == old:
+            s.name = new
+    write_system(system)
+
+
 def recommended_changed(system: System) -> bool:
     """True when the user must be asked about a newer recommendation.
 

@@ -163,6 +163,7 @@ One screen serves first run and later edits (first run = file missing: title "We
 - **Models** panel: assistant model, assistant thinking, classifier model; prefilled from the recommendation for the chosen provider; each model is chosen from a **list** (see "Model picker") with an **Other…** entry for typing any `provider:model`; a `DIFFERS from recommended` badge when changed; **Reset to recommended**. Changing the provider re-fills fields only if the user hasn't edited them (or asks first). Warn (not block) when `genai-prices` has no price for an entered model, since cost would show `?` — use the same unknown-price rule as 001.
 - **Saved S3 stores** panel: list with delete and edit-name. Stores are created from **New project** (below); this panel only manages them. Deleting a store never affects projects (their config is self-contained).
 - Notice: "Changes here apply to new projects. Existing projects keep their models."
+- Implementation notes (task 05): assistant thinking offers `provider default` (stored as `null`) plus the `ThinkingEffort` values (`minimal`…`xhigh`), the same set `files.Config.assistant_thinking` accepts. Store delete/rename take effect immediately (they are not part of Save); `system.rename_store` refuses a name already in use. Save keeps `projects`, `s3_stores` and `recommendation_seen` of an existing file (only the recommendation modal changes `recommendation_seen`; first-run Save sets it to the current revision). The modal is `RecommendationModal` in `screens/system.py`.
 
 ### Projects (`ProjectsScreen`)
 

@@ -272,3 +272,20 @@ def test_use_new_openai_has_no_thinking():
         None,
         "openai:gpt-6-luna",
     )
+
+
+def test_rename_store_keeps_other_fields_and_refuses_a_taken_name():
+    system.write_system(make())
+    system.add_store("a", "b1", "i1", "us-east-1", "e1")
+    system.add_store("b", "b2", "i2", None, "e2")
+    system.rename_store("a", "c")
+    current = system.read_system()
+    assert current is not None
+    stores = {s.name: s for s in current.s3_stores}
+    assert set(stores) == {"b", "c"}
+    assert (stores["c"].bucket, stores["c"].region) == ("b1", "us-east-1")
+    with pytest.raises(ValueError):
+        system.rename_store("c", "b")
+    current = system.read_system()
+    assert current is not None
+    assert {s.name for s in current.s3_stores} == {"b", "c"}
