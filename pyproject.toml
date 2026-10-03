@@ -16,6 +16,8 @@ dependencies = [
     "genai-prices",
     "pyyaml",
     "python-dotenv",
+    "platformdirs>=4.12.2",
+    "keyring>=25.7.0",
 ]
 
 [project.optional-dependencies]
