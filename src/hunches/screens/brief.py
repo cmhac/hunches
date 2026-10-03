@@ -6,10 +6,10 @@ from pydantic_ai import Agent
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Input, Label
+from textual.widgets import DataTable, Footer, Input, Static
 
 from hunches import candidates, files
-from hunches.app import ChatPanel, StatusHeader, confirm_approve
+from hunches.app import ChatPanel, StatusHeader, confirm_approve, panel
 
 INSTRUCTIONS = """\
 You help the user define what to find in a corpus of text items. Ask short follow-up \
@@ -39,6 +39,8 @@ class BriefScreen(Screen):
     BriefScreen ChatPanel { width: 1fr; }
     BriefScreen #seeds-pane { width: 1fr; }
     BriefScreen DataTable { height: 1fr; }
+    BriefScreen #empty { height: 1fr; color: $text-muted; }
+    BriefScreen #status { height: auto; }
     """
 
     def __init__(self) -> None:
@@ -61,10 +63,14 @@ class BriefScreen(Screen):
         yield StatusHeader()
         with Horizontal():
             yield ChatPanel("brief", self.agent)
-            with Vertical(id="seeds-pane"):
+            with panel(Vertical(id="seeds-pane"), "seeds.csv · 0"):
                 yield DataTable(cursor_type="row", id="seeds")
+                yield Static(
+                    "No seeds yet. Describe what to find in the chat, or press a to add one.",
+                    id="empty",
+                )
                 yield Input(placeholder="a: add, e: edit, then Enter", id="seed-input")
-                yield Label("", id="status")
+                yield Static("", id="status", classes="warn")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -77,6 +83,9 @@ class BriefScreen(Screen):
         table.clear()
         for seed in self.seeds:
             table.add_row(seed)
+        table.display = bool(self.seeds)
+        self.query_one("#empty").display = not self.seeds
+        self.query_one("#seeds-pane").border_title = f"seeds.csv · {len(self.seeds)}"
 
     def save(self) -> None:
         write_seeds(self.seeds)
@@ -106,7 +115,7 @@ class BriefScreen(Screen):
 
     def action_approve(self) -> None:
         if not self.seeds:
-            self.query_one("#status", Label).update("Add at least one seed first.")
+            self.query_one("#status", Static).update("Add at least one seed first.")
             return
         confirm_approve(
             self,

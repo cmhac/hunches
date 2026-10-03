@@ -5,13 +5,14 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
 from hunches import cost, files, metrics
-from hunches.app import StatusHeader
+from hunches.app import StatusHeader, panel
 from hunches.classifier import classify_many
+from hunches.screens import report
 from hunches.screens.gold import GoldScreen
 
 RESULT = "test_result.json"
@@ -39,12 +40,13 @@ class FinalScreen(Screen):
     ]
     AUTO_FOCUS = "#dis"
     DEFAULT_CSS = """
-    FinalScreen #banner { height: auto; color: $error; text-style: bold; }
-    FinalScreen #metrics, FinalScreen #note { height: auto; }
-    FinalScreen #note { color: $warning; }
-    FinalScreen Horizontal { height: 1fr; }
-    FinalScreen DataTable { width: 2fr; }
-    FinalScreen #detail { width: 1fr; padding: 0 1; }
+    FinalScreen #metrics-panel { height: auto; }
+    FinalScreen #metrics-panel DataTable { height: auto; }
+    FinalScreen #warning, FinalScreen #summary, FinalScreen #note { height: auto; }
+    FinalScreen #body { height: 1fr; }
+    FinalScreen #dis-panel { width: 3fr; }
+    FinalScreen #text-panel { width: 2fr; }
+    FinalScreen #dis { height: 1fr; }
     """
 
     def __init__(self) -> None:
@@ -60,19 +62,32 @@ class FinalScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
-        yield Static("", id="banner", markup=False)
-        yield Static("", id="metrics", markup=False)
-        with Horizontal():
-            yield DataTable(id="dis", cursor_type="row")
-            yield Static("", id="detail", markup=False)
+        yield Static("", id="banner", classes="banner -stale", markup=False)
+        with panel(Vertical(id="metrics-panel"), "test set · held out"):
+            yield Static(
+                "Tuning against test disagreements weakens this held-out result.",
+                id="warning",
+                classes="note",
+            )
+            yield Static("", id="summary")
+            yield DataTable(id="per-label")
+        with Horizontal(id="body"):
+            with panel(Vertical(id="dis-panel"), "disagreements"):
+                yield DataTable(id="dis", cursor_type="row")
+            with panel(Vertical(id="text-panel"), "text"):
+                yield Static("", id="detail", markup=False)
         yield Static("", id="note", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#dis", DataTable).add_columns("Text", "Gold", "Predicted")
+        report.disagreement_columns(self.query_one("#dis", DataTable))
+        report.per_label_columns(self.query_one("#per-label", DataTable))
         self.show()
         if self.result is None:  # the one and only automatic run
             self.action_rerun()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self.show)  # needs the laid-out table width
 
     def stale(self) -> bool:
         return self.result is not None and self.result["prompt_hash"] != prompt_hash()
@@ -136,46 +151,46 @@ class FinalScreen(Screen):
 
     def show(self) -> None:
         r = self.result
-        self.query_one("#banner", Static).update(
+        banner = self.query_one("#banner", Static)
+        banner.display = self.stale()
+        banner.update(
             "STALE: prompt.md changed since this result was computed. Press r to re-run."
-            if self.stale()
-            else ""
         )
-        lines = [
-            "Tuning against test disagreements weakens this held-out result (t: back to tuning)."
-        ]
+        names = [lab.name for lab in self.taxonomy.labels]
+        self.query_one("#metrics-panel").border_title = "test set · held out" + (
+            f" · {r['timestamp']}" if r else ""
+        )
+        per_label = self.query_one("#per-label", DataTable)
+        per_label.display = r is not None
         if r:
-            m = r["metrics"]
-            value = {
-                "accuracy": m["exact_match"],
-                "exact_match": m["exact_match"],
-                "macro_f1": m["macro_f1"],
-                "micro_f1": m["micro_f1"],
-            }[self.config.target_metric]
-            lines.append(
-                f"{self.config.target_metric} = {value:.3f}  "
-                f"{'PASS' if value >= self.config.target_score else 'FAIL'} "
-                f"(target {self.config.target_score:.2f})   n={m['n']}  "
-                f"exact-match {m['exact_match']:.3f}  macro-F1 {m['macro_f1']:.3f}  "
-                f"micro-F1 {m['micro_f1']:.3f}  [{r['timestamp']}]"
+            m = metrics.Metrics.from_dict(r["metrics"])
+            self.query_one("#summary", Static).update(
+                report.summary(m, self.config.target_metric, self.config.target_score)
             )
-            lines += [
-                f"  {name:<20} P {x['precision']:.2f}  R {x['recall']:.2f}  F1 {x['f1']:.2f}  (gold {x['gold_count']})"
-                for name, x in m["per_label"].items()
-            ]
-        self.query_one("#metrics", Static).update("\n".join(lines))
+            report.fill_per_label(per_label, names, m)
+        else:
+            self.query_one("#summary", Static).update("")
         table = self.query_one("#dis", DataTable)
+        report.fit_text_column(table)
         table.clear()
-        for i, d in enumerate(r["disagreements"] if r else []):
+        wrong = r["disagreements"] if r else []
+        self.query_one("#dis-panel").border_title = f"disagreements · {len(wrong)}"
+        for i, d in enumerate(wrong):
             table.add_row(
-                d["text"].replace("\n", " ")[:60],
-                ", ".join(d["gold"]),
-                d["predicted"]
-                if isinstance(d["predicted"], str)
-                else ", ".join(d["predicted"]),
+                report.clipped(d["text"]),
+                report.tags(names, d["gold"]),
+                report.tags(names, d["predicted"]),
                 key=str(i),
             )
-        self.query_one("#note", Static).update(self.note)
+        note = self.query_one("#note", Static)
+        note.update(self.note)
+        note.set_classes(
+            "note"
+            if self.note.startswith(("Running", "Test run finished"))
+            else "error"
+            if "failed:" in self.note
+            else "warn"
+        )
         self.show_detail()
 
     def show_detail(self) -> None:

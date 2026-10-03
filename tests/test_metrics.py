@@ -113,3 +113,12 @@ def test_target_value_and_default():
     labels = [Label(name="a")]
     assert default_target_metric(Taxonomy(mode="single", labels=labels)) == "accuracy"
     assert default_target_metric(Taxonomy(mode="multi", labels=labels)) == "macro_f1"
+
+
+def test_metrics_round_trip_through_json_dict():
+    import dataclasses
+
+    from hunches.metrics import Metrics
+
+    m = compute_metrics([{"a"}, {"b"}], [{"a"}, {"a"}], ["a", "b", "off_topic"])
+    assert Metrics.from_dict(dataclasses.asdict(m)) == m

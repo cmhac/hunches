@@ -1,5 +1,6 @@
 import pytest
 from textual.widgets import DataTable, Input, SelectionList, Static
+from textual.widgets.data_table import ColumnKey
 
 from hunches import files
 from hunches.app import HunchesApp
@@ -52,7 +53,7 @@ def ids(screen):
 
 
 def count(screen):
-    return str(screen.query_one("#count", Static).render())
+    return screen.query_one("#table-panel").border_subtitle
 
 
 async def test_all_rows_skip_errors():
@@ -124,3 +125,84 @@ async def test_large_result_is_capped(monkeypatch):
         screen = await open_browse(pilot, app)
         assert ids(screen) == ["0", "1"]
         assert "Showing 2 of 4 (4 match" in count(screen)
+
+
+async def test_redesigned_panels_cells_and_detail_title():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 30)) as pilot:
+        screen = await open_browse(pilot, app)
+        assert screen.query_one("#labels-panel").border_title == "labels"
+        assert screen.query_one("#table-panel").border_title == "results.jsonl"
+        assert screen.query_one("#detail-panel").border_title == "item 0"
+        table = screen.query_one("#table", DataTable)
+        assert [str(c) for c in table.get_row_at(2)[:3]] == ["2", "■ a, ■ b", "0.700"]
+        assert str(table.get_row_at(2)[3]) == "Red cars are fast"
+        options = screen.query_one("#labels", SelectionList)
+        assert [str(options.get_option_at_index(i).prompt) for i in range(3)] == [
+            "■ a",
+            "■ b",
+            "■ off_topic",
+        ]
+        table.focus()
+        await pilot.press("down")
+        await pilot.pause()
+        assert screen.query_one("#detail-panel").border_title == "item 1"
+
+
+async def test_layout_wide_vs_narrow():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 30)) as pilot:
+        screen = await open_browse(pilot, app)
+        table, detail = (
+            screen.query_one("#table-panel"),
+            screen.query_one("#detail-panel"),
+        )
+        assert detail.region.x >= table.region.right  # side by side
+        assert (
+            screen.query_one("#table", DataTable).columns[ColumnKey("labels")].width
+            == 30
+        )
+        assert screen.query_one("#labels-panel").outer_size.width == 24
+    app = HunchesApp()
+    async with app.run_test(size=(80, 30)) as pilot:
+        screen = await open_browse(pilot, app)
+        table, detail = (
+            screen.query_one("#table-panel"),
+            screen.query_one("#detail-panel"),
+        )
+        assert detail.region.y >= table.region.bottom  # under the table
+        assert detail.outer_size.height == 5
+        assert detail.outer_size.width == table.outer_size.width
+        assert (
+            screen.query_one("#table", DataTable).columns[ColumnKey("labels")].width
+            == 16
+        )
+
+
+async def test_empty_states():
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_browse(pilot, app)
+        empty = screen.query_one("#empty", Static)
+        assert not empty.display
+        screen.query_one("#search", Input).value = "zzz"
+        await pilot.pause()
+        assert empty.display and str(empty.render()) == "No results match."
+        assert not screen.query_one("#table").display
+    files.write_jsonl("results.jsonl", [])
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_browse(pilot, app)
+        assert str(screen.query_one("#empty", Static).render()) == (
+            "results.jsonl is empty. Run stage 8 first."
+        )
+
+
+@pytest.mark.parametrize("width", [80, 120])
+async def test_table_columns_fit_without_horizontal_scroll(width):
+    app = HunchesApp()
+    async with app.run_test(size=(width, 30)) as pilot:
+        screen = await open_browse(pilot, app)
+        await pilot.pause()
+        table = screen.query_one("#table", DataTable)
+        assert table.virtual_size.width <= table.size.width

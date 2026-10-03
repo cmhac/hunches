@@ -3,13 +3,17 @@ from pathlib import Path
 from typing import ClassVar
 
 from pydantic_ai.models import Model
+from rich.text import Text
 from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
 from hunches import files
-from hunches.app import ConfirmScreen, StatusHeader
+from hunches.app import ConfirmScreen, StatusHeader, panel
 from hunches.classifier import Prediction, classify
+from hunches.theme import label_color, label_tag, label_text
 
 DRAW_MORE = 10
 
@@ -44,10 +48,13 @@ class GoldScreen(Screen):
     ]
     AUTO_FOCUS = ""  # the counts table would swallow the arrow and Enter keys
     DEFAULT_CSS = """
-    GoldScreen #text { height: auto; max-height: 8; margin: 1 0; }
-    GoldScreen #labels, GoldScreen #prediction, GoldScreen #note { height: auto; }
-    GoldScreen #note { color: $warning; }
-    GoldScreen DataTable { height: auto; max-height: 14; }
+    GoldScreen #main { height: 1fr; }
+    GoldScreen #left { width: 1fr; }
+    GoldScreen #item { height: 1fr; }
+    GoldScreen #labels-panel { height: auto; }
+    GoldScreen #labels, GoldScreen #prediction, GoldScreen #note, GoldScreen #progress { height: auto; }
+    GoldScreen #counts-panel { width: 36%; max-width: 30; height: auto; max-height: 100%; }
+    GoldScreen DataTable { height: auto; }
     """
 
     def __init__(self, split: str = "dev") -> None:
@@ -79,15 +86,24 @@ class GoldScreen(Screen):
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         if not self.ready:
-            yield Static("Finish stage 3 (taxonomy and prompt) first.")
+            yield Static(
+                "Finish stage 3 (taxonomy and prompt) first.",
+                id="not-ready",
+                classes="warn",
+            )
             yield Footer()
             return
-        yield Static("", id="progress")
-        yield Static("", id="text", markup=False)
-        yield Static("", id="labels", markup=False)
-        yield Static("", id="prediction", markup=False)
-        yield Static("", id="note", markup=False)
-        yield DataTable(id="counts")
+        with Horizontal(id="main"):
+            with Vertical(id="left"):
+                yield Static("", id="progress")
+                with panel(Vertical(id="item", classes="-focused"), "item"):
+                    yield Static("", id="text", markup=False)
+                with panel(Vertical(id="labels-panel"), "labels"):
+                    yield Static("", id="labels")
+                yield Static("", id="prediction")
+                yield Static("", id="note", classes="warn", markup=False)
+            with panel(Vertical(id="counts-panel"), "counts"):
+                yield DataTable(id="counts")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -96,7 +112,8 @@ class GoldScreen(Screen):
         if len(self.rows) < files.SAMPLE_SIZE:
             self.add_rows(files.SAMPLE_SIZE - len(self.rows))
         table = self.query_one("#counts", DataTable)
-        table.add_columns("Label", "Count")
+        table.add_column("Label")
+        table.add_column(Text("Count", justify="right"))
         self.index = next((i for i, r in enumerate(self.rows) if not r.labels), 0)
         self.show()
 
@@ -110,60 +127,72 @@ class GoldScreen(Screen):
     def show(self) -> None:
         row = self.rows[self.index] if self.rows else None
         done = sum(bool(r.labels) for r in self.rows)
+        strong = lambda x: f"[b #EEF1F5]{x}[/]"
         self.query_one("#progress", Static).update(
-            f"{self.split} set: item {self.index + 1}/{len(self.rows)}, {done} labelled"
+            f"[b $primary]{self.split} set[/]  item {strong(self.index + 1)}/{strong(len(self.rows))}, "
+            f"{strong(done)} labelled"
         )
         self.query_one("#text", Static).update(row.text if row else "")
-        chosen = set(self.pending)
-        self.query_one("#labels", Static).update(
-            "\n".join(
-                f"[{'x' if name in chosen else ' '}] {key} {name}"
-                + (
-                    f": {d}"
-                    if (
-                        d := next(
-                            (
-                                lab.description
-                                for lab in self.taxonomy.labels
-                                if lab.name == name
-                            ),
-                            "",
-                        )
-                    )
-                    else ""
-                )
-                for key, name in self.keys.items()
-            )
-            + (
-                "\n(press a key to label)"
-                if self.taxonomy.mode == "single"
-                else "\n(keys toggle, Enter confirms)"
-            )
+        self.query_one("#item").border_title = f"item {row.id}" if row else "item"
+        single = self.taxonomy.mode == "single"
+        panel = self.query_one("#labels-panel")
+        panel.border_title = f"labels · {self.taxonomy.mode}"
+        panel.border_subtitle = (
+            "press a key to label" if single else "keys toggle, enter confirms"
         )
+        names = [lab.name for lab in self.taxonomy.labels]
+        descriptions = {lab.name: lab.description for lab in self.taxonomy.labels}
+        chosen = set(self.pending)
+        lines = []
+        for key, name in self.keys.items():
+            color = label_color(names.index(name) if name in names else 0, name)
+            on = name in chosen
+            mark = ("●" if on else "○") if single else ("■" if on else "□")
+            line = (
+                f"[b on $boost] {key} [/] [{color}]{mark}[/] "
+                f"[{'b ' if on else ''}#EEF1F5]{escape(name)}[/]"
+            )
+            if descriptions.get(name):
+                line += f"  [$text-muted]{escape(descriptions[name])}[/]"
+            lines.append(f"[on $surface]{line}[/]" if on else line)
+        self.query_one("#labels", Static).update("\n".join(lines))
         self.query_one("#note", Static).update(self.note)
         self.show_prediction()
+        self.query_one("#counts-panel").border_subtitle = f"{done} of {len(self.rows)}"
         table = self.query_one("#counts", DataTable)
         table.clear()
         for name in files.all_labels(self.taxonomy):
-            table.add_row(name, str(sum(name in r.labels for r in self.rows)))
+            table.add_row(
+                label_text(names, name),
+                Text(str(sum(name in r.labels for r in self.rows)), justify="right"),
+                key=name,
+            )
 
     def show_prediction(self) -> None:
         """Only after the user has labelled the item, to avoid anchoring."""
         row = self.rows[self.index] if self.rows else None
-        text = ""
+        names = [lab.name for lab in self.taxonomy.labels]
+        line = ""
+        failed = False
         if row and row.labels:
             if row.id not in self.predictions:
-                text = "Model: (not classified)"
+                line = "[$text-muted]Model: (not classified)[/]"
             elif (p := self.predictions[row.id]) is None:
-                text = "Model: classifying..."
+                line = "[$text-muted]Model: classifying...[/]"
             elif p.labels is None:
-                text = f"Model: failed ({p.error})"
+                line = f"Model: failed ({escape(str(p.error))})"
+                failed = True
             else:
-                same = set(p.labels) == set(row.labels)
-                text = (
-                    f"Model: {', '.join(p.labels)} ({'agrees' if same else 'DIFFERS'})"
+                tags = "  ".join(label_tag(names, n) for n in p.labels)
+                verdict = (
+                    "[$success]✓ agrees[/]"
+                    if set(p.labels) == set(row.labels)
+                    else "[b reverse $secondary] DIFFERS [/]"
                 )
-        self.query_one("#prediction", Static).update(text)
+                line = f"Model: {tags} {verdict}"
+        prediction = self.query_one("#prediction", Static)
+        prediction.set_classes("error" if failed else "")
+        prediction.update(line)
 
     def on_key(self, event) -> None:
         name = self.keys.get(event.character or "")

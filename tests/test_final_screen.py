@@ -137,3 +137,57 @@ async def test_back_to_tuning():
         await pilot.press("t")
         await pilot.pause()
         assert app.stage == 5
+
+
+async def test_redesigned_panels_banner_and_tables():
+    rows = gold_rows(n_test=10)
+    rows[50].labels = ["b"]
+    files.write_gold(rows)
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.goto_stage(6)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FinalScreen)
+        screen.model = FunctionModel(classifier)  # ty: ignore[invalid-assignment]
+        assert not screen.query_one("#banner").display
+        screen.action_rerun()
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        stamp = json.loads(files.read_text("test_result.json") or "")["timestamp"]
+        panel = screen.query_one("#metrics-panel")
+        assert panel.border_title == f"test set · held out · {stamp}"
+        assert str(screen.query_one("#warning", Static).render()) == (
+            "Tuning against test disagreements weakens this held-out result."
+        )
+        summary = " ".join(str(screen.query_one("#summary", Static).render()).split())
+        assert summary == "accuracy 0.900 PASS n=10 macro-F1 0.474 micro-F1 0.900"
+        per_label = screen.query_one("#per-label", DataTable)
+        assert [str(c) for c in per_label.get_row(per_label.ordered_rows[0].key)] == [
+            "■ a",
+            "0.90",
+            "1.00",
+            "0.95",
+            "9",
+        ]
+        dis = screen.query_one("#dis", DataTable)
+        assert [str(c) for c in dis.get_row_at(0)] == ["item 50", "■ b", "■ a"]
+        assert screen.query_one("#dis-panel").border_title == "disagreements · 1"
+        assert screen.query_one("#text-panel").border_title == "text"
+
+        files.write_text("prompt.md", "Classify differently.")
+        screen.show()
+        banner = screen.query_one("#banner", Static)
+        assert banner.display and banner.has_class("banner", "-stale")
+        assert str(banner.render()) == (
+            "STALE: prompt.md changed since this result was computed. Press r to re-run."
+        )
+        await pilot.press("f2")
+        note = screen.query_one("#note")
+        assert str(note.render()) == "The result is stale: re-run (r) before accepting."
+        assert note.has_class("warn")
+        screen.note = "Test run failed: x"
+        screen.show()
+        assert note.has_class("error")

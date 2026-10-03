@@ -207,3 +207,96 @@ async def test_prompt_change_warns_before_starting(monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
     assert len(files.read_jsonl("results.jsonl")) == 6
+
+
+async def test_redesigned_panels_subtitles_and_banner(monkeypatch):
+    async def stalls(texts, prompt, taxonomy, model):
+        for i in range(2):
+            yield i, Prediction(["a"])
+        await asyncio.sleep(3600)
+
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, RunScreen)
+        run_panel = screen.query_one("#run-panel")
+        assert screen.query_one("#estimate-panel").border_title == "estimate"
+        assert run_panel.border_title == "run · results.jsonl"
+        assert run_panel.border_subtitle == "not started"
+        assert run_panel.has_class("-focused")
+        assert not screen.query_one("#warn").display
+
+        monkeypatch.setattr(run, "classify_many", stalls)
+        files.write_text("prompt.md", "Changed.")
+        await pilot.press("s")
+        warn = screen.query_one("#warn", Static)
+        assert warn.display and warn.has_class("banner", "-warning")
+        assert str(warn.render()).startswith("WARNING: prompt.md differs")
+        await pilot.press("s")
+        await pilot.pause(0.2)
+        assert run_panel.border_subtitle == "running"
+        live = str(screen.query_one("#live", Static).render())
+        assert live.startswith("2/6 | cost ")
+        await pilot.press("x")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert run_panel.border_subtitle == "stopped · resumable"
+
+        use_function_model(monkeypatch)
+        await pilot.press("s")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert run_panel.border_subtitle == "complete"
+
+
+async def test_failures_list_and_run_failed_error_class(monkeypatch):
+    async def fails_item_2(texts, prompt, taxonomy, model):
+        for i, t in enumerate(texts):
+            yield (
+                i,
+                Prediction(None, error="bad") if t == "item 2" else Prediction(["a"]),
+            )
+
+    monkeypatch.setattr(run, "classify_many", fails_item_2)
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        await pilot.press("s")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        errors = screen.query_one("#errors", Static)
+        assert str(errors.render()).splitlines() == [
+            "",
+            "Failed (retried next run):",
+            "2: bad",
+        ]
+
+    async def boom(texts, prompt, taxonomy, model):
+        raise RuntimeError("no key")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(run, "classify_many", boom)
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        await pilot.press("s")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        live = screen.query_one("#live", Static)
+        assert str(live.render()) == "Run failed: no key"
+        assert live.has_class("error")
+
+
+async def test_not_ready_notice():
+    (files.root() / "threshold.json").unlink()
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(8)
+        await pilot.pause()
+        notice = app.screen.query_one("#not-ready")
+        assert str(notice.render()) == "Finish stages 3 and 7 first."
+        assert notice.has_class("warn")

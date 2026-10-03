@@ -3,11 +3,13 @@ import time
 from typing import ClassVar
 
 from textual.app import ComposeResult
+from textual.containers import Vertical
+from textual.markup import escape
 from textual.screen import Screen
 from textual.widgets import Footer, ProgressBar, Static
 
 from hunches import cost, files
-from hunches.app import StatusHeader
+from hunches.app import StatusHeader, panel
 from hunches.classifier import classify_many
 from hunches.screens.final import RESULT, prompt_hash
 
@@ -53,7 +55,8 @@ class RunScreen(Screen):
     BINDINGS: ClassVar = [("s", "start", "Start/resume"), ("x", "stop", "Stop")]
     DEFAULT_CSS = """
     RunScreen Static { height: auto; }
-    RunScreen #warn { color: $warning; text-style: bold; }
+    RunScreen #estimate-panel { height: auto; }
+    RunScreen #run-panel { height: 1fr; }
     """
 
     def __init__(self) -> None:
@@ -64,24 +67,28 @@ class RunScreen(Screen):
         )
         self.model = files.read_config().cheap_model if self.ready else ""
         self.running = False
+        self.started = False
         self.warned = False
         self.errors: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         if not self.ready:
-            yield Static("Finish stages 3 and 7 first.")
+            yield Static("Finish stages 3 and 7 first.", id="not-ready", classes="warn")
             yield Footer()
             return
-        yield Static("", id="estimate", markup=False)
-        yield Static("", id="warn", markup=False)
-        yield ProgressBar(total=1, id="progress")
-        yield Static("", id="live", markup=False)
-        yield Static("", id="errors", markup=False)
+        with panel(Vertical(id="estimate-panel"), "estimate"):
+            yield Static("", id="estimate", markup=False)
+        yield Static("", id="warn", classes="banner -warning", markup=False)
+        with panel(Vertical(id="run-panel", classes="-focused"), "run · results.jsonl"):
+            yield ProgressBar(total=1, id="progress")
+            yield Static("", id="live", markup=False)
+            yield Static("", id="errors")
         yield Footer()
 
     def on_mount(self) -> None:
         if self.ready:
+            self.query_one("#warn").display = False
             self.show_estimate()
 
     def show_estimate(self) -> None:
@@ -93,9 +100,19 @@ class RunScreen(Screen):
         )
         self.query_one("#estimate", Static).update(text)
         self.query_one("#errors", Static).update(
-            "Failed (retried next run):\n" + "\n".join(self.errors[-10:])
+            "\n[b $warning]Failed (retried next run):[/]\n"
+            + "\n".join(f"[$text-muted]{escape(e)}[/]" for e in self.errors[-10:])
             if self.errors
             else ""
+        )
+        self.query_one("#run-panel").border_subtitle = (
+            "running"
+            if self.running
+            else "complete"
+            if not todo
+            else "stopped · resumable"
+            if self.started or files.read_jsonl("results.jsonl")
+            else "not started"
         )
 
     def action_start(self) -> None:
@@ -104,12 +121,15 @@ class RunScreen(Screen):
         tested = json.loads(files.read_text(RESULT) or "{}").get("prompt_hash")
         if tested != prompt_hash() and not self.warned:
             self.warned = True
+            self.query_one("#warn").display = True
             self.query_one("#warn", Static).update(
                 "WARNING: prompt.md differs from the tested prompt (or was never tested). "
                 "Press s again to start anyway."
             )
             return
-        self.running = True
+        self.running = self.started = True
+        self.query_one("#warn").display = False
+        self.query_one("#run-panel").border_subtitle = "running"
         self.run_worker(self.run_all(), exclusive=True)
 
     def action_stop(self) -> None:
@@ -118,6 +138,7 @@ class RunScreen(Screen):
 
     async def run_all(self) -> None:
         live = self.query_one("#live", Static)
+        live.set_classes("")
         # failed rows from an earlier run are dropped; the items are retried now
         old = files.read_jsonl("results.jsonl")
         if any("error" in r for r in old):
@@ -158,6 +179,7 @@ class RunScreen(Screen):
                 )
         except Exception as e:  # noqa: BLE001  auth/network errors must not kill the app
             live.update(f"Run failed: {e}")
+            live.set_classes("error")
         finally:
             self.running = False
             self.show_estimate()

@@ -7,10 +7,11 @@ from pydantic_ai import Agent
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Label, TextArea
+from textual.widgets import Footer, Static, TextArea
 
 from hunches import files, metrics
-from hunches.app import ChatPanel, StatusHeader, confirm_approve
+from hunches.app import ChatPanel, StatusHeader, confirm_approve, panel
+from hunches.theme import editor
 
 INSTRUCTIONS = """\
 You define how items are classified, by interviewing the user and then writing two files.
@@ -45,8 +46,9 @@ class TaxonomyScreen(Screen):
     TaxonomyScreen Horizontal { height: 1fr; }
     TaxonomyScreen ChatPanel { width: 1fr; }
     TaxonomyScreen #panes { width: 1fr; }
-    TaxonomyScreen TextArea { height: 1fr; }
-    TaxonomyScreen #status { color: $warning; }
+    TaxonomyScreen #panes > .panel { height: 1fr; }
+    TaxonomyScreen TextArea { height: 1fr; border: none; padding: 0; }
+    TaxonomyScreen #status { height: auto; }
     """
 
     def __init__(self) -> None:
@@ -86,15 +88,23 @@ class TaxonomyScreen(Screen):
         with Horizontal():
             yield ChatPanel("taxonomy", self.agent)
             with Vertical(id="panes"):
-                yield Label("taxonomy.yaml (editable)")
-                yield TextArea(
-                    files.read_text("taxonomy.yaml") or "",
-                    language="yaml",
-                    id="taxonomy",
-                )
-                yield Label("prompt.md (editable)")
-                yield TextArea(files.read_text("prompt.md") or "", id="prompt")
-                yield Label("", id="status")
+                with panel(Vertical(id="taxonomy-panel"), "taxonomy.yaml (editable)"):
+                    yield editor(
+                        TextArea(
+                            files.read_text("taxonomy.yaml") or "",
+                            language="yaml",
+                            id="taxonomy",
+                        )
+                    )
+                with panel(Vertical(id="prompt-panel"), "prompt.md (editable)"):
+                    yield editor(
+                        TextArea(
+                            files.read_text("prompt.md") or "",
+                            language="markdown",
+                            id="prompt",
+                        )
+                    )
+        yield Static("", id="status", classes="warn")
         yield Footer()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
@@ -102,7 +112,7 @@ class TaxonomyScreen(Screen):
         text = event.text_area.text
         if text == (files.read_text(name) or ""):  # initial load or agent write
             return
-        status = self.query_one("#status", Label)
+        status = self.query_one("#status", Static)
         if name == "prompt.md":
             files.write_text(name, text)
             status.update("")
@@ -117,7 +127,7 @@ class TaxonomyScreen(Screen):
         status.update("")
 
     def action_approve(self) -> None:
-        status = self.query_one("#status", Label)
+        status = self.query_one("#status", Static)
         try:
             taxonomy = files.read_taxonomy()
         except (OSError, ValidationError, yaml.YAMLError, TypeError) as e:

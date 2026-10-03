@@ -63,7 +63,9 @@ def project(tmp_path, monkeypatch):
 
 
 def metrics_text(screen):
-    return str(screen.query_one("#metrics", Static).render())
+    return "\n".join(
+        str(screen.query_one(i, Static).render()) for i in ("#summary", "#trend")
+    )
 
 
 async def settle(app, pilot):
@@ -88,10 +90,10 @@ async def test_disagreements_listed_then_proposal_improves_and_cache_holds():
         await settle(app, pilot)
         table = screen.query_one("#dis", DataTable)
         assert table.row_count == 4  # the four odd items are wrong
-        assert [table.get_row_at(i)[0] for i in range(4)] == [
+        assert [str(table.get_row_at(i)[0]) for i in range(4)] == [
             f"item {i}" for i in (1, 3, 5, 7)
         ]
-        assert "accuracy = 0.500" in metrics_text(screen) and "FAIL" in metrics_text(
+        assert "accuracy 0.500" in metrics_text(screen) and "FAIL" in metrics_text(
             screen
         )
         assert len(calls) == 8
@@ -112,10 +114,10 @@ async def test_disagreements_listed_then_proposal_improves_and_cache_holds():
         assert files.read_text("prompt.md") == "Classify. BETTER!"
         assert len(calls) == 16  # new prompt: every item re-run
         assert screen.query_one("#dis", DataTable).row_count == 0
-        assert "accuracy = 1.000" in metrics_text(screen) and "PASS" in metrics_text(
+        assert "accuracy 1.000" in metrics_text(screen) and "PASS" in metrics_text(
             screen
         )
-        assert "0.500 -> 0.500 -> 1.000" in metrics_text(screen)
+        assert "trend 0.500 → 0.500 → 1.000" in metrics_text(screen)
 
         await pilot.press("f2")
         await pilot.pause()
@@ -159,3 +161,139 @@ async def test_rejected_proposal_changes_nothing_and_target_metric_flips_pass_fa
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().dev_done and app.stage == 6
+
+
+async def test_redesigned_panels_summary_and_tables():
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, TuneScreen)
+        screen.model = FunctionModel(classifier)  # ty: ignore[invalid-assignment]
+        screen.rerun()
+        await settle(app, pilot)
+        panel = screen.query_one("#metrics-panel")
+        assert panel.border_title == "dev set"
+        assert panel.border_subtitle == "target accuracy ≥ 0.90 · m metric · +/- score"
+        # the metric equal to the target (exact-match) is left out
+        summary = " ".join(metrics_text(screen).split())
+        assert summary.startswith(
+            "accuracy 0.500 FAIL n=8 macro-F1 0.333 micro-F1 0.500"
+        )
+        assert "exact-match" not in summary and "trend" not in summary
+        per_label = screen.query_one("#per-label", DataTable)
+        assert [str(c) for c in per_label.get_row(per_label.ordered_rows[0].key)] == [
+            "■ a",
+            "0.50",
+            "1.00",
+            "0.67",
+            "4",
+        ]
+        assert screen.query_one("#dis-panel").border_title == "disagreements · 4"
+        assert screen.query_one("#text-panel").border_title == "text"
+        dis = screen.query_one("#dis", DataTable)
+        assert [str(c) for c in dis.get_row_at(0)] == ["item 1", "■ b", "■ a"]
+        assert "item 1" in str(screen.query_one("#detail", Static).render())
+        note = screen.query_one("#note")
+        assert str(note.render()).startswith("Dev run finished, cost")
+        assert note.has_class("note")
+        # another target metric: its own value leads and exact-match comes back
+        await pilot.press("m")
+        summary = " ".join(metrics_text(screen).split())
+        assert summary.startswith(
+            "macro_f1 0.333 FAIL n=8 exact-match 0.500 micro-F1 0.500"
+        )
+
+
+async def test_failed_item_detail_and_note_tones():
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, TuneScreen)
+        screen.model = FunctionModel(classifier)  # ty: ignore[invalid-assignment]
+        screen.rerun()
+        await settle(app, pilot)
+        screen.errors = {1: "boom"}
+        screen.show()
+        assert "Model failed: boom" in str(screen.query_one("#detail", Static).render())
+        assert str(screen.query_one("#dis", DataTable).get_row_at(0)[2]) == "failed"
+        for note, tone in [
+            ("Dev run failed: x", "error"),
+            ("Proposal failed: x", "error"),
+            ("Asking the smart model...", "warn"),
+            ("No disagreements to learn from.", "warn"),
+        ]:
+            screen.run_note, screen.note = "", note
+            screen.show()
+            assert screen.query_one("#note").has_class(tone), note
+
+
+async def test_not_ready_notice():
+    files.write_text("taxonomy.yaml", "")  # exists; remove prompt instead
+    (files.root() / "prompt.md").unlink()
+    (files.root() / "taxonomy.yaml").unlink()
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        await pilot.pause()
+        notice = app.screen.query_one("#not-ready")
+        assert str(notice.render()) == "Finish stage 3 (taxonomy and prompt) first."
+        assert notice.has_class("warn")
+
+
+async def test_proposal_modal_layout_and_diff_lines():
+    from hunches.screens.tune import ProposalScreen
+
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.push_screen(ProposalScreen("one\ntwo", "one\nthree"))
+        await pilot.pause()
+        modal = app.screen
+        box = modal.query_one("Vertical")
+        assert box.border_title == "Proposed prompt change"
+        assert box.outer_size.width == 96 and box.outer_size.height == 28
+        assert (
+            modal.query_one("#diff-panel").border_title == "diff · current → proposed"
+        )
+        assert modal.query_one("#proposal-panel").border_title == "proposal (editable)"
+        assert [b.id for b in modal.query("Button")] == ["reject", "accept"]
+        assert app.focused is not None and app.focused.id == "accept"
+        diff = str(modal.query_one("#diff", Static).render())
+        assert "-two" in diff and "+three" in diff and "@@" in diff
+
+
+async def test_disagreement_columns_fit_without_horizontal_scroll():
+    files.write_gold(
+        [
+            files.GoldRow(
+                id=str(i),
+                text=f"item {i} " + "long text " * 20,
+                labels=["b" if i % 2 else "a"],
+                split="dev",
+            )
+            for i in range(8)
+        ]
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, TuneScreen)
+        screen.model = FunctionModel(classifier)  # ty: ignore[invalid-assignment]
+        screen.rerun()
+        await settle(app, pilot)
+        await pilot.pause()
+        dis = screen.query_one("#dis", DataTable)
+        assert dis.row_count == 4
+        assert (
+            dis.virtual_size.width <= dis.size.width
+        )  # Gold and Predicted are visible

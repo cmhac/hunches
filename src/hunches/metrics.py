@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 from hunches.files import Taxonomy
 
@@ -23,6 +24,19 @@ class Metrics:
     micro_f1: float
     disagreements: list[int]  # indices where predicted != gold
     n: int
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Metrics":
+        """Inverse of dataclasses.asdict, for results stored as JSON."""
+        per_label = {k: LabelMetrics(**v) for k, v in d["per_label"].items()}
+        return cls(
+            exact_match=d["exact_match"],
+            per_label=per_label,
+            macro_f1=d["macro_f1"],
+            micro_f1=d["micro_f1"],
+            disagreements=d["disagreements"],
+            n=d["n"],
+        )
 
 
 def _ratio(num: float, den: float) -> float:

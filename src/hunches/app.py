@@ -3,13 +3,17 @@ from typing import ClassVar
 
 from dotenv import load_dotenv
 from pydantic_ai import Agent
-from pydantic_ai.messages import TextPart, UserPromptPart
+from pydantic_ai.messages import TextPart, ToolReturnPart, UserPromptPart
+from rich.table import Table
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Label, RichLog, Select, Static
 
 from hunches import cost, files
+from hunches.theme import HUNCHES
 
 
 class Placeholder(Screen):
@@ -21,59 +25,138 @@ class Placeholder(Screen):
         yield Footer()
 
 
-class StatusHeader(Static):
-    """Project, stage and total cost. Every stage screen must yield one first in compose()."""
+def panel(widget, title: str, subtitle: str = ""):
+    """Give a container the bordered, titled look from hunches.tcss."""
+    widget.add_class("panel")
+    widget.border_title = title
+    widget.border_subtitle = subtitle
+    return widget
 
-    DEFAULT_CSS = """
-    StatusHeader { dock: top; height: 1; background: $primary; color: $text; padding: 0 1; }
-    """
+
+class StatusHeader(Static):
+    """Project, stage stepper and total cost. Every stage screen must yield one first in compose()."""
 
     def on_mount(self) -> None:
         self.refresh_cost()
         # polling picks up cost.record() calls from anywhere, including worker threads
         self.set_interval(0.25, self.refresh_cost)
 
+    def on_resize(self) -> None:
+        self.refresh_cost()
+
     def refresh_cost(self) -> None:
         stage = getattr(self.app, "stage", 0)
         name = next((n for num, n, _ in STAGES if num == stage), "Setup")
+        project = Path.cwd().name
+        if len(project) > 16:
+            project = project[:15] + "…"
+        stepper = "".join(
+            "[$text-disabled]○[/]"
+            if num > stage
+            else "[$primary]◉[/]"
+            if num == stage
+            else "[$text-muted]●[/]"
+            for num, _, _ in STAGES
+        )
+
+        def left(with_name: bool) -> tuple[str, int]:
+            """Markup and plain length of everything left of the cost."""
+            text = f"[b $primary]hunches[/]  [#EEF1F5]{escape(project)}[/]  {stepper}"
+            width = len(f"hunches  {project}  ") + len(STAGES)
+            if stage:
+                text += f"  [b $primary]{stage}[/][$text-disabled]/{len(STAGES)}[/]"
+                width += len(f"  {stage}/{len(STAGES)}")
+                if with_name:
+                    text += f" {name}"
+                    width += 1 + len(name)
+            elif with_name:
+                text += f"  {name}"
+                width += 2 + len(name)
+            return text, width
+
         dollars, unknown = cost.total()
-        text = f"hunches: {Path.cwd().name} | Stage {stage}/{len(STAGES)}: {name} | "
+        self.set_class(bool(unknown), "-cost-unknown")
         if unknown:
             # never show $0 (or a bare lower bound) for an unknown price
-            unknown_models = [
-                m for m, v in cost.breakdown().items() if v["dollars"] is None
-            ]
-            text += f"cost ? [b reverse] WARNING: cost unknown for {', '.join(unknown_models)} [/]"
+            models = [m for m, v in cost.breakdown().items() if v["dollars"] is None]
+            right_plain = f" cost ? · no price for {', '.join(models)} "
         else:
-            text += f"cost ${dollars:.4f}"
-        self.update(text)
+            right_plain = f"cost ${dollars:.4f}"
+        room = self.size.width - 2  # padding; 0 before the first layout
+        markup, width = left(True)
+        if room and width + 2 + len(right_plain) > room:
+            markup, width = left(False)  # drop the stage name first
+        if unknown and room and width + 2 + len(right_plain) > room:
+            right_plain = right_plain[: max(24, room - width - 2) - 2] + "… "
+        if unknown:
+            right = f"[b reverse $warning]{escape(right_plain)}[/]"
+        else:
+            right = f"[$text-muted]cost[/] [b #EEF1F5]${dollars:.4f}[/]"
+        pad = max(2, room - width - len(right_plain))
+        self.update(markup + " " * pad + right)
 
 
 class SetupScreen(Screen):
     """First run: write .hunches/config.toml."""
 
+    DEFAULT_CSS = """
+    SetupScreen #config { height: auto; }
+    SetupScreen .row { height: 1; }
+    SetupScreen .row Label { width: 16; color: $text-muted; }
+    SetupScreen .row Input, SetupScreen .row Select { width: 1fr; }
+    SetupScreen .gap { height: 1; }
+    SetupScreen #actions { height: 1; margin-top: 1; }
+    SetupScreen #save { width: 10; }
+    SetupScreen #error { margin-left: 2; }
+    """
+
     def compose(self) -> ComposeResult:
         c = files.Config()
         yield StatusHeader()
-        with Vertical():
-            yield Label("Set up hunches (writes .hunches/config.toml)")
-            yield Select(
-                [("Local (numpy)", "local"), ("S3 Vectors", "s3")],
-                value="local",
-                allow_blank=False,
-                id="backend",
+        yield Static("Set up hunches (writes .hunches/config.toml)", classes="note")
+        with panel(Vertical(id="config"), "config.toml"):
+            with Horizontal(classes="row"):
+                yield Label("backend")
+                yield Select(
+                    [("Local (numpy)", "local"), ("S3 Vectors", "s3")],
+                    value="local",
+                    allow_blank=False,
+                    compact=True,
+                    id="backend",
+                )
+            yield Static("", classes="gap")
+            for id_, placeholder in [
+                ("corpus_dir", "local: corpus directory"),
+                ("s3_bucket", "s3: bucket"),
+                ("s3_index", "s3: index"),
+            ]:
+                yield self.field(
+                    id_, Input(placeholder=placeholder, compact=True, id=id_)
+                )
+            yield Static("", classes="gap")
+            yield self.field(
+                "embedding_model",
+                Input(
+                    placeholder="e.g. openai:text-embedding-3-small",
+                    compact=True,
+                    id="embedding_model",
+                ),
             )
-            yield Input(placeholder="local: corpus directory", id="corpus_dir")
-            yield Input(placeholder="s3: bucket", id="s3_bucket")
-            yield Input(placeholder="s3: index", id="s3_index")
-            yield Input(
-                placeholder="embedding model (e.g. openai:text-embedding-3-small)",
-                id="embedding_model",
+            yield self.field(
+                "smart_model",
+                Input(value=c.smart_model, compact=True, id="smart_model"),
             )
-            yield Input(value=c.smart_model, id="smart_model")
-            yield Input(value=c.cheap_model, id="cheap_model")
-            yield Button("Save", id="save")
-            yield Label("", id="error")
+            yield self.field(
+                "cheap_model",
+                Input(value=c.cheap_model, compact=True, id="cheap_model"),
+            )
+        with Horizontal(id="actions"):
+            yield Button("Save", id="save", variant="primary", compact=True)
+            yield Label("", id="error", classes="error")
+        yield Footer()
+
+    def field(self, name: str, widget: Input) -> Horizontal:
+        return Horizontal(Label(name), widget, classes="row")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         value = lambda i: self.query_one(f"#{i}", Input).value.strip()
@@ -97,16 +180,19 @@ class SetupScreen(Screen):
 
 
 class ConfirmScreen(ModalScreen[bool]):
+    AUTO_FOCUS = "#yes"
+
     def __init__(self, question: str) -> None:
         super().__init__()
         self.question = question
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with Vertical() as box:
+            box.border_title = "Confirm"
             yield Label(self.question)
             with Horizontal():
-                yield Button("Approve", id="yes", variant="success")
                 yield Button("Cancel", id="no")
+                yield Button("Approve", id="yes", variant="success")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
@@ -138,6 +224,13 @@ class ChatPanel(Vertical):
         self.stage = stage
         self.agent = agent
         self.history = files.load_chat(stage)
+        self.turns = 0
+        model = agent.model
+        panel(
+            self,
+            f"chat · {stage}",
+            model if isinstance(model, str) else getattr(model, "model_name", "?"),
+        )
 
     def compose(self) -> ComposeResult:
         yield RichLog(wrap=True, markup=False, id="log")
@@ -145,24 +238,43 @@ class ChatPanel(Vertical):
         yield Input(placeholder="Message the assistant", id="chat-input")
 
     def on_mount(self) -> None:
-        log = self.query_one("#log", RichLog)
-        for message in self.history:  # restore a resumed conversation
+        self.write_messages(self.history)  # restore a resumed conversation
+
+    def say(self, gutter: str, color: str, text: str) -> None:
+        """One chat turn: a coloured gutter, the text wrapping beside it, a blank row before every turn but the first."""
+        if self.turns:
+            self.query_one("#log", RichLog).write("")
+        self.turns += 1
+        if not gutter:  # errors
+            self.query_one("#log", RichLog).write(Text(text, style=color))
+            return
+        grid = Table.grid()
+        grid.add_column(width=2)
+        grid.add_column(ratio=1)
+        grid.add_row(Text(gutter, style=color), Text(text))
+        self.query_one("#log", RichLog).write(grid, expand=True)
+
+    def write_messages(self, messages: list, users: bool = True) -> None:
+        theme = self.app.current_theme
+        for message in messages:
             for part in message.parts:
-                if isinstance(part, UserPromptPart):
-                    log.write(f"> {part.content}")
+                if isinstance(part, UserPromptPart) and users:
+                    self.say("› ", theme.primary, str(part.content))
                 elif isinstance(part, TextPart):
-                    log.write(part.content)
+                    self.say("│ ", theme.accent or "", part.content)
+                elif isinstance(part, ToolReturnPart):
+                    muted = theme.variables["text-muted"]
+                    self.say("↳ ", muted, f"{part.tool_name} · {part.content}")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if not text:
             return
         event.input.value = ""
-        self.query_one("#log", RichLog).write(f"> {text}")
+        self.say("› ", self.app.current_theme.primary, text)
         self.run_worker(self.reply(text), exclusive=True)
 
     async def reply(self, text: str) -> None:
-        log = self.query_one("#log", RichLog)
         live = self.query_one("#live", Static)
         try:
             async with self.agent.run_stream(
@@ -176,10 +288,10 @@ class ChatPanel(Vertical):
                 self.history = result.all_messages()
         except Exception as e:  # noqa: BLE001  network/auth errors should not kill the app
             live.update("")
-            log.write(f"Error: {e}")
+            self.say("", self.app.current_theme.error or "", f"Error: {e}")
             return
         live.update("")
-        log.write(reply)
+        self.write_messages(new, users=False)
         files.save_chat(self.stage, self.history)
         model = self.agent.model
         name = model if isinstance(model, str) else getattr(model, "model_name", "?")
@@ -213,6 +325,7 @@ STAGES = [
 
 class HunchesApp(App):
     TITLE = "hunches"
+    CSS_PATH = "hunches.tcss"
     BINDINGS: ClassVar = [
         ("q", "quit", "Quit"),
         ("n", "goto(1)", "Next stage"),
@@ -223,6 +336,8 @@ class HunchesApp(App):
     stage_shown = False
 
     def on_mount(self) -> None:
+        self.register_theme(HUNCHES)
+        self.theme = "hunches"
         if (files.root() / "config.toml").exists():
             self.goto_stage(files.first_incomplete_stage())
         else:

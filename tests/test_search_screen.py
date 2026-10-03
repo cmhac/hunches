@@ -5,7 +5,7 @@ import pytest
 from pydantic_ai import Embedder
 from pydantic_ai.embeddings import EmbeddingResult, TestEmbeddingModel
 from pydantic_ai.usage import RequestUsage
-from textual.widgets import DataTable, Label, Static
+from textual.widgets import Button, DataTable, Label, Static
 
 from hunches import files, search
 from hunches.app import HunchesApp
@@ -59,7 +59,7 @@ async def run(pilot, app, screen):
 
 def rows(screen):
     table = screen.query_one("#bands", DataTable)
-    return [list(table.get_row_at(i)) for i in range(table.row_count)]
+    return [[str(c) for c in table.get_row_at(i)] for i in range(table.row_count)]
 
 
 async def test_band_table_matches_counts():
@@ -113,3 +113,59 @@ async def test_embedding_model_mismatch_is_shown():
         error = str(screen.query_one("#error", Label).render())
         assert "mismatch" in error and "embedding_model" in error
         assert app.is_running
+
+
+async def test_panels_notice_classes_and_empty_state():
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = await open_search(pilot, app)
+        for id_ in ("#done", "#warning", "#error"):
+            assert not screen.query_one(id_).display  # empty messages take no row
+        assert screen.query_one("#bands-panel").border_title == (
+            "candidates.jsonl · by similarity band"
+        )
+        assert screen.query_one("#seeds-panel").border_title == "best seed (items won)"
+        assert "Run the search to see which seeds find the most items." in str(
+            screen.query_one("#seeds", Static).render()
+        )
+        status = screen.query_one("#status")
+        assert str(status.render()) == "Seeds are not approved yet."
+        assert status.has_class("warn")
+        assert screen.query_one("#run", Button).size.height == 1  # compact
+
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        screen.action_run()  # synchronous: the worker has not run yet
+        assert screen.query_one("#run", Button).disabled
+        assert str(screen.query_one("#status").render()) == "Searching..."
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not screen.query_one("#run", Button).disabled
+        done = screen.query_one("#done")
+        assert str(done.render()).startswith("Done. 4 candidates written")
+        assert done.has_class("ok") and done.display
+        assert not str(screen.query_one("#status").render())
+
+
+async def test_mismatch_error_has_error_class():
+    files.write_config(files.Config(corpus_dir="corpus", embedding_model="other-model"))
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        await run(pilot, app, screen)
+        assert screen.query_one("#error").has_class("error")
+        assert "\nFix:" in str(screen.query_one("#error").render())
+
+
+async def test_counts_use_thousands_separators():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.show(
+            [
+                {"id": str(i), "text": "t", "max_similarity": 0.7, "best_seed": "s"}
+                for i in range(1204)
+            ]
+        )
+        assert rows(screen)[-1] == ["Total", "1,204", ""]
+        assert rows(screen)[4][1:] == ["1,204", "1,204"]

@@ -4,12 +4,14 @@ import time
 from pathlib import Path
 from typing import ClassVar
 
+from rich.text import Text
 from textual.app import ComposeResult
+from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Input, Static
 
 from hunches import candidates, cost, files
-from hunches.app import StatusHeader
+from hunches.app import StatusHeader, panel
 from hunches.classifier import classify_many
 
 SAMPLE = "threshold_sample.json"
@@ -68,8 +70,9 @@ class ThresholdScreen(Screen):
     BINDINGS: ClassVar = [("f2", "save", "Save cutoff")]
     AUTO_FOCUS = "#bands"
     DEFAULT_CSS = """
-    ThresholdScreen #bands { height: auto; max-height: 14; }
-    ThresholdScreen #note { height: auto; color: $warning; }
+    ThresholdScreen #explain, ThresholdScreen #note { height: auto; }
+    ThresholdScreen #bands-panel { height: auto; }
+    ThresholdScreen #bands { height: auto; }
     """
 
     def __init__(self) -> None:
@@ -77,21 +80,32 @@ class ThresholdScreen(Screen):
         self.ready = files.read_text("taxonomy.yaml") is not None
         self.cands = files.read_jsonl("candidates.jsonl")
         self.note = ""
+        self.progress: tuple[int, int] | None = None  # (sampled, total) while running
         self.ids: list[list[str]] = []
         self.predictions: dict[str, list[str] | None] = {}
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         if not self.ready:
-            yield Static("Finish stage 3 (taxonomy and prompt) first.")
+            yield Static(
+                "Finish stage 3 (taxonomy and prompt) first.",
+                id="not-ready",
+                classes="warn",
+            )
             yield Footer()
             return
         yield Static(
             "Off-topic = predicted exactly {off_topic}. Small samples are noisy; mind n. "
             "Enter on a row picks its lower bound.",
+            id="explain",
+            classes="note",
             markup=False,
         )
-        yield DataTable(id="bands", cursor_type="row")
+        with panel(
+            Vertical(id="bands-panel"),
+            f"off-topic rate by band · {files.read_config().cheap_model}",
+        ):
+            yield DataTable(id="bands", cursor_type="row")
         yield Input(placeholder="cutoff, e.g. 0.65 (F2 saves)", id="cutoff")
         yield Static("", id="note", markup=False)
         yield Footer()
@@ -99,9 +113,11 @@ class ThresholdScreen(Screen):
     def on_mount(self) -> None:
         if not self.ready:
             return
-        self.query_one("#bands", DataTable).add_columns(
-            "Band", "Candidates", "Sampled", "Off-topic rate", "Cumulative >= lower"
-        )
+        table = self.query_one("#bands", DataTable)
+        table.add_column("Band", width=8)
+        for name in ("Candidates", "Sampled", "Off-topic rate"):
+            table.add_column(Text(name, justify="right"))
+        table.add_column(Text("Cumulative ≥ lower", justify="right"), width=20)
         self.ids = sample_bands(self.cands)
         saved = json.loads(files.read_text(SAMPLE) or "{}")
         self.predictions = saved.get("predictions", {})
@@ -118,14 +134,26 @@ class ThresholdScreen(Screen):
                 if r["lower"] == candidates.BANDS[-1]
                 else f"{r['lower']:.3f}"
             )
+            right = lambda v: Text(v, justify="right")
             table.add_row(
                 label,
-                str(r["candidates"]),
-                str(r["sampled"]),
-                rate_text(r),
-                str(r["cumulative"]),
+                right(f"{r['candidates']:,}"),
+                right(f"{r['sampled']:,}"),
+                right(rate_text(r)),
+                right(f"{r['cumulative']:,}"),
             )
-        self.query_one("#note", Static).update(self.note)
+        self.query_one("#bands-panel").border_subtitle = (
+            f"sampling {self.progress[0]}/{self.progress[1]}" if self.progress else ""
+        )
+        note = self.query_one("#note", Static)
+        note.update(self.note)
+        note.set_classes(
+            "note"
+            if self.note.startswith("Sampled")
+            else "error"
+            if "failed:" in self.note
+            else "warn"
+        )
 
     async def run_sample(self) -> None:
         """Classify the sampled items that have no stored prediction; persist as they finish."""
@@ -135,6 +163,8 @@ class ThresholdScreen(Screen):
         todo = [x for band in self.ids for x in band if x not in self.predictions]
         before = cost.total()[0]
         start = time.monotonic()
+        total = sum(len(band) for band in self.ids)
+        self.progress = (total - len(todo), total)
         try:
             async for i, p in classify_many(
                 [by_id[x] for x in todo],
@@ -150,14 +180,17 @@ class ThresholdScreen(Screen):
                         SAMPLE,
                         json.dumps({"ids": self.ids, "predictions": self.predictions}),
                     )
+                    self.progress = (len(self.predictions), total)
                 self.show()
         except Exception as e:  # noqa: BLE001  auth/network errors must not kill the app
             self.note = f"Sampling failed: {e}"
+            self.progress = None
             self.show()
             return
         after, unknown = cost.total()
         spent = "?" if unknown else f"${after - before:.4f}"
         self.note = f"Sampled {len(todo)} items in {time.monotonic() - start:.1f}s, cost {spent}."
+        self.progress = None
         self.show()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
