@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import Literal
 
 import platformdirs
 from pydantic import BaseModel
+
+from hunches import files
 
 VERSION = 1
 
@@ -200,3 +203,32 @@ def use_new() -> None:
     system.classifier_model = rec["classifier"]
     system.recommendation_seen = RECOMMENDED_REVISION
     write_system(system)
+
+
+def project_status(path: str | Path) -> tuple[str, str]:
+    """(status word, detail) for a registered project; reads files only, no network."""
+    if not Path(path).is_dir():
+        return "MISSING DIR", str(path)
+    try:
+        config = files.read_config(Path(path))
+    except (OSError, ValueError):  # missing, bad TOML (a ValueError) or invalid fields
+        return "NO CONFIG", str(Path(path) / ".hunches" / "config.toml")
+    if config.backend == "s3":
+        return "OK (s3 not checked)", ""
+    corpus = Path(path) / (config.corpus_dir or "")  # relative to the project
+    missing = [
+        f
+        for f in ("vectors.npy", "items.jsonl", "meta.json")
+        if not (corpus / f).exists()
+    ]
+    if missing:
+        return "MISSING CORPUS", f"{corpus}: missing {', '.join(missing)}"
+    return "OK", ""
+
+
+def delete_project_files(path: str | Path) -> None:
+    """Remove `<path>/.hunches/` and nothing else (never the corpus, S3 or the project dir)."""
+    target = Path(path) / ".hunches"
+    if target.is_symlink() or not target.is_dir():
+        raise ValueError(f"{target} is not a directory")
+    shutil.rmtree(target)

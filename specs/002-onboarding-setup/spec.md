@@ -188,6 +188,8 @@ Keys: `enter` open; `n` new project; `e` edit (opens the project then Project se
 
 Empty state (no projects): "No projects yet. Press n to create one."
 
+Implementation notes (task 07): `system.project_status(path)` computes the status (so `app.open_project` can refuse an unhealthy project without importing the screen); S3 projects show `OK (s3 not checked)`; the Status column holds the word and the detail (which corpus files are missing) goes into the error text when opening fails. `files.read_config`/`write_config` take an optional `project` path so `l` can rewrite another project's `corpus_dir` without changing cwd. "Delete project files" leaves the registry entry in place (the row then shows `NO CONFIG`; use Remove to drop it). `esc` pops back to the open project, so the Projects screen must be pushed over a stage screen (task 09). The header shows a non-stage screen's name from its `stage_name` attribute. `n` (new project) and `e` (edit) are added by tasks 06 and 08, which own the screens they open.
+
 ### New project (`NewProjectScreen`, replaces 001's `SetupScreen`)
 
 A form (not a wizard) on one screen:

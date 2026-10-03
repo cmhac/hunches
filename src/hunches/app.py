@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -12,7 +13,7 @@ from textual.markup import escape
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Label, RichLog, Select, Static
 
-from hunches import cost, files
+from hunches import cost, files, system
 from hunches.theme import HUNCHES
 
 
@@ -46,7 +47,12 @@ class StatusHeader(Static):
 
     def refresh_cost(self) -> None:
         stage = getattr(self.app, "stage", 0)
-        name = next((n for num, n, _ in STAGES if num == stage), "Setup")
+        name = next(
+            (n for num, n, _ in STAGES if num == stage),
+            getattr(
+                self.screen, "stage_name", "Setup"
+            ),  # non-stage screens name themselves
+        )
         project = Path.cwd().name
         if len(project) > 16:
             project = project[:15] + "…"
@@ -352,6 +358,35 @@ class HunchesApp(App):
         else:
             self.stage_shown = True
             self.push_screen(screen)
+
+    def open_project(self, path: str | Path) -> None:
+        """Switch to the project at `path`. The only place that changes the working directory."""
+        path = Path(path)
+        status, detail = system.project_status(path)
+        if status not in ("OK", "OK (s3 not checked)"):
+            self.notify(f"Cannot open {path.name}: {status} {detail}", severity="error")
+            return
+        if any(w.is_running for w in self.workers):
+            self.push_screen(
+                ConfirmScreen("A run is in progress; stop it and switch?"),
+                lambda stop: stop and self.switch_to(path),
+            )
+        else:
+            self.switch_to(path)
+
+    def switch_to(self, path: Path) -> None:
+        try:
+            os.chdir(path)
+        except OSError as e:
+            self.notify(f"Cannot open {path.name}: {e}", severity="error")
+            return
+        self.workers.cancel_all()
+        self.stage = 0
+        while len(self.screen_stack) > 1:
+            self.pop_screen()
+        system.touch_project(path)
+        self.stage_shown = False
+        self.goto_stage(files.first_incomplete_stage())
 
     def action_goto(self, step: int) -> None:
         if self.stage and not isinstance(self.screen, ModalScreen):

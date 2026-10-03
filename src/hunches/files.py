@@ -104,18 +104,24 @@ def write_text(name: str, text: str) -> None:
     (root() / name).write_text(text)
 
 
-def read_config() -> Config:
-    return Config.model_validate(tomllib.loads((root() / "config.toml").read_text()))
+def read_config(project: Path | None = None) -> Config:
+    """Read config.toml of `project` (default: the current directory's project)."""
+    path = (project / ".hunches" if project else root()) / "config.toml"
+    return Config.model_validate(tomllib.loads(path.read_text()))
 
 
-def write_config(config: Config) -> None:
+def write_config(config: Config, project: Path | None = None) -> None:
     # json.dumps output is a valid TOML basic string / number / bool for our value types
     lines = [
         f"{k} = {json.dumps(v)}"
         for k, v in config.model_dump().items()
         if v is not None
     ]
-    write_text("config.toml", "\n".join(lines) + "\n")
+    text = "\n".join(lines) + "\n"
+    if project:  # another project's config: never chdir to it
+        (project / ".hunches" / "config.toml").write_text(text)
+    else:
+        write_text("config.toml", text)
 
 
 def read_state() -> State:
