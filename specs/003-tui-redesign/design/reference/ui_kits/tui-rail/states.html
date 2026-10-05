@@ -1,0 +1,21 @@
+<!-- @dsCard group="hunches TUI" viewport="1200x800" name="All states gallery (rail)" subtitle="Every state at 80×24, grouped by stage" -->
+<!doctype html>
+<html><head><meta charset="utf-8"><title>hunches screen states</title>
+<link rel="stylesheet" href="../../styles.css">
+<style>html,body{margin:0;background:var(--ink-0);color:var(--fg);font-family:var(--font-mono)}a{color:var(--primary)}a:hover{color:var(--primary-lighten)}[data-panel]:has(+ [data-footer]),:has(+ [data-footer]) > [data-panel]{padding-bottom:calc(var(--row) / 2) !important}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../assets/hds-loader-rail.js"></script>
+<script src="data.js"></script>
+</head><body><div id="root"></div>
+<script>
+loadHDS('../../').then(async function (H) {
+  Object.assign(window, H);
+  var files = ['common', 'Settings', 'Brief', 'Search', 'Taxonomy', 'Gold', 'Tune', 'Test', 'Threshold', 'Run', 'Browse', 'App'];
+  var srcs = await Promise.all(files.map(function (f) { return fetch(f + '.jsx').then(function (r) { return r.text(); }); }));
+  (0, eval)(Babel.transform(srcs.join('\n'), { presets: ['react'] }).code + '\nwindow.App = App; window.Gallery = Gallery; window.STATES = STATES;');
+  ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(window.Gallery));
+});
+</script>
+</body></html>

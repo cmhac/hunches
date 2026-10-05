@@ -1,0 +1,25 @@
+<!-- @dsCard group="Components" viewport="700x400" name="Layout" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>html,body{margin:0;background:var(--ink-0);color:var(--fg);font-family:var(--font-mono);font-size:var(--font-size);line-height:var(--row)}a{color:var(--primary)}a:hover{color:var(--primary-lighten)}#root{padding:16px}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../assets/hds-loader.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+loadHDS('../../').then((H) => {
+  const { Terminal, StatusHeader, Footer, Panel, Modal, DataTable, Bar, ProgressBar, Sparkline, Badge, LabelTag, Diff, ChatPanel, Input, Button, Select, TextArea, LabelOption, Notice, Toast } = H;
+  const Grid = ({ cols = 80, rows = 10, children }) => <Terminal cols={cols} rows={rows} chrome={false}>{children}</Terminal>;
+  const Card = () => (
+    <Grid rows={18}>
+      <div style={{ display: 'flex', flex: 1 }}>
+        <Panel title="chat" subtitle="smart model" focused grow><span>Focused panel: blue border and title.</span></Panel>
+        <Panel title="seeds.csv · 14" subtitle="3 of 14" grow><span style={{ color: 'var(--fg-muted)' }}>Blurred panel.</span></Panel>
+      </div>
+      <Modal title="Approve" width={46} actions={<><Button>Cancel</Button><Button variant="success" focused>Approve</Button></>}>Approve 14 seeds and continue to search?</Modal>
+    </Grid>
+  );
+  ReactDOM.createRoot(document.getElementById('root')).render(<Card />);
+});
+</script></body></html>

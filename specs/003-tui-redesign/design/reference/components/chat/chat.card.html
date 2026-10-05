@@ -1,0 +1,26 @@
+<!-- @dsCard group="Components" viewport="700x380" name="Chat" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>html,body{margin:0;background:var(--ink-0);color:var(--fg);font-family:var(--font-mono);font-size:var(--font-size);line-height:var(--row)}a{color:var(--primary)}a:hover{color:var(--primary-lighten)}#root{padding:16px}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../assets/hds-loader.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+loadHDS('../../').then((H) => {
+  const { Terminal, StatusHeader, Footer, Panel, Modal, DataTable, Bar, ProgressBar, Sparkline, Badge, LabelTag, Diff, ChatPanel, Input, Button, Select, TextArea, LabelOption, Notice, Toast } = H;
+  const Grid = ({ cols = 80, rows = 10, children }) => <Terminal cols={cols} rows={rows} chrome={false}>{children}</Terminal>;
+  const Card = () => (
+    <Grid cols={60} rows={18}>
+      <ChatPanel focused model="claude-sonnet-4-5" input="" messages={[
+        { role: 'user', text: 'Find posts where someone says they were laid off.' },
+        { role: 'agent', text: 'Should second-hand accounts count, e.g. "my partner was let go"?' },
+        { role: 'user', text: 'No, only the author.' },
+        { role: 'tool', text: 'propose_seeds · added 6 seeds' },
+      ]} streaming="Added 6 seeds. Review them on the right" />
+    </Grid>
+  );
+  ReactDOM.createRoot(document.getElementById('root')).render(<Card />);
+});
+</script></body></html>
