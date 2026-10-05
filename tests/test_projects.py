@@ -7,6 +7,7 @@ from textual.widgets import Button, DataTable, Input, Static
 
 from hunches import files, system
 from hunches.app import ConfirmScreen, HunchesApp, StatusHeader
+from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.paths import PathPicker
 from hunches.screens.projects import ProjectsScreen, RemoveModal
 from hunches.theme import HUNCHES
@@ -130,8 +131,59 @@ async def test_empty_state(tmp_path, monkeypatch):
     async with app.run_test() as pilot:
         await pilot.pause()
         empty = app.screen.query_one("#empty", Static)
-        assert "No projects yet. Press n to create one." in str(empty.render())
+        assert "No projects yet." in str(empty.render())
         assert not app.screen.query_one("#banner").display
+
+
+def button_state(screen):
+    return {
+        b.id: b.disabled for b in screen.query(Button) if b.id and b.id.startswith("p-")
+    }
+
+
+async def test_buttons_follow_the_highlighted_row(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ok = make_project(tmp_path, "ok")
+    register(ok, tmp_path / "gone")
+    app = Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        labels = [str(b.label) for b in screen.query(".buttons Button").results(Button)]
+        assert labels == [
+            "New project  n",
+            "Edit  e",
+            "Remove  x",
+            "Locate  l",
+            "Refresh  r",
+        ]
+        assert button_state(screen) == {
+            "p-new": False,
+            "p-edit": False,
+            "p-remove": False,
+            "p-locate": True,  # highlighted row is OK
+            "p-refresh": False,
+        }
+        await pilot.press("down")
+        await pilot.pause()
+        assert button_state(screen)["p-locate"] is False  # MISSING DIR
+        await pilot.click("#p-locate")
+        await pilot.pause()
+        assert isinstance(app.screen, PathPicker)
+
+
+async def test_edit_remove_locate_disabled_when_empty(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    register()
+    app = Host()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        state = button_state(app.screen)
+        assert state["p-edit"] and state["p-remove"] and state["p-locate"]
+        assert not state["p-new"] and not state["p-refresh"]
+        await pilot.click("#empty-new")
+        await pilot.pause()
+        assert isinstance(app.screen, NewProjectScreen)
 
 
 def at_stage_2(project):
