@@ -1,6 +1,6 @@
 # 14 — Stage 8 Full run: one centred block, untested-prompt block
 
-Spec: D11, O2, conflict 2. Handoff: `design/README.md` change-log entries "Full run simplified…", "Runs: every classifier run…", "Full run: an untested prompt is a hard block"; mock `ui_kits/tui-rail/Run.jsx`; states `run/not-ready`, `run/idle`, `run/no-samples`, `run/price-unknown`, `run/untested`, `run/running`, `run/stopped`, `run/complete`, `run/failed`. `[visual]` + `[behaviour]`. File: `screens/run.py`.
+Spec: D11 (hard block confirmed by Chris), O2, conflict 2. Handoff: `design/README.md` change-log entries "Full run simplified…", "Runs: every classifier run…", "Full run: an untested prompt is a hard block"; mock `ui_kits/tui-rail/Run.jsx`; states `run/not-ready`, `run/idle`, `run/no-samples`, `run/price-unknown`, `run/untested`, `run/running`, `run/stopped`, `run/complete`, `run/failed`. `[visual]` + `[behaviour]`. File: `screens/run.py`.
 
 ## Goal
 Make the Full run page match the other run screens and turn "untested prompt" from a warning into a hard block.

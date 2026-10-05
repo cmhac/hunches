@@ -1,6 +1,6 @@
 # 02 — Rail shell and footer
 
-Spec: D2, D3, O5. Handoff: `design/README.md` §3.1; mock `components-rail/frame/Rail.jsx`, `Footer.jsx`. `[visual]`.
+Spec: D2, D3, O4. Handoff: `design/README.md` §3.1; mock `components-rail/frame/Rail.jsx`, `Footer.jsx`. `[visual]`.
 
 ## Goal
 At ≥100 columns, `StatusHeader` becomes a 26-column left rail; below 100 columns today's one-row header is unchanged.

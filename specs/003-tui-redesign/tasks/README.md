@@ -32,7 +32,8 @@ Same as `../../002-onboarding-setup/tasks/README.md` (minimal implementation; ch
 | 14 | Full run: one centred block, untested-prompt block | 11, 13 | 12 |
 | 15 | Tuning results column, buttons, Edit prompt modal, run indicator | 10, 11 | 12–14 |
 | 16 | Tuning chat: tools, context, proposal cards, layout, tabs | 03, 08, 15 | — |
-| 17 | End-to-end, size sweep, docs | all | — |
+| 17 | Taxonomy versions: change labels after gold exists without losing data | 08, 09, 12, 13, 14 | 15, 16 |
+| 18 | End-to-end, size sweep, docs | all | — |
 
 Merge conflicts to expect: 01 and 02 both edit `app.py` and `hunches.tcss` (keep hunks separate); 03 and 16 both touch `ChatPanel`; 11 moves `seconds_text` out of `screens/run.py` (12–14 import the new location); 15 and 16 both rewrite most of `screens/tune.py` (16 starts from 15's result); 06 and 08 both add to `files.py` only through 03's helper.
 
@@ -41,6 +42,5 @@ Merge conflicts to expect: 01 and 02 both edit `app.py` and `hunches.tcss` (keep
 | When | Who | Action |
 |------|-----|--------|
 | Task 02 | agent, then flag | If the explicit-width footer (spec D2) is fragile and the fallback is used, tell Chris and the design owner. |
-| Before/after task 08 | Chris | Spec Open item O1: should Taxonomy lock once labels are used by gold rows? Default: no. |
-| Before task 14 | Chris | Spec Open item O2: where the Full run block's button goes (Tuning vs Test). Default: Tuning, as designed. |
-| Task 17 manual check | Chris | A real terminal at 80×24, 100×30 and 120×36 with a real key and a small real corpus; check `ctrl+s` in tmux (spec O4). |
+| Before task 14 | Chris | Minor, spec Open item O2: the Full run block's button goes to Tuning as designed; say if it should go to Test (stage 6). The hard block itself is confirmed. |
+| Task 18 manual check | Chris | A real terminal at 80×24, 100×30 and 120×36 with a real key and a small real corpus. |

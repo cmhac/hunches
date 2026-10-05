@@ -1,6 +1,6 @@
 # 08 — Stage 3 Taxonomy and prompt: context turn, mode select, structured view and edit
 
-Spec: D4, D5, O1, O4. Handoff: `design/README.md` §5 "3 Taxonomy and prompt"; `design/BACKEND_CHANGES.md` §1, §4 (Taxonomy), §5; mock `ui_kits/tui-rail/Taxonomy.jsx` (it carries the exact message bodies and summaries); states `taxonomy/start`, `taxonomy/ready`, `taxonomy/context-open`, `taxonomy/context-updated`, `taxonomy/context-updated-open`, `taxonomy/drafted`, `taxonomy/edit-labels`, `taxonomy/edit-labels-invalid`, `taxonomy/edit-prompt`, `taxonomy/mode-open`, `taxonomy/mode-changed`, `taxonomy/edits-sent`, `taxonomy/edits-sent-open`, `taxonomy/tool-open`, `taxonomy/confirm`. `[behaviour]` + `[backend]`. File: `screens/taxonomy.py`. The largest UI task; consider doing it in the three commits-worth of steps below even though it lands as one commit.
+Spec: D4, D5, D12 (the version hook is task 17). Handoff: `design/README.md` §5 "3 Taxonomy and prompt"; `design/BACKEND_CHANGES.md` §1, §4 (Taxonomy), §5; mock `ui_kits/tui-rail/Taxonomy.jsx` (it carries the exact message bodies and summaries); states `taxonomy/start`, `taxonomy/ready`, `taxonomy/context-open`, `taxonomy/context-updated`, `taxonomy/context-updated-open`, `taxonomy/drafted`, `taxonomy/edit-labels`, `taxonomy/edit-labels-invalid`, `taxonomy/edit-prompt`, `taxonomy/mode-open`, `taxonomy/mode-changed`, `taxonomy/edits-sent`, `taxonomy/edits-sent-open`, `taxonomy/tool-open`, `taxonomy/confirm`. `[behaviour]` + `[backend]`. File: `screens/taxonomy.py`. The largest UI task; consider doing it in the three commits-worth of steps below even though it lands as one commit.
 
 ## Goal
 The assistant starts with the context the user has and stays in sync; the user edits labels, mode and prompt through structured views with explicit Save/Discard; nothing is written per keystroke.
@@ -41,4 +41,4 @@ The assistant starts with the context the user has and stays in sync; the user e
 - Breakers in `tests/test_taxonomy_screen.py`: `#taxonomy`/`#prompt` TextAreas, `#status`, `Cannot approve`, per-keystroke write tests, `build_instructions`.
 
 ## Done when
-- `taxonomy/*` states match at the three sizes; `taxonomy.yaml` format unchanged. Flag Open item O1 (lock) and O4 (`ctrl+s`) in the final message.
+- `taxonomy/*` states match at the three sizes; `taxonomy.yaml` format unchanged. Leave a single seam for task 17: the Labels Save path and `write_taxonomy` both call one function `commit_taxonomy(new)` that today just writes the file and records the edit; task 17 puts the archive-and-confirm logic in front of it. Do not add a lock.

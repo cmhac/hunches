@@ -35,7 +35,8 @@ The handoff leaves several questions to the implementer ("§6 Open questions"). 
 | D8 | ETA when the cache skews the rate (BACKEND §8) | `classify_many` already reports it: `Prediction.cached`. ETA = `(total − done) × elapsed ÷ live_done`, shown only once `live_done ≥ 3`. | `classifier.Prediction.cached`. |
 | D9 | What "leaving the screen" stops (BACKEND §12.4) | A stage switch (`goto_stage`, `switch_to`) removes the screen, which cancels its workers; make that explicit and test it. Overlays (Project settings F3, Projects F4, System F5) do not stop a run; `app.open_project` already asks before switching away from a running one. | `app.py`. |
 | D10 | `include_reasoning` flag for the full run (BACKEND §10.5) | **Not added.** Reasoning is stored for dev and test runs only; `results.jsonl` is unchanged. Add the flag only if asked. | Minimal-implementation principle. |
-| D11 | Which prompt counts as "tested" for the Full run hard block | The prompt recorded in `test_result.json` (`final.prompt_hash`, which already covers `prompt.md` plus the classifier model). There is no per-dev-run record to compare against and none is added. See Open item O2. | `final.py`, `run.py`. |
+| D11 | Which prompt counts as "tested" for the Full run hard block | The prompt recorded in `test_result.json` (`final.prompt_hash`, which already covers `prompt.md` plus the classifier model). There is no per-dev-run record to compare against and none is added. The hard block itself is confirmed by Chris (an untested prompt can never start the full run). See Open item O2 for the button target only. | `final.py`, `run.py`. |
+| D12 | Changing labels after gold rows exist | **Allowed, non-destructively, as a new taxonomy version** (task 17). Chris, 2026-10-05: users must be able to go back and modify the taxonomy once gold rows exist; it requires rebuilding gold rows but must not delete data, so users can return to what they had. Rules below under "Taxonomy versions". | Replaces the handoff's "labels stay locked" (BACKEND §11.7), which the code never enforced. |
 
 ## Conflicts and corrections in the handoff
 
@@ -47,7 +48,7 @@ Found while cross-reading. Resolutions are binding for the tasks.
    - Tuning controls: §5 lists a target select row, then Propose / Done. The change log has row 1 = target select, `−`, value, `+`; row 2 = `Propose edit  e`, `Edit prompt  o`, `Done  F2`. **Follow the change log** (task 15).
    - Full run: §5 keeps the estimate and run panels and a Start/Stop button pair. The change log reduces it to one centred block. **Follow the change log** (task 14).
    - Keys: §2 says the only new keys are `ctrl+s` and Enter/Esc in editors. The change log adds `o` (Edit prompt), `c` (Tuning chat/results tab), and `x`/`s` (Stop/Resume) on Tuning, Test and Threshold. **The list in §2 is out of date.**
-3. **BACKEND §11.7 says "labels stay locked once gold labelling has started". Nothing in the code locks them** (`p` reaches Taxonomy at any time and the screen is editable). This spec does not add a lock. See Open item O1.
+3. **BACKEND §11.7 says "labels stay locked once gold labelling has started". Nothing in the code locks them**, and Chris wants the opposite: editing must be possible, without losing data. Superseded by D12 and task 17; the §11.7 "not in scope" line does not apply.
 4. **BACKEND §10 changes the string the cache hashes** (`classifier.system_prompt`). Consequence for existing projects: the first dev/test/threshold run after upgrading re-classifies everything and is billed. `final.prompt_hash` does *not* cover the system sentence, so an existing `test_result.json` is not marked STALE. It also has no `reasoning` key in its disagreements, so the Test and Tune detail panels must tolerate a missing one (task 13).
 5. **Removing classification from Gold (BACKEND §6) removes the cache warm-up** Gold used to give Tuning, so the first Tuning run costs the full dev set. Intended; nothing to do, but state it in the README (task 17).
 6. **BACKEND §4 relies on `ChatPanel`'s Input bubbling `Input.Submitted`** (today `BriefScreen.on_input_submitted` writes `brief.md` from the first chat message). The new `ChatPanel` has a send button too, so it must post its own message (task 3) and Brief handles that instead.
@@ -75,7 +76,25 @@ Found while cross-reading. Resolutions are binding for the tasks.
 | Full run | `screens/run.py` | 14 |
 | Tuning results column, buttons, Edit prompt modal, run indicator | `screens/tune.py` | 15 |
 | Tuning chat, tools, context, proposal cards | `screens/tune.py` | 16 |
-| E2E, size sweep, docs | `tests/`, `README.md`, `AGENTS.md` | 17 |
+| Taxonomy versions (archive, restore, rebuild gold) | `files.py`, `screens/taxonomy.py`, `screens/gold.py` | 17 |
+| E2E, size sweep, docs | `tests/`, `README.md`, `AGENTS.md` | 18 |
+
+## Taxonomy versions (D12, task 17)
+
+**Why.** `gold.jsonl` labels are names validated against the taxonomy's label set and mode (`files.validate_labels`), so changing either makes existing gold rows meaningless; the test result, threshold sample, threshold and full-run results derive from them. Today nothing stops or tracks this.
+
+**What starts a new version.** Saving a Labels edit (or the agent's `write_taxonomy`, after the user confirms) that changes the **set of label names or the mode**, when `files.taxonomy_in_use()` is true (any gold row has labels). Description-only edits, label reordering, and prompt edits do **not**: gold stays valid, so they save normally. If no gold row is labelled yet, saving is normal.
+
+**What the tool does** (plain files, no git, nothing deleted):
+1. Archive the current version into `.hunches/versions/<n>/` (`n` = highest existing + 1): copies of `taxonomy.yaml`, `prompt.md`, `gold.jsonl`, `state.json`, and, when present, `test_result.json`, `threshold.json`, `threshold_sample.json`, `results.jsonl`, plus `meta.json`. `config.toml`, `candidates.jsonl`, `seeds.csv`, the chat history and the classifier cache are **not** archived (they are shared across versions; the cache is keyed by model, prompt and text, so it stays correct).
+2. Write the new `taxonomy.yaml`. Keep `prompt.md` as is (the user will revise it; the old text is in the archive).
+3. Rewrite `gold.jsonl` with the **same items and splits and every label cleared**, so the user relabels the same 50 + 50 items under the new labels. (Carrying over labels that "still fit" is not done: adding a label can make old labels wrong, and the rule has to be simple and safe.)
+4. Clear `taxonomy_approved`, `dev_done`, `test_done`, `threshold_chosen` in `state.json` and **move** (not copy) the archived `test_result.json`, `threshold.json`, `threshold_sample.json` and `results.jsonl` out of the live `.hunches/`, so `first_incomplete_stage()` returns 3 and every later stage starts clean. A confirmation modal states all of this before anything happens: "Gold labels were made with the current labels. Saving starts a new taxonomy version: dev and test labelling restart on the same items (your current labels, prompt and results are kept as version N and can be restored). Continue?"
+5. Record an edit line for the agent (task 03 `record`, no model call) saying a new version started and gold labels were cleared.
+
+**Restore.** The Labels panel subtitle shows `version N+1` (current = archived count + 1) and a **Versions** button opens a modal listing archived versions (number, date, mode, labels, `dev_labelled`/`test_labelled`). **Restore** first archives the current state as a new version (so restoring never loses work), then copies the chosen version's files back into the live `.hunches/` and removes the live files that version did not have (they are in the archive just made). Restoring is itself confirmed. Nothing in `versions/` is ever deleted by hunches.
+
+**Not versioned.** Seeds and candidates are shared by all versions: changing seeds is a separate flow (Search staleness, task 07).
 
 ## New and changed stored data
 
@@ -83,6 +102,7 @@ All additive; nothing needs migrating by hand.
 
 | File | Change |
 |---|---|
+| `.hunches/versions/<n>/` (new) | One directory per archived taxonomy version: `meta.json` (`{"version", "created_at", "mode", "labels": [names], "dev_labelled", "test_labelled", "note"}`) plus verbatim copies of the version's files (see "Taxonomy versions"). Written only by `files.archive_version`; never deleted by the tool. |
 | `.hunches/candidates.meta.json` (new) | `{"seeds_digest": "...", "written_at": "...", "floor": 0.6}`, written by `build_candidates` with `candidates.jsonl`. Absent (old projects) means "unknown": treat as *seeds unchanged* so existing results don't flash a false "seeds changed" (task 07). |
 | `.hunches/chat/taxonomy.meta.json` (new) | `{"context_digest": "...", "sent_at": "...", "seeds": [...], "n_candidates": N, "items_won": {seed: n}}` (BACKEND §1). The digest is only a change detector; the snapshot is what lets the UPDATED message say what changed ("seeds: 2 added, 1 removed", "candidates: 3,612 → 4,019"), which the handoff asks for but does not store. |
 | `.hunches/chat/tuning.meta.json` (new) | `{"context_digest": "...", "sent_at": "...", "metrics": {...}}` (BACKEND §9.3); same reasoning: the snapshot of the last-sent metrics lets the UPDATED line show before/after. |
@@ -103,27 +123,25 @@ All additive; nothing needs migrating by hand.
 8. 001 stage 8: an untested or changed prompt is a hard block (no "press s again to start anyway"); the estimate/run panels and failed-item list are replaced by one centred block.
 9. 002: Save/Create are disabled until valid (their error paths remain as guards); `DIFFERS from recommended` and the separate price-warning line are replaced by per-row markers.
 10. Every classifier run (Tuning dev run, Test run, Threshold sampling, Full run) can be stopped and resumed.
+11. Changing the label names or the mode after gold rows exist starts a new taxonomy version: the previous version is archived whole, gold labels restart on the same items, and an earlier version can be restored (task 17). Search shows an early error banner when there are fewer than 100 candidates.
 
 ## Testing
 
 - Existing tests assert on `border_title`, `#seed-input`, `#prediction`, the `Model:` line, `"Cannot approve"`, `"N items still unlabelled."`, `"Add at least one seed first."`, `"ERROR: save at least one API key first"`, `"Searching..."`, `#cutoff`, `"press s again"`, and the old chat `RichLog`. Each task lists the ones it breaks; update or delete them in the same commit. Do not leave skipped tests.
 - New logic gets unit tests with hand-computed expectations (milestone arithmetic, ETA, top-seeds threshold counts, digests, the staleness rules). Never derive an expected value by running the code under test (AGENTS.md).
 - Chat and agent behaviour: `TestModel`/`FunctionModel` only. Assert "no model call" for edit recording by counting `FunctionModel` invocations.
-- Every restyled screen keeps its Pilot smoke test and runs it at 80×24, plus one run at 100×30 (rail) and 120×36 where the layout differs. Task 17 adds the sweep.
+- Every restyled screen keeps its Pilot smoke test and runs it at 80×24, plus one run at 100×30 (rail) and 120×36 where the layout differs. Task 18 adds the sweep.
 - No snapshot tests of colours; assert words and glyphs (PASS, FAIL, STALE, `■`, `●`) per the "never colour alone" rule.
 
 ## Out of scope
 
 - Any change to stage order, `first_incomplete_stage`, `state.json` fields, `metrics.py`, cost tracking, the keyring, or `files.Config`.
 - A light theme. Mouse-only affordances beyond the buttons the design lists.
-- The optional early warning on Search ("Only N candidates found. Labelling needs at least 100", BACKEND §7). The design owner has not signed it off; see Open item O3.
 - Porting any JSX, `reference/ui_kits/tui` (superseded) or the old `textual/` drop-ins.
 
 ## Open items to flag, not guess
 
-- **O1 — Taxonomy lock.** BACKEND §11.7 assumes labels are locked once gold labelling starts; the code does not lock them, and editing labels after gold rows exist silently invalidates them. Decide: add a lock (small: `TaxonomyScreen` read-only once `gold.jsonl` has labelled rows) or leave as is. This spec leaves it as is. *Needs Chris.*
-- **O2 — "Tested prompt" for the Full run block.** D11 uses `test_result.json`'s hash. Consequence: after the user changes the prompt in Tuning post-test, Full run is blocked until Test is re-run, and the block's button reads "Go to Tuning loop" per the design, though the next step after tuning is Test. Decide whether the button should go to stage 6 instead. *Needs Chris.*
-- **O3 — Early pool warning on Search.** Not designed; not built. *Needs the design owner.*
-- **O4 — `ctrl+s`.** The design saves Brief/Taxonomy edits with `ctrl+s`. Textual runs the terminal in raw mode so it should arrive, but verify in a real terminal and inside tmux/screen; pick an alternative if swallowed (as with the F-keys in 002).
-- **O5 — Footer under content column (D2).** If the explicit-width approach is fragile across Textual versions, the fallback changes the look slightly. Confirm with the design owner if the fallback is used.
-- **Needs a human:** the manual pass at the end of task 17 (a real terminal at 80×24, 100×30, 120×36; a real key; a real small corpus). Agents cannot fake it.
+- **O1 — Taxonomy versions (resolved by D12; decisions inside it to confirm).** Chris asked for the capability; the mechanics in "Taxonomy versions" below are this spec's design. The choices worth a glance: only a change to the label-name set or the mode starts a version (description-only and prompt edits do not); the new version keeps the same gold items with all labels cleared; the agent's `write_taxonomy` asks the user to confirm instead of writing silently.
+- **O2 — Full run block button (minor).** The hard block is confirmed. After a post-test prompt change the block's button reads "Go to Tuning loop" as designed, though Test (stage 6) is the step that clears it. Say if it should go to stage 6. Default: Tuning.
+- **O4 — Footer under content column (D2).** If the explicit-width approach is fragile across Textual versions, the fallback changes the look slightly. Confirm with the design owner if the fallback is used.
+- **Needs a human:** the manual pass at the end of task 18 (a real terminal at 80×24, 100×30, 120×36; a real key; a real small corpus). Agents cannot fake it.
