@@ -95,10 +95,7 @@ async def test_corpus_inside_the_project_is_stored_relative(tmp_path, monkeypatc
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        app.screen.query_one("#location", Input).value = str(project)
-        app.screen.query_one("#corpus", Input).value = str(project / "corpus")
-        app.screen.query_one("#create", Button).press()
-        await pilot.pause()
+        await submit(app, pilot, location=project, corpus=project / "corpus")
     assert files.read_config(project).corpus_dir == "corpus"
     os.chdir(tmp_path)
 
@@ -111,16 +108,32 @@ async def submit(app, pilot, **values):
     await pilot.pause()
 
 
-async def test_required_fields_are_listed(tmp_path, monkeypatch):
+async def test_create_is_disabled_until_the_corpus_is_valid(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    corpus = make_corpus(tmp_path / "data")
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        await submit(app, pilot, location="", corpus="")
-        error = app.screen.query_one("#error", Static)
-        assert str(error.render()) == "Required: location, corpus"
-        assert error.has_class("error")
-    assert not (tmp_path / ".hunches").exists()
+        create = app.screen.query_one("#create", Button)
+        hint = app.screen.query_one("#error", Static)
+        assert create.disabled
+        assert str(hint.render()) == "Required: corpus"
+        app.screen.create()  # ty: ignore[unresolved-attribute]
+        await pilot.pause()
+        assert "Required: corpus" in str(hint.render())
+        assert not (tmp_path / ".hunches").exists()
+        app.screen.query_one("#corpus", Input).value = str(corpus)
+        await pilot.pause()
+        assert not create.disabled
+        assert str(hint.render()) == ""
+        app.screen.query_one("#corpus", Input).value = str(tmp_path)  # no files
+        await pilot.pause()
+        assert create.disabled
+        assert "missing items.jsonl" in str(hint.render())
+        app.screen.query_one("#corpus", Input).value = ""
+        await pilot.pause()
+        assert create.disabled and str(hint.render()) == "Required: corpus"
 
 
 async def test_corpus_missing_files_are_listed_live_and_block_create(
@@ -138,9 +151,13 @@ async def test_corpus_missing_files_are_listed_live_and_block_create(
         await pilot.pause()
         status = str(app.screen.query_one("#corpus-status", Static).render())
         assert "missing items.jsonl, vectors.npy" in status
-        await submit(app, pilot, location=project)
+        await pilot.pause()
+        assert app.screen.query_one("#create", Button).disabled
         error = str(app.screen.query_one("#error", Static).render())
         assert error == "Corpus: missing items.jsonl, vectors.npy"
+        app.screen.query_one("#location", Input).value = str(project)
+        app.screen.create()  # ty: ignore[unresolved-attribute]
+        assert str(app.screen.query_one("#error", Static).render()) == error
     assert not (project / ".hunches").exists()
 
 
@@ -151,13 +168,16 @@ async def test_meta_without_embedding_model_is_refused(tmp_path, monkeypatch):
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        await submit(app, pilot, location=tmp_path / "proj", corpus=corpus)
+        app.screen.query_one("#corpus", Input).value = str(corpus)
+        await pilot.pause()
+        assert app.screen.query_one("#create", Button).disabled
         assert "embedding_model" in str(app.screen.query_one("#error", Static).render())
     assert not (tmp_path / "proj" / ".hunches").exists()
 
 
 async def test_location_whose_parent_is_missing_is_refused(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # the corpus embedding
     corpus = make_corpus(tmp_path / "data")
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
@@ -170,6 +190,7 @@ async def test_location_whose_parent_is_missing_is_refused(tmp_path, monkeypatch
 
 async def test_existing_project_is_refused_with_an_open_button(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # the corpus embedding
     corpus = make_corpus(tmp_path / "data")
     project = tmp_path / "proj"
     (project / ".hunches").mkdir(parents=True)
@@ -207,7 +228,9 @@ async def test_models_are_summarised_with_prices(tmp_path, monkeypatch):
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        text = str(app.screen.query_one("#models", Static).render())
+        text = str(app.screen.query_one("#models", Static).render()) + str(
+            app.screen.query_one("#models-rest", Static).render()
+        )
         assert f"assistant: {ASSISTANT}" in text
         assert models.price_label(ASSISTANT) in text
         assert "thinking: medium" in text
@@ -232,6 +255,9 @@ async def test_missing_key_blocks_create_and_system_settings_returns_intact(
         await pilot.pause()
         await submit(app, pilot, location=project, corpus=corpus)
         form = app.screen
+        assert form.query_one("#create", Button).disabled
+        form.create()  # ty: ignore[unresolved-attribute]
+        await pilot.pause()
         blocked = str(form.query_one("#keys", Static).render())
         assert "ANTHROPIC_API_KEY" in blocked and "OPENAI_API_KEY" in blocked
         assert "BLOCKED" in blocked
@@ -248,6 +274,7 @@ async def test_missing_key_blocks_create_and_system_settings_returns_intact(
         assert form.query_one("#location", Input).value == str(project)
         assert form.query_one("#corpus", Input).value == str(corpus)
         assert not form.query_one("#keys", Static).display
+        assert not form.query_one("#create", Button).disabled
         form.query_one("#create", Button).press()
         await pilot.pause()
         assert Path.cwd() == project
@@ -271,8 +298,9 @@ async def test_s3_happy_path_saves_the_store(tmp_path, monkeypatch):
         await submit(
             app, pilot, location=project, bucket="b", index="i", region="eu-west-1"
         )
-        assert "Required: embedding model" in str(
-            form.query_one("#error", Static).render()
+        assert form.query_one("#create", Button).disabled
+        assert str(form.query_one("#error", Static).render()) == (
+            "Required: embedding model"
         )
         form.query_one("#pick-embedding", Button).press()
         await pilot.pause()
@@ -282,6 +310,8 @@ async def test_s3_happy_path_saves_the_store(tmp_path, monkeypatch):
         chosen = form.embedding
         assert chosen.startswith("openai:")
         assert chosen in str(form.query_one("#embedding", Static).render())
+        assert not form.query_one("#create", Button).disabled
+        assert str(form.query_one("#error", Static).render()) == ""
         form.query_one("#create", Button).press()
         await pilot.pause()
         assert Path.cwd() == project
@@ -419,8 +449,7 @@ async def test_fits_80x24_with_create_and_messages_always_visible(
         await pilot.pause()
         for id_ in ("create", "open-system", "keys", "error"):
             assert app.screen.query_one(f"#{id_}").region.bottom <= 23, id_
-        await pilot.click("#create")  # reachable without scrolling
-        await pilot.pause()
+        assert app.screen.query_one("#create", Button).disabled
         assert "Required" in str(app.screen.query_one("#error", Static).render())
 
 

@@ -7,7 +7,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.screen import Screen
-from textual.widgets import Button, Checkbox, Input, Label, Select, Static
+from textual.widgets import Button, Checkbox, Input, Label, Rule, Select, Static
 
 from hunches import files, keys, models, system
 from hunches.app import AppFooter, StatusHeader, panel
@@ -70,6 +70,8 @@ class NewProjectScreen(Screen):
     NewProjectScreen #local, NewProjectScreen #s3 { height: auto; }
     NewProjectScreen #actions { height: 1; }
     NewProjectScreen #actions Button { margin-right: 1; }
+    NewProjectScreen #actions #error { width: 1fr; height: 1; }
+    NewProjectScreen Rule { margin: 0; }
     """
 
     embedding = ""  # the embedding model the project will use
@@ -133,13 +135,17 @@ class NewProjectScreen(Screen):
                     yield Button("Check store", id="check-store", compact=True)
             with panel(Vertical(), "models"):
                 yield Static("", id="models")
+                yield Rule()
+                yield Static("", id="models-rest")
         # outside the scroll area so Create and its messages stay visible at 80x24
         yield Static("", id="keys", classes="warn")
         with Horizontal(id="actions"):
             yield Button("System settings", id="open-system", compact=True)
-            yield Button("Create", id="create", variant="primary", compact=True)
+            yield Button(
+                "Create", id="create", variant="primary", compact=True, disabled=True
+            )
             yield Button("Open it", id="open-existing", compact=True)
-        yield Static("", id="error", classes="error")
+            yield Static("", id="error", classes="note")
         yield AppFooter()
 
     @staticmethod
@@ -161,10 +167,12 @@ class NewProjectScreen(Screen):
         lines = [
             f"assistant: {escape(current.assistant_model)}  [$text-muted]{models.price_label(current.assistant_model)}[/]",
             f"thinking: {current.assistant_thinking or 'provider default'}",
-            f"classifier: {escape(current.classifier_model)}  [$text-muted]{models.price_label(current.classifier_model)}[/]",
-            "[$text-muted]pinned for this project; change later in Project settings[/]",
         ]
         self.query_one("#models", Static).update("\n".join(lines))
+        self.query_one("#models-rest", Static).update(
+            f"classifier: {escape(current.classifier_model)}  [$text-muted]{models.price_label(current.classifier_model)}[/]\n"
+            "[$text-muted]pinned for this project; change later in Project settings[/]"
+        )
         needed = {
             keys.provider_var(m)
             for m in (current.assistant_model, current.classifier_model, self.embedding)
@@ -180,6 +188,31 @@ class NewProjectScreen(Screen):
         self.query_one("#embedding", Static).update(
             escape(self.embedding) if self.embedding else "[$warning]not chosen[/]"
         )
+        self.refresh_create()
+
+    def refresh_create(self) -> None:
+        """Create is enabled only for a valid form; the reason sits beside it (create() keeps the guards)."""
+        value = lambda i: self.query_one(f"#{i}", Input).value.strip()
+        s3 = self.query_one("#backend", Select).value == "s3"
+        missing = [
+            n
+            for n in ("location", *(("bucket", "index") if s3 else ()))
+            if not value(n)
+        ]
+        problem = ""
+        if s3:
+            if not self.embedding:
+                missing.append("embedding model")
+        elif not value("corpus"):
+            missing.append("corpus")
+        else:
+            problem = check_corpus(Path(value("corpus")).expanduser())[1]
+        hint = f"Required: {', '.join(missing)}" if missing else ""
+        hint = hint or (f"Corpus: {problem}" if problem else "")
+        line = self.query_one("#error", Static)
+        line.set_classes("error" if problem else "note")
+        line.update(escape(hint))
+        self.query_one("#create", Button).disabled = bool(hint or self.missing_keys)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "backend":
@@ -204,15 +237,22 @@ class NewProjectScreen(Screen):
         return check_corpus(Path(corpus).expanduser())[0] if corpus else ""
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "corpus" and event.value.strip():
-            model, problem = check_corpus(Path(event.value.strip()).expanduser())
+        if event.input.id == "corpus":
+            value = event.value.strip()
+            model, problem = (
+                check_corpus(Path(value).expanduser()) if value else ("", "")
+            )
             self.query_one("#corpus-status", Static).update(
-                f"ERROR: {problem}"
+                ""
+                if not value
+                else f"ERROR: {problem}"
                 if problem
                 else f"embedding model: {model} (from meta.json)"
             )
             self.embedding = model
             self.refresh_summary()
+        else:
+            self.refresh_create()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button.id
@@ -261,7 +301,9 @@ class NewProjectScreen(Screen):
         self.app.open_project(location)  # ty: ignore[unresolved-attribute]
 
     def fail(self, text: str, existing: bool = False) -> None:
-        self.query_one("#error", Static).update(text)
+        line = self.query_one("#error", Static)
+        line.set_classes("error")
+        line.update(text)
         self.query_one("#open-existing").display = existing
 
     def create(self) -> None:

@@ -42,6 +42,8 @@ PanelTitle { height: 1; width: 1fr; }
 .badge.-stale  { background: $warning; color: $background; }
 .badge.-info   { background: $secondary; color: $background; }
 
+Rule { color: $text-disabled; }
+
 DataTable { background: transparent; }
 DataTable > .datatable--header { background: transparent; color: $text-muted; text-style: none; }
 DataTable > .datatable--cursor { background: $panel; color: #EEF1F5; text-style: bold; }

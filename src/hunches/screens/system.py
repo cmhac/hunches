@@ -7,10 +7,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Input, Label, Select, Static
+from textual.widgets import Button, Input, Label, Rule, Select, Static
 
 from hunches import keys, models, system
-from hunches.app import AppFooter, StatusHeader, modal_box, panel
+from hunches.app import AppFooter, StatusHeader, modal_box, panel, wide
 from hunches.screens.model_picker import ModelPicker
 
 # What the thinking Select offers: exactly the values files.Config accepts, plus "default" (None)
@@ -21,6 +21,29 @@ NAMES = {"ANTHROPIC_API_KEY": "Anthropic", "OPENAI_API_KEY": "OpenAI"}
 def saved_stores() -> list[system.Store]:
     current = system.read_system()
     return current.s3_stores if current else []
+
+
+def model_line(name: str, model: str, recommended: bool) -> str:
+    """`name: model price` ending in RECOMMENDED or a DIFFERS badge; an unpriced model gets its own warning line."""
+    price = models.price_label(model)
+    unpriced = price == models.NO_PRICE
+    mark = (
+        "[$success]RECOMMENDED[/]"
+        if recommended
+        else "[b reverse $secondary] DIFFERS FROM RECOMMENDED [/]"
+    )
+    head = f"{name}: {escape(model)}  " + (
+        "" if unpriced else f"[$text-muted]{price}[/]  "
+    )
+    return head + mark + (f"\n  [$warning]{price}[/]" if unpriced else "")
+
+
+def prices_note(app, extra: str = "") -> str:
+    where = "sidebar" if wide(app) else "header"
+    return (
+        f"Prices from genai-prices as of {models.snapshot_date()}; "
+        f"the {where} shows actual spend.{extra}"
+    )
 
 
 class SystemSettingsScreen(Screen[bool]):
@@ -42,12 +65,16 @@ class SystemSettingsScreen(Screen[bool]):
     SystemSettingsScreen #storelist { height: auto; }
     SystemSettingsScreen #actions { height: 1; }
     SystemSettingsScreen #actions Button { margin-right: 1; }
+    SystemSettingsScreen #actions #error { width: 1fr; height: 1; }
+    SystemSettingsScreen #thinking-row, SystemSettingsScreen #pick-classifier-row, SystemSettingsScreen #reset { margin-top: 1; }
+    SystemSettingsScreen .panel Rule { margin: 1 0 0 0; }
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.current = system.read_system()
         self.edited = False  # the user changed a model or thinking by hand
+        self.error = ""  # shown beside Save (when a key is missing, the hint wins)
         if self.current:
             self.provider = self.current.provider
             self.assistant = self.current.assistant_model
@@ -104,7 +131,7 @@ class SystemSettingsScreen(Screen[bool]):
                 with Horizontal(classes="row"):
                     yield Static("", id="assistant")
                     yield Button("Change", id="pick-assistant", compact=True)
-                with Horizontal(classes="row"):
+                with Horizontal(classes="row", id="thinking-row"):
                     yield Label("thinking")
                     yield Select(
                         [("provider default", "default"), *((e, e) for e in EFFORTS)],
@@ -113,11 +140,10 @@ class SystemSettingsScreen(Screen[bool]):
                         compact=True,
                         id="thinking",
                     )
-                with Horizontal(classes="row"):
+                yield Rule()
+                with Horizontal(classes="row", id="pick-classifier-row"):
                     yield Static("", id="classifier")
                     yield Button("Change", id="pick-classifier", compact=True)
-                yield Static("", id="differs", classes="warn")
-                yield Static("", id="pricewarn", classes="warn")
                 yield Button("Reset to recommended", id="reset", compact=True)
             with panel(Vertical(id="stores"), "Saved S3 stores"):
                 yield Vertical(id="storelist")
@@ -125,23 +151,22 @@ class SystemSettingsScreen(Screen[bool]):
                 "Changes here apply to new projects. Existing projects keep their models.",
                 classes="note",
             )
-            yield Static(
-                f"Prices from genai-prices as of {models.snapshot_date()}; "
-                "the header shows actual spend.",
-                classes="note",
-            )
-            yield Static("", id="error", classes="error")
+            yield Static(prices_note(self.app), id="prices", classes="note")
         with Horizontal(id="actions"):
             yield Button("Save", id="save", variant="success", compact=True)
             if self.current:
                 yield Button("Cancel", id="cancel", compact=True)
+            yield Static("", id="error")
         yield AppFooter()
 
     async def on_mount(self) -> None:
         self.refresh_keys()
         self.refresh_models()
-        self.show("#error", "")
+        self.refresh_save()
         await self.refresh_stores()
+
+    def on_resize(self) -> None:
+        self.query_one("#prices", Static).update(prices_note(self.app))
 
     async def refresh_stores(self) -> None:
         """Stores are edited live (not on Save): they are not part of the models form."""
@@ -177,43 +202,36 @@ class SystemSettingsScreen(Screen[bool]):
         try:
             if new and new != old:
                 system.rename_store(old, new)
-            self.show("#error", "")
+            self.error = ""
         except ValueError as e:
-            self.show("#error", f"ERROR: {escape(str(e))}")
+            self.error = f"ERROR: {e}"
+        self.refresh_save()
         await self.refresh_stores()
 
     def refresh_models(self) -> None:
-        for name, model in (
-            ("assistant", self.assistant),
-            ("classifier", self.classifier),
-        ):
-            self.query_one(f"#{name}", Static).update(
-                f"{name}: {escape(model)}  [$text-muted]{models.price_label(model)}[/]"
-            )
         rec = system.RECOMMENDED[self.provider]
-        differs = (self.assistant, self.thinking, self.classifier) != (
-            rec["assistant"],
-            rec["thinking"],
-            rec["classifier"],
+        self.query_one("#assistant", Static).update(
+            model_line(
+                "assistant",
+                self.assistant,
+                (self.assistant, self.thinking) == (rec["assistant"], rec["thinking"]),
+            )
         )
-        self.show("#differs", "DIFFERS from recommended" if differs else "")
-        unpriced = [
-            m
-            for m in (self.assistant, self.classifier)
-            if models.price_label(m) == models.NO_PRICE
-        ]
-        self.show(
-            "#pricewarn",
-            f"WARNING: no price for {escape(', '.join(unpriced))}: cost will show ?"
-            if unpriced
-            else "",
+        self.query_one("#classifier", Static).update(
+            model_line(
+                "classifier", self.classifier, self.classifier == rec["classifier"]
+            )
         )
 
-    def show(self, selector: str, text: str) -> None:
-        """Set a message line; an empty one takes no room (80x24 is tight)."""
-        line = self.query_one(selector, Static)
-        line.update(text)
-        line.display = bool(text)
+    def refresh_save(self) -> None:
+        """Save needs one API key; the reason (or the last error) sits beside it."""
+        no_key = all(keys.status(v) == "missing" for v in keys.VARS)
+        self.query_one("#save", Button).disabled = no_key
+        line = self.query_one("#error", Static)
+        line.set_classes("note" if no_key else "error")
+        line.update(
+            "Add at least one API key to save" if no_key else escape(self.error)
+        )
 
     def pick(self, field: str) -> None:
         def done(model: str | None) -> None:
@@ -227,6 +245,7 @@ class SystemSettingsScreen(Screen[bool]):
     def refresh_keys(self) -> None:
         for var in keys.VARS:
             self.query_one(f"#status-{var}", Static).update(keys.status(var).upper())
+        self.refresh_save()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "provider" and event.value != self.provider:
@@ -273,7 +292,7 @@ class SystemSettingsScreen(Screen[bool]):
 
     def save(self) -> None:
         if all(keys.status(v) == "missing" for v in keys.VARS):
-            self.show("#error", "ERROR: save at least one API key first")
+            self.refresh_save()
             return
         # re-read: stores and projects are edited elsewhere while this screen is open
         base = system.read_system()
@@ -301,6 +320,8 @@ class RecommendationModal(ModalScreen[None]):
     RecommendationModal > Vertical {
         width: 100%; max-width: 78; height: auto; max-height: 100%;
     }
+    RecommendationModal .gap { margin-top: 1; }
+    RecommendationModal Rule { margin: 1 0 0 0; }
     """
 
     def __init__(self, current: system.System) -> None:
@@ -309,25 +330,34 @@ class RecommendationModal(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         rec = system.RECOMMENDED[self.current.provider]
-        old = (
-            self.current.assistant_model,
-            self.current.classifier_model,
-        )
-        new = (str(rec["assistant"]), str(rec["classifier"]))
+        cur = self.current
+        thinking = lambda t: t or "provider default"
         with modal_box(Vertical(id="modal-box"), "Recommended models changed"):
-            for name, was, now in zip(("assistant", "classifier"), old, new):
-                yield Static(
-                    f"{name}: {escape(was)}  [$text-muted]{models.price_label(was)}[/]\n"
-                    f"  -> {escape(now)}  [$text-muted]{models.price_label(now)}[/]"
-                )
-            yield Static(
-                f"thinking: {self.current.assistant_thinking or 'provider default'}"
-                f" -> {rec['thinking'] or 'provider default'}"
-            )
-            yield Static("Existing projects keep their models.", classes="note")
+            yield Static("[b]assistant[/]")
+            yield Static(self.change("now", cur.assistant_model, False))
+            yield Static(self.change("new", str(rec["assistant"]), True))
+            yield Static("[b]thinking[/]", classes="gap")
+            yield Static(f"  now  {thinking(cur.assistant_thinking)}")
+            yield Static(f"  new  [b $success]{thinking(rec['thinking'])}[/]")
+            yield Rule()
+            if cur.classifier_model == rec["classifier"]:
+                yield Static("[b]classifier[/]  [$text-muted]unchanged[/]")
+            else:
+                yield Static("[b]classifier[/]")
+                yield Static(self.change("now", cur.classifier_model, False))
+                yield Static(self.change("new", str(rec["classifier"]), True))
+            yield Static("Existing projects keep their models.", classes="note gap")
             with Horizontal(classes="buttons"):
                 yield Button("Keep mine", id="keep-mine")
                 yield Button("Use new", id="use-new", variant="success")
+
+    def on_mount(self) -> None:
+        self.query_one("#use-new", Button).focus()
+
+    @staticmethod
+    def change(which: str, model: str, new: bool) -> str:
+        name = f"[b $success]{escape(model)}[/]" if new else escape(model)
+        return f"  {which}  {name}  [$text-muted]{models.price_label(model)}[/]"
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "use-new":
