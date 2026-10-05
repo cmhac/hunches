@@ -7,10 +7,10 @@ from typing import ClassVar
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import DataTable, Static
 
 from hunches import cost, files, metrics
-from hunches.app import StatusHeader, panel, retitle, say
+from hunches.app import AppFooter, StatusHeader, panel, retitle, say
 from hunches.classifier import classify_many
 from hunches.screens import report
 from hunches.screens.gold import GoldScreen
@@ -79,7 +79,7 @@ class FinalScreen(Screen):
             with panel(Vertical(id="text-panel"), "text"):
                 yield Static("", id="detail", markup=False)
         yield Static("", id="note", markup=False)
-        yield Footer()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         report.disagreement_columns(self.query_one("#dis", DataTable))

@@ -6,10 +6,17 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.markup import escape
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Static, TextArea
+from textual.widgets import Button, DataTable, Static, TextArea
 
 from hunches import cost, files, metrics
-from hunches.app import StatusHeader, confirm_approve, modal_box, panel, retitle
+from hunches.app import (
+    AppFooter,
+    StatusHeader,
+    confirm_approve,
+    modal_box,
+    panel,
+    retitle,
+)
 from hunches.classifier import classify_many
 from hunches.screens import report
 from hunches.theme import editor
@@ -159,7 +166,7 @@ class TuneScreen(Screen):
                 id="not-ready",
                 classes="not-ready",
             )
-            yield Footer()
+            yield AppFooter()
             return
         with panel(Vertical(id="metrics-panel"), "dev set"):
             yield Static("", id="summary")
@@ -171,7 +178,7 @@ class TuneScreen(Screen):
             with panel(Vertical(id="text-panel"), "text"):
                 yield Static("", id="detail")
         yield Static("", id="note", markup=False)
-        yield Footer()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         if not self.ready:

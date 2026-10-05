@@ -7,10 +7,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Input, Label, Select, Static
+from textual.widgets import Button, Input, Label, Select, Static
 
 from hunches import keys, models, system
-from hunches.app import StatusHeader, modal_box, panel
+from hunches.app import AppFooter, StatusHeader, modal_box, panel
 from hunches.screens.model_picker import ModelPicker
 
 # What the thinking Select offers: exactly the values files.Config accepts, plus "default" (None)
@@ -25,6 +25,8 @@ def saved_stores() -> list[system.Store]:
 
 class SystemSettingsScreen(Screen[bool]):
     """Dismisses True when saved, False when cancelled (never on first run)."""
+
+    stage_name = "System settings"
 
     DEFAULT_CSS = """
     SystemSettingsScreen > VerticalScroll { height: 1fr; }
@@ -133,7 +135,7 @@ class SystemSettingsScreen(Screen[bool]):
             yield Button("Save", id="save", variant="success", compact=True)
             if self.current:
                 yield Button("Cancel", id="cancel", compact=True)
-        yield Footer()
+        yield AppFooter()
 
     async def on_mount(self) -> None:
         self.refresh_keys()

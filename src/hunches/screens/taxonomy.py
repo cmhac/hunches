@@ -7,10 +7,10 @@ from pydantic_ai import Agent
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Static, TextArea
+from textual.widgets import Static, TextArea
 
 from hunches import files, metrics
-from hunches.app import ChatPanel, StatusHeader, confirm_approve, panel, say
+from hunches.app import AppFooter, ChatPanel, StatusHeader, confirm_approve, panel, say
 from hunches.theme import editor
 
 INSTRUCTIONS = """\
@@ -107,7 +107,7 @@ class TaxonomyScreen(Screen):
                         )
                     )
         yield Static("", id="status", classes="warn")
-        yield Footer()
+        yield AppFooter()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         name = "taxonomy.yaml" if event.text_area.id == "taxonomy" else "prompt.md"

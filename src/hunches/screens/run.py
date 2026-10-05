@@ -6,10 +6,10 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.markup import escape
 from textual.screen import Screen
-from textual.widgets import Footer, ProgressBar, Static
+from textual.widgets import ProgressBar, Static
 
 from hunches import cost, files
-from hunches.app import StatusHeader, panel, retitle
+from hunches.app import AppFooter, StatusHeader, panel, retitle
 from hunches.classifier import classify_many
 from hunches.screens.final import RESULT, prompt_hash
 
@@ -77,7 +77,7 @@ class RunScreen(Screen):
             yield Static(
                 "Finish stages 3 and 7 first.", id="not-ready", classes="not-ready"
             )
-            yield Footer()
+            yield AppFooter()
             return
         with panel(Vertical(id="estimate-panel"), "estimate"):
             yield Static("", id="estimate", markup=False)
@@ -86,7 +86,7 @@ class RunScreen(Screen):
             yield ProgressBar(total=1, id="progress")
             yield Static("", id="live", markup=False)
             yield Static("", id="errors")
-        yield Footer()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         if self.ready:

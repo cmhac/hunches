@@ -6,10 +6,17 @@ from pydantic_ai import Agent
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Input, Static
+from textual.widgets import DataTable, Input, Static
 
 from hunches import candidates, files
-from hunches.app import ChatPanel, StatusHeader, confirm_approve, panel, retitle
+from hunches.app import (
+    AppFooter,
+    ChatPanel,
+    StatusHeader,
+    confirm_approve,
+    panel,
+    retitle,
+)
 
 INSTRUCTIONS = """\
 You help the user define what to find in a corpus of text items. Ask short follow-up \
@@ -73,7 +80,7 @@ class BriefScreen(Screen):
                 )
                 yield Input(placeholder="a: add, e: edit, then Enter", id="seed-input")
                 yield Static("", id="status", classes="warn")
-        yield Footer()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         self.query_one("#seeds", DataTable).add_column("Seed phrases")

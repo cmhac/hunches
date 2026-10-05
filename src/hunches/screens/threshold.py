@@ -8,10 +8,10 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Input, Static
+from textual.widgets import DataTable, Input, Static
 
 from hunches import candidates, cost, files
-from hunches.app import StatusHeader, panel, retitle, say
+from hunches.app import AppFooter, StatusHeader, panel, retitle, say
 from hunches.classifier import classify_many
 
 SAMPLE = "threshold_sample.json"
@@ -92,7 +92,7 @@ class ThresholdScreen(Screen):
                 id="not-ready",
                 classes="not-ready",
             )
-            yield Footer()
+            yield AppFooter()
             return
         yield Static(
             "Off-topic = predicted exactly {off_topic}. Small samples are noisy; mind n. "
@@ -108,7 +108,7 @@ class ThresholdScreen(Screen):
             yield DataTable(id="bands", cursor_type="row")
         yield Input(placeholder="cutoff, e.g. 0.65 (F2 saves)", id="cutoff")
         yield Static("", id="note", markup=False)
-        yield Footer()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         if not self.ready:

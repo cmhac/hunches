@@ -23,7 +23,7 @@ class Placeholder(Screen):
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         yield Static(f"Stage {self.app.stage} is not implemented yet.")  # ty: ignore[unresolved-attribute]
-        yield Footer()
+        yield AppFooter()
 
 
 def panel(widget, title: str, subtitle: str = ""):
@@ -72,16 +72,133 @@ def key_button(label: str, key: str, **kwargs) -> Button:
     return Button(f"{label}  {key}", **kwargs)
 
 
-class StatusHeader(Static):
-    """Project, stage stepper and total cost. Every stage screen must yield one first in compose()."""
+RAIL_WIDTH = 26
+RAIL_MIN = 100  # terminal columns from which the header becomes the left rail
+DESTINATIONS = [
+    ("Projects", "F4"),
+    ("Project settings", "F3"),
+    ("System settings", "F5"),
+]
+# which destination the open screen is, by its stage_name
+DESTINATION_OF = {
+    "Projects": "Projects",
+    "New project": "Projects",
+    "Settings": "Project settings",
+    "System settings": "System settings",
+}
+RAIL_ACTIONS = {"quit", "goto", "settings", "projects", "system_settings"}
+
+
+def wide(app) -> bool:
+    """True when the terminal is wide enough for the left rail (works on any App, e.g. test hosts)."""
+    return app.size.width >= RAIL_MIN
+
+
+def markup(style: str, text: str) -> str:
+    return f"[{style}]{text}[/]" if style else text
+
+
+class AppFooter(Footer):
+    """Footer that drops the keys the rail already shows and sits under the content column in rail mode."""
+
+    rail = False
+
+    def compose(self) -> ComposeResult:
+        self.rail = wide(self.app)
+        for widget in super().compose():
+            action = getattr(widget, "action", "").split("(")[0]  # "goto(1)"
+            if not (self.rail and action in RAIL_ACTIONS):
+                yield widget
 
     def on_mount(self) -> None:
-        self.refresh_cost()
+        self.fit()
+
+    def fit(self) -> None:
+        rail = wide(self.app)
+        # Footer docks at the full screen width, so beside the rail it needs an explicit width
+        self.styles.margin = (0, 0, 0, RAIL_WIDTH if rail else 0)
+        self.styles.width = self.app.size.width - RAIL_WIDTH if rail else None
+        if rail != self.rail:
+            self.refresh(recompose=True)
+
+
+class StatusHeader(Static):
+    """Project, stage stepper and total cost; the left rail from 100 columns. Every stage screen must yield one first in compose()."""
+
+    def on_mount(self) -> None:
+        self.fit()
         # polling picks up cost.record() calls from anywhere, including worker threads
         self.set_interval(0.25, self.refresh_cost)
 
     def on_resize(self) -> None:
         self.refresh_cost()
+
+    def fit(self) -> None:
+        self.set_class(wide(self.app), "-rail")
+        self.refresh_cost()
+
+    def refresh_rail(self, stage: int) -> None:
+        """Rail markup: stages and destinations at the top, cost at the bottom."""
+        dollars, unknown = cost.total()
+        self.set_class(bool(unknown), "-cost-unknown")
+        screen_name = getattr(self.screen, "stage_name", None)
+        here = DESTINATION_OF.get(screen_name or "")
+        current = 0 if screen_name else stage  # an overlay screen: no stage is current
+
+        def row(mark, mark_style, text, text_style, on=False, key=""):
+            bg = "on $panel" if on else ""
+            room = RAIL_WIDTH - 5 - (len(key) + 1 if key else 0)
+            if len(text) > room:
+                text = text[: room - 1] + "…"
+            tail = markup(f"$text-disabled {bg}", f" {key}") if key else ""
+            return "".join(
+                (
+                    markup(f"$primary {bg}", "▌" if on else " "),
+                    markup(bg, " "),
+                    markup(f"{mark_style} {bg}", mark),
+                    markup(bg, " "),
+                    markup(f"{text_style} {bg}", escape(text.ljust(room))),
+                    tail,
+                    markup(bg, " "),
+                )
+            )
+
+        def plain(text, style):
+            return "  " + markup(style, escape(text))
+
+        project = Path.cwd().name
+        if len(project) > RAIL_WIDTH - 3:
+            project = project[: RAIL_WIDTH - 4] + "…"
+        lines = [plain("hunches", "b $primary"), plain(project, "$text-muted"), ""]
+        for num, label, _ in STAGES:
+            if num == current:
+                lines.append(row("●", "$primary", label, "b #EEF1F5", on=True))
+            elif num < stage:
+                lines.append(row("✓", "$success", label, "$text-muted"))
+            else:
+                lines.append(row("·", "$text-disabled", label, "$text-disabled"))
+        lines.append("")
+        for label, key in DESTINATIONS:
+            if label == here:
+                lines.append(row("▸", "$primary", label, "b #EEF1F5", on=True, key=key))
+            else:
+                lines.append(row(" ", "$text-muted", label, "$text-muted", key=key))
+        bottom = [
+            plain("n/p stage · q quit", "$text-disabled"),
+            "",
+            plain("cost", "$text-muted"),
+        ]
+        if unknown:
+            models = [m for m, v in cost.breakdown().items() if v["dollars"] is None]
+            bottom += [
+                "  [b reverse $warning] cost ? [/]",
+                plain("no price for", "$warning"),
+            ]
+            bottom += [plain(m[: RAIL_WIDTH - 3], "$warning") for m in models[:3]]
+        else:
+            bottom.append(plain(f"${dollars:.4f}", "b #EEF1F5"))
+        gap = max(1, self.size.height - len(lines) - len(bottom))
+        self.update("\n".join(lines + [""] * gap + bottom))
 
     def refresh_cost(self) -> None:
         stage = getattr(self.app, "stage", 0)
@@ -91,6 +208,8 @@ class StatusHeader(Static):
                 self.screen, "stage_name", "Setup"
             ),  # non-stage screens name themselves
         )
+        if self.has_class("-rail"):
+            return self.refresh_rail(stage)
         project = Path.cwd().name
         if len(project) > 16:
             project = project[:15] + "…"
@@ -300,6 +419,21 @@ class HunchesApp(App):
 
     stage = 0  # 1-9 once running
     stage_shown = False
+
+    @property
+    def rail(self) -> bool:
+        """True when the terminal is wide enough for the left rail."""
+        return wide(self)
+
+    def on_resize(self) -> None:
+        self.call_later(
+            self.fit_rail
+        )  # App._on_resize stores the new size after this handler
+
+    def fit_rail(self) -> None:
+        for screen in self.screen_stack:
+            for widget in screen.query("StatusHeader, AppFooter"):
+                widget.fit()  # ty: ignore[unresolved-attribute]
 
     def on_mount(self) -> None:
         self.register_theme(HUNCHES)

@@ -2,16 +2,16 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Input, SelectionList, Static
+from textual.widgets import DataTable, Input, SelectionList, Static
 from textual.widgets.data_table import ColumnKey
 
 from hunches import files
-from hunches.app import StatusHeader, panel, retitle
+from hunches.app import RAIL_WIDTH, AppFooter, StatusHeader, panel, retitle, wide
 from hunches.theme import label_text
 
 # Rendering 100k DataTable rows takes ~10 s, so only the first matches are drawn.
 MAX_ROWS = 1000
-NARROW = 100  # below this many columns the detail pane moves under the table
+NARROW = 100  # below this many content columns the detail pane moves under the table
 
 
 class BrowseScreen(Screen):
@@ -55,7 +55,7 @@ class BrowseScreen(Screen):
                     yield Static("", id="empty")
                 with panel(Vertical(id="detail-panel"), "item"):
                     yield Static("", id="detail", markup=False)
-        yield Footer()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         table = self.query_one("#table", DataTable)
@@ -68,10 +68,12 @@ class BrowseScreen(Screen):
         self.on_resize()
 
     def on_resize(self) -> None:
-        narrow = self.size.width < NARROW
+        # the rail takes 26 columns, so judge the room by the content column
+        room = self.size.width - (RAIL_WIDTH if wide(self.app) else 0)
+        narrow = room < NARROW
         self.set_class(narrow, "-narrow")
         table = self.query_one("#table", DataTable)
-        table.columns[ColumnKey("labels")].width = 16 if narrow else 30
+        table.columns[ColumnKey("labels")].width = 30 if room >= 120 else 16
         self.call_after_refresh(
             self.refresh_table
         )  # the Text column needs the laid-out width

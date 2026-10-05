@@ -8,10 +8,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Input, Label, Select, Static
+from textual.widgets import Button, Input, Label, Select, Static
 
 from hunches import files, models, system
-from hunches.app import ConfirmScreen, StatusHeader, panel
+from hunches.app import AppFooter, ConfirmScreen, StatusHeader, panel
 from hunches.screens.model_picker import ModelPicker
 from hunches.screens.new_project import (
     NewProjectScreen,
@@ -122,7 +122,7 @@ class ProjectSettingsScreen(Screen):
         with Horizontal(id="actions"):
             yield Button("Save", id="save", variant="success", compact=True)
             yield Button("Cancel", id="cancel", compact=True)
-        yield Footer()
+        yield AppFooter()
 
     @property
     def embedding(self) -> str:

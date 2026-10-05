@@ -7,10 +7,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.screen import Screen
-from textual.widgets import Button, Checkbox, Footer, Input, Label, Select, Static
+from textual.widgets import Button, Checkbox, Input, Label, Select, Static
 
 from hunches import files, keys, models, system
-from hunches.app import StatusHeader, panel
+from hunches.app import AppFooter, StatusHeader, panel
 from hunches.screens.model_picker import ModelPicker
 from hunches.screens.paths import PathInput, browse
 from hunches.screens.system import SystemSettingsScreen, saved_stores
@@ -140,7 +140,7 @@ class NewProjectScreen(Screen):
             yield Button("Create", id="create", variant="primary", compact=True)
             yield Button("Open it", id="open-existing", compact=True)
         yield Static("", id="error", classes="error")
-        yield Footer()
+        yield AppFooter()
 
     @staticmethod
     def store_options() -> list[tuple[str, int]]:

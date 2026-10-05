@@ -6,10 +6,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Label, Static
+from textual.widgets import Button, DataTable, Label, Static
 
 from hunches import candidates, files, search
-from hunches.app import StatusHeader, panel
+from hunches.app import AppFooter, StatusHeader, panel
 
 
 class SearchScreen(Screen):
@@ -39,7 +39,7 @@ class SearchScreen(Screen):
             yield DataTable(id="bands")
         with panel(VerticalScroll(id="seeds-panel"), "best seed (items won)"):
             yield Static("", id="seeds")
-        yield Footer()
+        yield AppFooter()
 
     def tell(self, id_: str, text: str) -> None:
         """Set one of the message lines; an empty one takes no row."""

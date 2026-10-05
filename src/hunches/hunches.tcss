@@ -7,10 +7,17 @@ StatusHeader {
     background: $panel; color: $foreground;
 }
 StatusHeader.-cost-unknown { background: $warning 20%; }
+/* From 100 columns the header is a left rail: it docks left and the content column sits beside it */
+StatusHeader.-rail { dock: left; width: 26; height: 100%; padding: 0; background: $surface; }
+StatusHeader.-rail.-cost-unknown { background: $surface; }
 
 /* Panels: no border, tinted, a one-row title (PanelTitle) first. Focus is a left bar. */
 .panel { background: $surface; padding: 0 1; }
 .panel:focus-within, .panel.-focused { border-left: outer $primary; }
+/* A one-column gutter only between side-by-side panels, never after the last one */
+Horizontal > .panel { margin-right: 1; }
+Horizontal > .panel:last-child { margin-right: 0; }
+BrowseScreen.-narrow #main > .panel { margin-right: 0; }  /* stacked, not side by side */
 PanelTitle { height: 1; width: 1fr; }
 .panel-title { width: 1fr; height: 1; text-style: bold; color: #EEF1F5; text-wrap: nowrap; text-overflow: ellipsis; }
 .panel-subtitle { width: auto; height: 1; color: $text-muted; text-wrap: nowrap; }

@@ -8,10 +8,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.markup import escape
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import DataTable, Static
 
 from hunches import files
-from hunches.app import ConfirmScreen, StatusHeader, panel, retitle, say
+from hunches.app import AppFooter, ConfirmScreen, StatusHeader, panel, retitle, say
 from hunches.classifier import Prediction, classify
 from hunches.theme import label_color, label_tag, label_text
 
@@ -91,7 +91,7 @@ class GoldScreen(Screen):
                 id="not-ready",
                 classes="not-ready",
             )
-            yield Footer()
+            yield AppFooter()
             return
         with Horizontal(id="main"):
             with Vertical(id="left"):
@@ -104,7 +104,7 @@ class GoldScreen(Screen):
                 yield Static("", id="note", classes="warn", markup=False)
             with panel(Vertical(id="counts-panel"), "counts"):
                 yield DataTable(id="counts")
-        yield Footer()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         if not self.ready:

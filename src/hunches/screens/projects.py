@@ -7,10 +7,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.markup import escape
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Input, Static
+from textual.widgets import Button, DataTable, Input, Static
 
 from hunches import files, system
-from hunches.app import StatusHeader, modal_box
+from hunches.app import AppFooter, StatusHeader, modal_box
 from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.paths import PathPicker
 from hunches.screens.project_settings import ProjectSettingsScreen
@@ -92,7 +92,7 @@ class ProjectsScreen(Screen):
         yield Static(
             "No projects yet. Press n to create one.", id="empty", classes="note"
         )
-        yield Footer()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         self.refresh_projects()

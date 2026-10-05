@@ -127,7 +127,9 @@ async def test_redesigned_layout_titles_empty_state_and_warning(tmp_path, monkey
         assert "No seeds yet. Describe what to find in the chat" in str(empty.render())
         assert not screen.query_one("#seeds").display
         # two equal columns
-        assert screen.query_one("ChatPanel").region.width == pane.region.width
+        assert (
+            pane.region.width - screen.query_one("ChatPanel").region.width <= 1
+        )  # 1-column gutter
 
         await pilot.press("f2")
         await pilot.pause()

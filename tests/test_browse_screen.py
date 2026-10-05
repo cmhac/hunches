@@ -157,7 +157,7 @@ async def test_redesigned_panels_cells_and_detail_title():
 
 async def test_layout_wide_vs_narrow():
     app = HunchesApp()
-    async with app.run_test(size=(120, 30)) as pilot:
+    async with app.run_test(size=(150, 30)) as pilot:  # 124 beside the rail
         screen = await open_browse(pilot, app)
         table, detail = (
             screen.query_one("#table-panel"),
@@ -204,7 +204,7 @@ async def test_empty_states():
         )
 
 
-@pytest.mark.parametrize("width", [80, 120])
+@pytest.mark.parametrize("width", [80, 100, 126, 150])
 async def test_table_columns_fit_without_horizontal_scroll(width):
     app = HunchesApp()
     async with app.run_test(size=(width, 30)) as pilot:
