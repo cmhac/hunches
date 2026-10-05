@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Literal
 
+from pydantic import BaseModel
 from pydantic_ai import Agent, ModelRetry
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models import Model
@@ -17,6 +18,7 @@ class Prediction:
     labels: list[str] | None  # None when `error` is set
     error: str | None = None  # validation retries exhausted or the model call failed
     cached: bool = False
+    reasoning: str | None = None  # None when `error` is set
 
 
 def system_prompt(prompt: str, taxonomy: Taxonomy) -> str:
@@ -30,6 +32,10 @@ def system_prompt(prompt: str, taxonomy: Taxonomy) -> str:
         else "Return every label that applies."
     )
     lines.append(f"{rule} off_topic must never be combined with another label.")
+    lines.append(
+        "First give a short reasoning (one to three sentences) that names the "
+        "evidence in the text, then the labels."
+    )
     return "\n".join(lines)
 
 
@@ -50,20 +56,27 @@ async def classify(
     name = _model_name(model)
     key = cost.cache_key(name, system, text)
     hit = cost.cache_get(key)
-    if hit is not None:
-        return Prediction(hit["output"], cached=True)
+    # an old-shape entry (a bare label list) has no reasoning: treat it as a miss
+    if hit is not None and isinstance(hit["output"], dict):
+        out = hit["output"]
+        return Prediction(out["labels"], cached=True, reasoning=out["reasoning"])
 
     # a Literal built at runtime from the taxonomy; the type checker can't see through it
     label_type = Literal[tuple(all_labels(taxonomy))]  # ty: ignore[invalid-type-form]
-    agent = Agent(model, output_type=list[label_type], system_prompt=system)
+
+    class Classification(BaseModel):
+        reasoning: str  # declared first so the model explains before it decides
+        labels: list[label_type]
+
+    agent = Agent(model, output_type=Classification, system_prompt=system)
 
     @agent.output_validator
-    def check(labels: list[str]) -> list[str]:
+    def check(out: Classification) -> Classification:
         try:
-            validate_labels(labels, taxonomy)
+            validate_labels(out.labels, taxonomy)
         except ValueError as e:
             raise ModelRetry(str(e)) from e
-        return labels
+        return out
 
     start = time.monotonic()
     try:
@@ -75,8 +88,9 @@ async def classify(
     cost.record(name, usage, cost.messages_dollars(result.new_messages()))
     if timed:
         cost.record_timing("classify", 1, seconds)
-    cost.cache_put(key, result.output, usage)
-    return Prediction(list(result.output))
+    out = result.output
+    cost.cache_put(key, {"labels": list(out.labels), "reasoning": out.reasoning}, usage)
+    return Prediction(list(out.labels), reasoning=out.reasoning)
 
 
 async def classify_many(

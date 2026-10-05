@@ -24,7 +24,11 @@ def classifier(messages, info: AgentInfo):
     )
     answer = ["b"] if better and int(str(text).split()[1]) % 2 else ["a"]
     return ModelResponse(
-        parts=[ToolCallPart(info.output_tools[0].name, {"response": answer})]
+        parts=[
+            ToolCallPart(
+                info.output_tools[0].name, {"reasoning": "r", "labels": answer}
+            )
+        ]
     )
 
 

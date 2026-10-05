@@ -47,7 +47,9 @@ def cwd(tmp_path, monkeypatch):
 def model_answering(labels):
     def fn(messages, info: AgentInfo):
         tool = info.output_tools[0]
-        return ModelResponse(parts=[ToolCallPart(tool.name, {"response": labels})])
+        return ModelResponse(
+            parts=[ToolCallPart(tool.name, {"reasoning": "r", "labels": labels})]
+        )
 
     return FunctionModel(fn)
 

@@ -73,7 +73,11 @@ def classify_fn(messages, info: AgentInfo):
     text = str(next(p.content for p in request.parts if p.part_kind == "user-prompt"))
     answer = ["a"] if int(text.split()[-1]) % 2 == 0 else ["off_topic"]
     return ModelResponse(
-        parts=[ToolCallPart(info.output_tools[0].name, {"response": answer})]
+        parts=[
+            ToolCallPart(
+                info.output_tools[0].name, {"reasoning": "r", "labels": answer}
+            )
+        ]
     )
 
 

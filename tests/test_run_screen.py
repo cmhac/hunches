@@ -22,7 +22,9 @@ PROMPT = "Classify."
 
 def classifier(messages, info: AgentInfo):
     return ModelResponse(
-        parts=[ToolCallPart(info.output_tools[0].name, {"response": ["a"]})]
+        parts=[
+            ToolCallPart(info.output_tools[0].name, {"reasoning": "r", "labels": ["a"]})
+        ]
     )
 
 

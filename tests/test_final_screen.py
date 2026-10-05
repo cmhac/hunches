@@ -21,7 +21,11 @@ def classifier(messages, info: AgentInfo):
     text = str(next(p.content for p in request.parts if p.part_kind == "user-prompt"))
     answer = ["b"] if text == "item 0" else ["a"]
     return ModelResponse(
-        parts=[ToolCallPart(info.output_tools[0].name, {"response": answer})]
+        parts=[
+            ToolCallPart(
+                info.output_tools[0].name, {"reasoning": "r", "labels": answer}
+            )
+        ]
     )
 
 
