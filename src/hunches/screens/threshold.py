@@ -11,7 +11,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Input, Static
 
 from hunches import candidates, cost, files
-from hunches.app import StatusHeader, panel
+from hunches.app import StatusHeader, panel, retitle, say
 from hunches.classifier import classify_many
 
 SAMPLE = "threshold_sample.json"
@@ -90,7 +90,7 @@ class ThresholdScreen(Screen):
             yield Static(
                 "Finish stage 3 (taxonomy and prompt) first.",
                 id="not-ready",
-                classes="warn",
+                classes="not-ready",
             )
             yield Footer()
             return
@@ -142,11 +142,14 @@ class ThresholdScreen(Screen):
                 right(rate_text(r)),
                 right(f"{r['cumulative']:,}"),
             )
-        self.query_one("#bands-panel").border_subtitle = (
-            f"sampling {self.progress[0]}/{self.progress[1]}" if self.progress else ""
+        retitle(
+            self.query_one("#bands-panel"),
+            subtitle=f"sampling {self.progress[0]}/{self.progress[1]}"
+            if self.progress
+            else "",
         )
         note = self.query_one("#note", Static)
-        note.update(self.note)
+        say(note, self.note)
         note.set_classes(
             "note"
             if self.note.startswith("Sampled")

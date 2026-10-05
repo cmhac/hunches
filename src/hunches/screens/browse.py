@@ -6,7 +6,7 @@ from textual.widgets import DataTable, Footer, Input, SelectionList, Static
 from textual.widgets.data_table import ColumnKey
 
 from hunches import files
-from hunches.app import StatusHeader, panel
+from hunches.app import StatusHeader, panel, retitle
 from hunches.theme import label_text
 
 # Rendering 100k DataTable rows takes ~10 s, so only the first matches are drawn.
@@ -118,9 +118,10 @@ class BrowseScreen(Screen):
             if self.rows
             else "results.jsonl is empty. Run stage 8 first."
         )
-        self.query_one("#table-panel").border_subtitle = (
-            f"Showing {len(self.shown)} of {len(self.rows)}"
-            + (f" ({matches} match; refine the search)" if matches > MAX_ROWS else "")
+        retitle(
+            self.query_one("#table-panel"),
+            subtitle=f"Showing {len(self.shown)} of {len(self.rows)}"
+            + (f" ({matches} match; refine the search)" if matches > MAX_ROWS else ""),
         )
         self.show_detail()
 
@@ -130,9 +131,7 @@ class BrowseScreen(Screen):
         if self.shown and table.cursor_row < len(self.shown):
             row = self.rows[self.shown[table.cursor_row]]
         self.query_one("#detail", Static).update(row["text"] if row else "")
-        self.query_one("#detail-panel").border_title = (
-            f"item {row['id']}" if row else "item"
-        )
+        retitle(self.query_one("#detail-panel"), f"item {row['id']}" if row else "item")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self.refresh_table()

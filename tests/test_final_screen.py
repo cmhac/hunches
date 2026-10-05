@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from conftest import panel_title
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from textual.widgets import DataTable, Static
@@ -187,7 +188,7 @@ async def test_redesigned_panels_banner_and_tables():
         await pilot.pause()
         stamp = json.loads(files.read_text("test_result.json") or "")["timestamp"]
         panel = screen.query_one("#metrics-panel")
-        assert panel.border_title == f"test set · held out · {stamp}"
+        assert panel_title(panel)[0] == f"test set · held out · {stamp}"
         assert str(screen.query_one("#warning", Static).render()) == (
             "Tuning against test disagreements weakens this held-out result."
         )
@@ -203,8 +204,8 @@ async def test_redesigned_panels_banner_and_tables():
         ]
         dis = screen.query_one("#dis", DataTable)
         assert [str(c) for c in dis.get_row_at(0)] == ["item 50", "■ b", "■ a"]
-        assert screen.query_one("#dis-panel").border_title == "disagreements · 1"
-        assert screen.query_one("#text-panel").border_title == "text"
+        assert panel_title(screen.query_one("#dis-panel"))[0] == "disagreements · 1"
+        assert panel_title(screen.query_one("#text-panel"))[0] == "text"
 
         files.write_text("prompt.md", "Classify differently.")
         screen.show()

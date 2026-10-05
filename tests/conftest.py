@@ -62,3 +62,11 @@ def system_ready(tmp_path):
             recommendation_seen=system.RECOMMENDED_REVISION,
         )
     )
+
+
+def panel_title(widget) -> tuple[str, str]:
+    """(title, subtitle) markup of a `panel()`'s own title row (the first one under it)."""
+    return (
+        str(widget.query(".panel-title").first().content),
+        str(widget.query(".panel-subtitle").first().content),
+    )

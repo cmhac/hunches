@@ -5,11 +5,12 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from hunches import files, system
-from hunches.app import StatusHeader
+from hunches.app import StatusHeader, modal_box
 from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.paths import PathPicker
 from hunches.screens.project_settings import ProjectSettingsScreen
@@ -39,9 +40,7 @@ class RemoveModal(ModalScreen[str | None]):
     DEFAULT_CSS = """
     RemoveModal > Vertical {
         width: 100%; max-width: 78; height: auto; max-height: 100%;
-        border: round $primary; background: $surface; padding: 0 1;
     }
-    RemoveModal Horizontal { height: auto; }
     """
 
     def __init__(self, name: str) -> None:
@@ -49,15 +48,14 @@ class RemoveModal(ModalScreen[str | None]):
         self.project_name = name
 
     def compose(self) -> ComposeResult:
-        with Vertical() as box:
-            box.border_title = f"Remove {self.project_name}"
+        with modal_box(Vertical(), f"Remove {escape(self.project_name)}"):
             yield Static(
                 "Remove from list keeps every file. Delete project files removes "
                 "only this project's .hunches/ folder: never the corpus, never S3. "
                 "hunches does not run git, so committed history is unaffected.",
                 classes="note",
             )
-            with Horizontal():
+            with Horizontal(classes="buttons"):
                 yield Button("Remove from list", id="remove", compact=True)
                 yield Button("Cancel", id="cancel", compact=True)
             yield Input(
@@ -90,7 +88,7 @@ class ProjectsScreen(Screen):
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         yield Static("", id="banner", classes="banner -warning")
-        yield DataTable(cursor_type="row", zebra_stripes=True)
+        yield DataTable(cursor_type="row", zebra_stripes=False)
         yield Static(
             "No projects yet. Press n to create one.", id="empty", classes="note"
         )

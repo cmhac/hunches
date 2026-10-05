@@ -9,7 +9,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Static, TextArea
 
 from hunches import cost, files, metrics
-from hunches.app import StatusHeader, confirm_approve, panel
+from hunches.app import StatusHeader, confirm_approve, modal_box, panel, retitle
 from hunches.classifier import classify_many
 from hunches.screens import report
 from hunches.theme import editor
@@ -58,7 +58,7 @@ class ProposalScreen(ModalScreen[str | None]):
     DEFAULT_CSS = """
     ProposalScreen { align: center middle; }
     ProposalScreen > Vertical {
-        width: 1fr; height: 1fr; margin: 1 2; border: round $primary; background: $surface; padding: 0 1;
+        width: 1fr; height: 1fr; margin: 1 2;
     }
     ProposalScreen .panel { height: 1fr; }
     ProposalScreen #diff-panel { overflow-y: auto; }
@@ -72,8 +72,7 @@ class ProposalScreen(ModalScreen[str | None]):
         self.proposed = proposed
 
     def compose(self) -> ComposeResult:
-        with Vertical() as box:
-            box.border_title = "Proposed prompt change"
+        with modal_box(Vertical(), "Proposed prompt change"):
             yield Static(
                 "Review the diff, edit the proposal if needed, then accept or reject.",
                 classes="note",
@@ -158,7 +157,7 @@ class TuneScreen(Screen):
             yield Static(
                 "Finish stage 3 (taxonomy and prompt) first.",
                 id="not-ready",
-                classes="warn",
+                classes="not-ready",
             )
             yield Footer()
             return
@@ -237,10 +236,9 @@ class TuneScreen(Screen):
         m = self.metrics
         names = [lab.name for lab in self.taxonomy.labels]
         target = self.config.target_metric
-        self.query_one(
-            "#metrics-panel"
-        ).border_subtitle = (
-            f"target {target} ≥ {self.config.target_score:.2f} · m metric · +/- score"
+        retitle(
+            self.query_one("#metrics-panel"),
+            subtitle=f"target {target} ≥ {self.config.target_score:.2f} · m metric · +/- score",
         )
         self.query_one("#summary", Static).update(
             report.summary(m, target, self.config.target_score) if m else ""
@@ -258,7 +256,7 @@ class TuneScreen(Screen):
         report.fit_text_column(table)
         table.clear()
         wrong = m.disagreements if m else []
-        self.query_one("#dis-panel").border_title = f"disagreements · {len(wrong)}"
+        retitle(self.query_one("#dis-panel"), f"disagreements · {len(wrong)}")
         for i in wrong:
             predicted = "failed" if i in self.errors else self.predicted[i]
             table.add_row(

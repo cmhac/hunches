@@ -11,7 +11,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
 from hunches import files
-from hunches.app import ConfirmScreen, StatusHeader, panel
+from hunches.app import ConfirmScreen, StatusHeader, panel, retitle, say
 from hunches.classifier import Prediction, classify
 from hunches.theme import label_color, label_tag, label_text
 
@@ -89,7 +89,7 @@ class GoldScreen(Screen):
             yield Static(
                 "Finish stage 3 (taxonomy and prompt) first.",
                 id="not-ready",
-                classes="warn",
+                classes="not-ready",
             )
             yield Footer()
             return
@@ -133,12 +133,13 @@ class GoldScreen(Screen):
             f"{strong(done)} labelled"
         )
         self.query_one("#text", Static).update(row.text if row else "")
-        self.query_one("#item").border_title = f"item {row.id}" if row else "item"
+        retitle(self.query_one("#item"), f"item {row.id}" if row else "item")
         single = self.taxonomy.mode == "single"
         panel = self.query_one("#labels-panel")
-        panel.border_title = f"labels · {self.taxonomy.mode}"
-        panel.border_subtitle = (
-            "press a key to label" if single else "keys toggle, enter confirms"
+        retitle(
+            panel,
+            f"labels · {self.taxonomy.mode}",
+            "press a key to label" if single else "keys toggle, enter confirms",
         )
         names = [lab.name for lab in self.taxonomy.labels]
         descriptions = {lab.name: lab.description for lab in self.taxonomy.labels}
@@ -156,9 +157,9 @@ class GoldScreen(Screen):
                 line += f"  [$text-muted]{escape(descriptions[name])}[/]"
             lines.append(f"[on $surface]{line}[/]" if on else line)
         self.query_one("#labels", Static).update("\n".join(lines))
-        self.query_one("#note", Static).update(self.note)
+        say(self.query_one("#note", Static), self.note)
         self.show_prediction()
-        self.query_one("#counts-panel").border_subtitle = f"{done} of {len(self.rows)}"
+        retitle(self.query_one("#counts-panel"), subtitle=f"{done} of {len(self.rows)}")
         table = self.query_one("#counts", DataTable)
         table.clear()
         for name in files.all_labels(self.taxonomy):

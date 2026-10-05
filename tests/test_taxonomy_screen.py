@@ -2,6 +2,7 @@ import json
 
 import pytest
 import yaml
+from conftest import panel_title
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import Input, RichLog, TextArea
 
@@ -176,12 +177,14 @@ async def test_redesigned_panels_status_and_highlighting(tmp_path, monkeypatch):
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, TaxonomyScreen)
-        assert screen.query_one("ChatPanel").border_title == "chat · taxonomy"
+        assert panel_title(screen.query_one("ChatPanel"))[0] == "chat · taxonomy"
         assert (
-            screen.query_one("#taxonomy-panel").border_title
+            panel_title(screen.query_one("#taxonomy-panel"))[0]
             == "taxonomy.yaml (editable)"
         )
-        assert screen.query_one("#prompt-panel").border_title == "prompt.md (editable)"
+        assert (
+            panel_title(screen.query_one("#prompt-panel"))[0] == "prompt.md (editable)"
+        )
         yaml_box, prompt_box = (
             screen.query_one("#taxonomy", TextArea),
             screen.query_one("#prompt", TextArea),

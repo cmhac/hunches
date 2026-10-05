@@ -10,7 +10,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Label, Select, Static
 
 from hunches import keys, models, system
-from hunches.app import StatusHeader, panel
+from hunches.app import StatusHeader, modal_box, panel
 from hunches.screens.model_picker import ModelPicker
 
 # What the thinking Select offers: exactly the values files.Config accepts, plus "default" (None)
@@ -298,9 +298,7 @@ class RecommendationModal(ModalScreen[None]):
     DEFAULT_CSS = """
     RecommendationModal > Vertical {
         width: 100%; max-width: 78; height: auto; max-height: 100%;
-        border: round $primary; background: $surface; padding: 0 1;
     }
-    RecommendationModal Horizontal { height: auto; align-horizontal: right; }
     """
 
     def __init__(self, current: system.System) -> None:
@@ -314,8 +312,7 @@ class RecommendationModal(ModalScreen[None]):
             self.current.classifier_model,
         )
         new = (str(rec["assistant"]), str(rec["classifier"]))
-        with Vertical(id="modal-box") as box:
-            box.border_title = "Recommended models changed"
+        with modal_box(Vertical(id="modal-box"), "Recommended models changed"):
             for name, was, now in zip(("assistant", "classifier"), old, new):
                 yield Static(
                     f"{name}: {escape(was)}  [$text-muted]{models.price_label(was)}[/]\n"
@@ -326,7 +323,7 @@ class RecommendationModal(ModalScreen[None]):
                 f" -> {rec['thinking'] or 'provider default'}"
             )
             yield Static("Existing projects keep their models.", classes="note")
-            with Horizontal():
+            with Horizontal(classes="buttons"):
                 yield Button("Keep mine", id="keep-mine")
                 yield Button("Use new", id="use-new", variant="success")
 

@@ -1,4 +1,5 @@
 import pytest
+from conftest import panel_title
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import DataTable, Input, RichLog
 
@@ -119,14 +120,14 @@ async def test_redesigned_layout_titles_empty_state_and_warning(tmp_path, monkey
         screen = app.screen
         assert isinstance(screen, BriefScreen)
         pane = screen.query_one("#seeds-pane")
-        assert pane.border_title == "seeds.csv · 0"
-        assert screen.query_one("ChatPanel").border_title == "chat · brief"
+        assert panel_title(pane)[0] == "seeds.csv · 0"
+        assert panel_title(screen.query_one("ChatPanel"))[0] == "chat · brief"
         empty = screen.query_one("#empty")
         assert empty.display
         assert "No seeds yet. Describe what to find in the chat" in str(empty.render())
         assert not screen.query_one("#seeds").display
         # two equal columns
-        assert screen.query_one("ChatPanel").size.width == pane.size.width
+        assert screen.query_one("ChatPanel").region.width == pane.region.width
 
         await pilot.press("f2")
         await pilot.pause()
@@ -136,7 +137,7 @@ async def test_redesigned_layout_titles_empty_state_and_warning(tmp_path, monkey
 
         screen.add_seeds(["A", "B"])
         await pilot.pause()
-        assert pane.border_title == "seeds.csv · 2"
+        assert panel_title(pane)[0] == "seeds.csv · 2"
         assert not empty.display and screen.query_one("#seeds").display
         screen.query_one("#seeds", DataTable).focus()
         await pilot.pause()

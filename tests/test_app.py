@@ -1,5 +1,6 @@
 import json
 
+from conftest import panel_title
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
@@ -286,7 +287,7 @@ async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
         assert [b.id for b in modal.query(Button)] == ["no", "yes"]  # Cancel, Approve
         assert app.focused is not None and app.focused.id == "yes"
         box = modal.query_one(Vertical)
-        assert box.border_title == "Confirm" and box.outer_size.width == 58
+        assert panel_title(box)[0] == "Confirm" and box.outer_size.width == 58
         await pilot.press("enter")  # Approve is focused by default
         await pilot.pause()
         assert files.read_state().seeds_approved
@@ -304,8 +305,8 @@ async def test_chat_panel_gutters_title_and_blank_rows(tmp_path, monkeypatch):
         await pilot.pause()
         panel = ChatPanel("brief", agent)
         await app.screen.mount(panel)
-        assert panel.border_title == "chat · brief"
-        assert panel.border_subtitle == "test"  # the model name
+        assert panel_title(panel)[0] == "chat · brief"
+        assert panel_title(panel)[1] == "test"  # the model name
         panel.query_one("#chat-input", Input).focus()
         await pilot.press("h", "i", "enter", "y", "o", "enter")
         await pilot.pause(0.5)

@@ -12,6 +12,8 @@ from textual.screen import ModalScreen, Screen
 from textual.suggester import Suggester
 from textual.widgets import Button, DirectoryTree, Input
 
+from hunches.app import modal_box
+
 MAX_ENTRIES = 2000
 BROWSE_LABEL = "Browse (b)"
 
@@ -60,7 +62,7 @@ class PathPicker(ModalScreen[Path | None]):
     """Browse directories. Nothing is chosen until Select is pressed."""
 
     DEFAULT_CSS = """
-    PathPicker > Vertical { width: 100%; max-width: 78; height: 100%; max-height: 22; padding: 0 1; }
+    PathPicker > Vertical { width: 100%; max-width: 78; height: 100%; max-height: 22; }
     PathPicker #bar { height: 1; }
     PathPicker #root { width: 1fr; }
     PathPicker #bar Button { margin-left: 1; width: auto; min-width: 8; }
@@ -76,8 +78,7 @@ class PathPicker(ModalScreen[Path | None]):
         self.start = path if start and path.is_dir() else Path.cwd()
 
     def compose(self) -> ComposeResult:
-        with Vertical() as box:
-            box.border_title = "Choose a directory"
+        with modal_box(Vertical(), "Choose a directory"):
             with Horizontal(id="bar"):
                 yield PathInput(str(self.start), id="root", compact=True)
                 yield Button("Up", id="up", compact=True)

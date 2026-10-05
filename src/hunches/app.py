@@ -27,11 +27,49 @@ class Placeholder(Screen):
 
 
 def panel(widget, title: str, subtitle: str = ""):
-    """Give a container the bordered, titled look from hunches.tcss."""
+    """Give a container the tinted panel look from hunches.tcss, with a one-row title line first.
+
+    Title and subtitle are markup (a subtitle can carry a badge). Change them with `retitle`.
+    """
     widget.add_class("panel")
-    widget.border_title = title
-    widget.border_subtitle = subtitle
+    widget.compose_add_child(PanelTitle(title, subtitle))
     return widget
+
+
+class PanelTitle(Horizontal):
+    """Title left, subtitle right-aligned and muted. Also the first row of modals."""
+
+    def __init__(self, title: str, subtitle: str = "") -> None:
+        self.title_text = Static(title, classes="panel-title")
+        self.subtitle_text = Static(subtitle, classes="panel-subtitle")
+        super().__init__(self.title_text, self.subtitle_text)
+
+
+def modal_box(box, title: str):
+    """Give a modal's container the shared look (hunches.tcss) with a primary title on its first row."""
+    box.add_class("modal-box")
+    box.compose_add_child(PanelTitle(title))
+    return box
+
+
+def retitle(widget, title: str | None = None, subtitle: str | None = None) -> None:
+    """Change a `panel()`'s title and/or subtitle (markup); None leaves that one alone."""
+    row = widget.query(PanelTitle).first()
+    if title is not None:
+        row.title_text.update(title)
+    if subtitle is not None:
+        row.subtitle_text.update(subtitle)
+
+
+def say(widget: Static, text: str) -> None:
+    """Set a message line; an empty one is hidden so no blank strip sits above the footer."""
+    widget.update(text)
+    widget.display = bool(text)
+
+
+def key_button(label: str, key: str, **kwargs) -> Button:
+    """A button whose label carries its key, e.g. "Approve seeds  F2"."""
+    return Button(f"{label}  {key}", **kwargs)
 
 
 class StatusHeader(Static):
@@ -110,10 +148,9 @@ class ConfirmScreen(ModalScreen[bool]):
         self.question = question
 
     def compose(self) -> ComposeResult:
-        with Vertical() as box:
-            box.border_title = "Confirm"
+        with modal_box(Vertical(), "Confirm"):
             yield Label(self.question)
-            with Horizontal():
+            with Horizontal(classes="buttons"):
                 yield Button("Cancel", id="no")
                 yield Button("Approve", id="yes", variant="success")
 

@@ -10,7 +10,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Static, TextArea
 
 from hunches import files, metrics
-from hunches.app import ChatPanel, StatusHeader, confirm_approve, panel
+from hunches.app import ChatPanel, StatusHeader, confirm_approve, panel, say
 from hunches.theme import editor
 
 INSTRUCTIONS = """\
@@ -117,26 +117,26 @@ class TaxonomyScreen(Screen):
         status = self.query_one("#status", Static)
         if name == "prompt.md":
             files.write_text(name, text)
-            status.update("")
+            say(status, "")
             return
         # a half-typed taxonomy must not overwrite the last valid file
         try:
             files.Taxonomy.model_validate(yaml.safe_load(text))
         except (ValidationError, yaml.YAMLError) as e:
-            status.update(f"taxonomy.yaml not saved: {str(e).splitlines()[0]}")
+            say(status, f"taxonomy.yaml not saved: {str(e).splitlines()[0]}")
             return
         files.write_text(name, text)
-        status.update("")
+        say(status, "")
 
     def action_approve(self) -> None:
         status = self.query_one("#status", Static)
         try:
             taxonomy = files.read_taxonomy()
         except (OSError, ValidationError, yaml.YAMLError, TypeError) as e:
-            status.update(f"Cannot approve: no valid taxonomy.yaml ({e})")
+            say(status, f"Cannot approve: no valid taxonomy.yaml ({e})")
             return
         if not taxonomy.labels or not (files.read_text("prompt.md") or "").strip():
-            status.update("Cannot approve: need at least one label and a prompt.")
+            say(status, "Cannot approve: need at least one label and a prompt.")
             return
 
         def save_target() -> None:

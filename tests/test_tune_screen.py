@@ -1,4 +1,5 @@
 import pytest
+from conftest import panel_title
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from textual.widgets import DataTable, Static, TextArea
@@ -182,8 +183,8 @@ async def test_redesigned_panels_summary_and_tables():
         screen.rerun()
         await settle(app, pilot)
         panel = screen.query_one("#metrics-panel")
-        assert panel.border_title == "dev set"
-        assert panel.border_subtitle == "target accuracy ≥ 0.90 · m metric · +/- score"
+        assert panel_title(panel)[0] == "dev set"
+        assert panel_title(panel)[1] == "target accuracy ≥ 0.90 · m metric · +/- score"
         # the metric equal to the target (exact-match) is left out
         summary = " ".join(metrics_text(screen).split())
         assert summary.startswith(
@@ -198,8 +199,8 @@ async def test_redesigned_panels_summary_and_tables():
             "0.67",
             "4",
         ]
-        assert screen.query_one("#dis-panel").border_title == "disagreements · 4"
-        assert screen.query_one("#text-panel").border_title == "text"
+        assert panel_title(screen.query_one("#dis-panel"))[0] == "disagreements · 4"
+        assert panel_title(screen.query_one("#text-panel"))[0] == "text"
         dis = screen.query_one("#dis", DataTable)
         assert [str(c) for c in dis.get_row_at(0)] == ["item 1", "■ b", "■ a"]
         assert "item 1" in str(screen.query_one("#detail", Static).render())
@@ -251,7 +252,7 @@ async def test_not_ready_notice():
         await pilot.pause()
         notice = app.screen.query_one("#not-ready")
         assert str(notice.render()) == "Finish stage 3 (taxonomy and prompt) first."
-        assert notice.has_class("warn")
+        assert notice.has_class("not-ready")
 
 
 async def test_proposal_modal_layout_and_diff_lines():
@@ -264,12 +265,15 @@ async def test_proposal_modal_layout_and_diff_lines():
         await pilot.pause()
         modal = app.screen
         box = modal.query_one("Vertical")
-        assert box.border_title == "Proposed prompt change"
+        assert panel_title(box)[0] == "Proposed prompt change"
         assert box.outer_size.width == 96 and box.outer_size.height == 28
         assert (
-            modal.query_one("#diff-panel").border_title == "diff · current → proposed"
+            panel_title(modal.query_one("#diff-panel"))[0]
+            == "diff · current → proposed"
         )
-        assert modal.query_one("#proposal-panel").border_title == "proposal (editable)"
+        assert (
+            panel_title(modal.query_one("#proposal-panel"))[0] == "proposal (editable)"
+        )
         assert [b.id for b in modal.query("Button")] == ["reject", "accept"]
         assert app.focused is not None and app.focused.id == "accept"
         diff = str(modal.query_one("#diff", Static).render())

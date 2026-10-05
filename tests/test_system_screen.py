@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import panel_title
 from textual.app import App
 from textual.widgets import Button, Input, Select, Static
 
@@ -338,7 +339,7 @@ async def test_modal_shows_old_to_new_with_prices_and_use_new_adopts_recommendat
         await pilot.pause()
         shown = text_of(app.screen)
         assert (
-            app.screen.query_one("#modal-box").border_title
+            panel_title(app.screen.query_one("#modal-box"))[0]
             == "Recommended models changed"
         )
         assert "anthropic:claude-opus-4-5" in shown

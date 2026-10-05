@@ -3,6 +3,7 @@ import hashlib
 import json
 
 import pytest
+from conftest import panel_title
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RunUsage
@@ -234,9 +235,9 @@ async def test_redesigned_panels_subtitles_and_banner(monkeypatch):
         screen = app.screen
         assert isinstance(screen, RunScreen)
         run_panel = screen.query_one("#run-panel")
-        assert screen.query_one("#estimate-panel").border_title == "estimate"
-        assert run_panel.border_title == "run · results.jsonl"
-        assert run_panel.border_subtitle == "not started"
+        assert panel_title(screen.query_one("#estimate-panel"))[0] == "estimate"
+        assert panel_title(run_panel)[0] == "run · results.jsonl"
+        assert panel_title(run_panel)[1] == "not started"
         assert run_panel.has_class("-focused")
         assert not screen.query_one("#warn").display
 
@@ -250,19 +251,19 @@ async def test_redesigned_panels_subtitles_and_banner(monkeypatch):
         )
         await pilot.press("s")
         await pilot.pause(0.2)
-        assert run_panel.border_subtitle == "running"
+        assert panel_title(run_panel)[1] == "running"
         live = str(screen.query_one("#live", Static).render())
         assert live.startswith("2/6 | cost ")
         await pilot.press("x")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert run_panel.border_subtitle == "stopped · resumable"
+        assert panel_title(run_panel)[1] == "stopped · resumable"
 
         use_function_model(monkeypatch)
         await pilot.press("s")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert run_panel.border_subtitle == "complete"
+        assert panel_title(run_panel)[1] == "complete"
 
 
 async def test_failures_list_and_run_failed_error_class(monkeypatch):
@@ -314,4 +315,4 @@ async def test_not_ready_notice():
         await pilot.pause()
         notice = app.screen.query_one("#not-ready")
         assert str(notice.render()) == "Finish stages 3 and 7 first."
-        assert notice.has_class("warn")
+        assert notice.has_class("not-ready")

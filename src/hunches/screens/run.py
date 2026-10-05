@@ -9,7 +9,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, ProgressBar, Static
 
 from hunches import cost, files
-from hunches.app import StatusHeader, panel
+from hunches.app import StatusHeader, panel, retitle
 from hunches.classifier import classify_many
 from hunches.screens.final import RESULT, prompt_hash
 
@@ -74,7 +74,9 @@ class RunScreen(Screen):
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         if not self.ready:
-            yield Static("Finish stages 3 and 7 first.", id="not-ready", classes="warn")
+            yield Static(
+                "Finish stages 3 and 7 first.", id="not-ready", classes="not-ready"
+            )
             yield Footer()
             return
         with panel(Vertical(id="estimate-panel"), "estimate"):
@@ -105,14 +107,15 @@ class RunScreen(Screen):
             if self.errors
             else ""
         )
-        self.query_one("#run-panel").border_subtitle = (
-            "running"
+        retitle(
+            self.query_one("#run-panel"),
+            subtitle="running"
             if self.running
             else "complete"
             if not todo
             else "stopped · resumable"
             if self.started or files.read_jsonl("results.jsonl")
-            else "not started"
+            else "not started",
         )
 
     def action_start(self) -> None:
@@ -129,7 +132,7 @@ class RunScreen(Screen):
             return
         self.running = self.started = True
         self.query_one("#warn").display = False
-        self.query_one("#run-panel").border_subtitle = "running"
+        retitle(self.query_one("#run-panel"), subtitle="running")
         self.run_worker(self.run_all(), exclusive=True)
 
     def action_stop(self) -> None:

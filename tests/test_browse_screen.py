@@ -1,4 +1,5 @@
 import pytest
+from conftest import panel_title
 from textual.widgets import DataTable, Input, SelectionList, Static
 from textual.widgets.data_table import ColumnKey
 
@@ -58,7 +59,7 @@ def ids(screen):
 
 
 def count(screen):
-    return screen.query_one("#table-panel").border_subtitle
+    return panel_title(screen.query_one("#table-panel"))[1]
 
 
 async def test_all_rows_skip_errors():
@@ -136,9 +137,9 @@ async def test_redesigned_panels_cells_and_detail_title():
     app = HunchesApp()
     async with app.run_test(size=(120, 30)) as pilot:
         screen = await open_browse(pilot, app)
-        assert screen.query_one("#labels-panel").border_title == "labels"
-        assert screen.query_one("#table-panel").border_title == "results.jsonl"
-        assert screen.query_one("#detail-panel").border_title == "item 0"
+        assert panel_title(screen.query_one("#labels-panel"))[0] == "labels"
+        assert panel_title(screen.query_one("#table-panel"))[0] == "results.jsonl"
+        assert panel_title(screen.query_one("#detail-panel"))[0] == "item 0"
         table = screen.query_one("#table", DataTable)
         assert [str(c) for c in table.get_row_at(2)[:3]] == ["2", "■ a, ■ b", "0.700"]
         assert str(table.get_row_at(2)[3]) == "Red cars are fast"
@@ -151,7 +152,7 @@ async def test_redesigned_panels_cells_and_detail_title():
         table.focus()
         await pilot.press("down")
         await pilot.pause()
-        assert screen.query_one("#detail-panel").border_title == "item 1"
+        assert panel_title(screen.query_one("#detail-panel"))[0] == "item 1"
 
 
 async def test_layout_wide_vs_narrow():

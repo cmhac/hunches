@@ -10,7 +10,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
 from hunches import cost, files, metrics
-from hunches.app import StatusHeader, panel
+from hunches.app import StatusHeader, panel, retitle, say
 from hunches.classifier import classify_many
 from hunches.screens import report
 from hunches.screens.gold import GoldScreen
@@ -159,8 +159,9 @@ class FinalScreen(Screen):
             "STALE: prompt.md or classifier model changed since this result was computed. Press r to re-run."
         )
         names = [lab.name for lab in self.taxonomy.labels]
-        self.query_one("#metrics-panel").border_title = "test set · held out" + (
-            f" · {r['timestamp']}" if r else ""
+        retitle(
+            self.query_one("#metrics-panel"),
+            "test set · held out" + (f" · {r['timestamp']}" if r else ""),
         )
         per_label = self.query_one("#per-label", DataTable)
         per_label.display = r is not None
@@ -176,7 +177,7 @@ class FinalScreen(Screen):
         report.fit_text_column(table)
         table.clear()
         wrong = r["disagreements"] if r else []
-        self.query_one("#dis-panel").border_title = f"disagreements · {len(wrong)}"
+        retitle(self.query_one("#dis-panel"), f"disagreements · {len(wrong)}")
         for i, d in enumerate(wrong):
             table.add_row(
                 report.clipped(d["text"]),
@@ -185,7 +186,7 @@ class FinalScreen(Screen):
                 key=str(i),
             )
         note = self.query_one("#note", Static)
-        note.update(self.note)
+        say(note, self.note)
         note.set_classes(
             "note"
             if self.note.startswith(("Running", "Test run finished"))

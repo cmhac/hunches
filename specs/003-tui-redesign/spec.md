@@ -55,6 +55,7 @@ Found while cross-reading. Resolutions are binding for the tasks.
 7. **`run.seconds_text` prints `0m14s`** (BACKEND §8 notes it). It moves with `RunIndicator` and drops the leading `0m` (task 11).
 8. **Gold milestone wording.** README §5 quotes "Halfway there. 25 to go."; the mock (`Gold.jsx`) renders "Halfway. 25 to go.", and gives names only for the other milestones. The README's string is used for 50 %; "A quarter of the way there." and "Three quarters of the way there." follow it (task 09). Confirm with the design owner if exact copy matters.
 9. **Rail/footer copy.** The System settings note "the header shows actual spend" becomes "the sidebar shows actual spend" at ≥100 columns and keeps "header" below.
+10. **`$boost` is not `#252E3E` unless the theme says so.** `Theme(boost=...)` is ignored for the `$boost` variable (Textual derives a 4% white overlay), so the handoff's "boost `#252E3E`" (buttons, focused inputs, key caps, cursor) rendered as the surface colour. Task 01 adds `"boost": "#252E3E"` to `HUNCHES.variables` in `theme.py` (the one change to that file).
 
 ## Layout and file changes
 

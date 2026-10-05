@@ -2,6 +2,7 @@ import json
 
 import numpy as np
 import pytest
+from conftest import panel_title
 from pydantic_ai import Embedder
 from pydantic_ai.embeddings import EmbeddingResult, TestEmbeddingModel
 from pydantic_ai.usage import RequestUsage
@@ -142,10 +143,12 @@ async def test_panels_notice_classes_and_empty_state():
         screen = await open_search(pilot, app)
         for id_ in ("#done", "#warning", "#error"):
             assert not screen.query_one(id_).display  # empty messages take no row
-        assert screen.query_one("#bands-panel").border_title == (
+        assert panel_title(screen.query_one("#bands-panel"))[0] == (
             "candidates.jsonl · by similarity band"
         )
-        assert screen.query_one("#seeds-panel").border_title == "best seed (items won)"
+        assert (
+            panel_title(screen.query_one("#seeds-panel"))[0] == "best seed (items won)"
+        )
         assert "Run the search to see which seeds find the most items." in str(
             screen.query_one("#seeds", Static).render()
         )

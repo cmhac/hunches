@@ -10,12 +10,13 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 
 from hunches import keys, models
+from hunches.app import modal_box
 from hunches.models import NO_PRICE
 
 
 class ModelPicker(ModalScreen[str | None]):
     DEFAULT_CSS = """
-    ModelPicker > Vertical { width: 100%; max-width: 78; height: 100%; max-height: 22; padding: 0 1; }
+    ModelPicker > Vertical { width: 100%; max-width: 78; height: 100%; max-height: 22; }
     ModelPicker OptionList { height: 1fr; }
     ModelPicker #other { display: none; }
     ModelPicker #other.-shown { display: block; }
@@ -32,8 +33,7 @@ class ModelPicker(ModalScreen[str | None]):
         ]
 
     def compose(self) -> ComposeResult:
-        with Vertical() as box:
-            box.border_title = "Choose a model"
+        with modal_box(Vertical(), "Choose a model"):
             yield OptionList(
                 *(self.option(r) for r in self.rows), "Other… (type any provider:model)"
             )

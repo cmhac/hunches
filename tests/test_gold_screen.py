@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from conftest import panel_title
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from textual.widgets import DataTable, Static
@@ -180,14 +181,14 @@ async def test_redesigned_layout_80x24_single():
         assert text(screen, "#progress") == "dev set  item 1/50, 0 labelled"
         item = screen.query_one("#item")
         first = screen.rows[0]
-        assert item.border_title == f"item {first.id}"
+        assert panel_title(item)[0] == f"item {first.id}"
         assert "item" in text(screen, "#text")
         labels = screen.query_one("#labels-panel")
-        assert labels.border_title == "labels · single"
-        assert labels.border_subtitle == "press a key to label"
+        assert panel_title(labels)[0] == "labels · single"
+        assert panel_title(labels)[1] == "press a key to label"
         counts_panel = screen.query_one("#counts-panel")
-        assert counts_panel.border_title == "counts"
-        assert counts_panel.border_subtitle == "0 of 50"
+        assert panel_title(counts_panel)[0] == "counts"
+        assert panel_title(counts_panel)[1] == "0 of 50"
         assert counts_panel.outer_size.width <= 30
         rows = text(screen, "#labels").splitlines()
         assert [r.split()[0] for r in rows] == ["1", "2", "0"]  # off_topic is last
@@ -210,7 +211,7 @@ async def test_label_rows_marks_and_counts_subtitle():
         await pilot.press("left")
         rows = text(screen, "#labels").splitlines()
         assert "●" in rows[0] and "○" in rows[1]  # the saved label is filled
-        assert screen.query_one("#counts-panel").border_subtitle == "1 of 50"
+        assert panel_title(screen.query_one("#counts-panel"))[1] == "1 of 50"
         assert text(screen, "#progress") == "dev set  item 1/50, 1 labelled"
 
 
@@ -220,9 +221,9 @@ async def test_multi_mode_uses_square_marks_and_hint():
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         screen = app.screen
-        assert screen.query_one("#labels-panel").border_title == "labels · multi"
+        assert panel_title(screen.query_one("#labels-panel"))[0] == "labels · multi"
         assert (
-            screen.query_one("#labels-panel").border_subtitle
+            panel_title(screen.query_one("#labels-panel"))[1]
             == "keys toggle, enter confirms"
         )
         await pilot.press("2")
@@ -271,4 +272,4 @@ async def test_not_ready_notice():
         await pilot.pause()
         notice = app.screen.query_one("#not-ready")
         assert str(notice.render()) == "Finish stage 3 (taxonomy and prompt) first."
-        assert notice.has_class("warn")
+        assert notice.has_class("not-ready")

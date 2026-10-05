@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from conftest import panel_title
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from textual.widgets import DataTable, Input, Static
@@ -131,8 +132,8 @@ async def test_redesigned_panel_notes_and_not_ready(monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         panel = screen.query_one("#bands-panel")
-        assert panel.border_title == "off-topic rate by band · test"
-        assert panel.border_subtitle == ""  # not sampling any more
+        assert panel_title(panel)[0] == "off-topic rate by band · test"
+        assert panel_title(panel)[1] == ""  # not sampling any more
         table = screen.query_one("#bands", DataTable)
         assert [str(c.label) for c in table.columns.values()] == [
             "Band",
@@ -153,7 +154,7 @@ async def test_redesigned_panel_notes_and_not_ready(monkeypatch):
         assert note.has_class("note")
         screen.progress = (112, 210)
         screen.show()
-        assert panel.border_subtitle == "sampling 112/210"
+        assert panel_title(panel)[1] == "sampling 112/210"
         assert "Small samples are noisy" in str(screen.query_one("#explain").render())
 
         screen.query_one("#cutoff", Input).value = "abc"
@@ -179,4 +180,4 @@ async def test_not_ready_notice():
         await pilot.pause()
         notice = app.screen.query_one("#not-ready")
         assert str(notice.render()) == "Finish stage 3 (taxonomy and prompt) first."
-        assert notice.has_class("warn")
+        assert notice.has_class("not-ready")

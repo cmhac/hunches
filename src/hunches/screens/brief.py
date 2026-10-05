@@ -9,7 +9,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Input, Static
 
 from hunches import candidates, files
-from hunches.app import ChatPanel, StatusHeader, confirm_approve, panel
+from hunches.app import ChatPanel, StatusHeader, confirm_approve, panel, retitle
 
 INSTRUCTIONS = """\
 You help the user define what to find in a corpus of text items. Ask short follow-up \
@@ -87,7 +87,7 @@ class BriefScreen(Screen):
             table.add_row(seed)
         table.display = bool(self.seeds)
         self.query_one("#empty").display = not self.seeds
-        self.query_one("#seeds-pane").border_title = f"seeds.csv · {len(self.seeds)}"
+        retitle(self.query_one("#seeds-pane"), f"seeds.csv · {len(self.seeds)}")
 
     def save(self) -> None:
         write_seeds(self.seeds)
