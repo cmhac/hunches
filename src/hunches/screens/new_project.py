@@ -225,14 +225,13 @@ class NewProjectScreen(Screen):
         elif button in ("browse-location", "browse-corpus"):
             browse(self, self.query_one(f"#{button.removeprefix('browse-')}", Input))
         elif button == "pick-embedding":
-            provider = self.s3_embedding.partition(":")[0] or "openai"
 
             def picked(model: str | None) -> None:
                 if model:
                     self.s3_embedding = self.embedding = model
                     self.refresh_summary()
 
-            self.app.push_screen(ModelPicker(provider, embedding=True), picked)
+            self.app.push_screen(ModelPicker(embedding=True), picked)
         elif button == "check-store":
             self.check_store()
         elif button == "create":

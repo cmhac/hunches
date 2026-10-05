@@ -32,6 +32,12 @@ class Host(HunchesApp):
 Host.CSS_PATH = ProjectsHost.CSS_PATH
 
 
+@pytest.fixture(autouse=True)
+def anthropic_key(monkeypatch):
+    # the model picker lists only providers that have a key
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+
 def project_in(tmp_path, monkeypatch, **config):
     """A project with a real local corpus, as the current directory."""
     project = make_project(tmp_path, corpus=False, **config)
@@ -323,6 +329,7 @@ async def test_s3_embedding_model_is_picked_with_the_embedding_picker(
     tmp_path, monkeypatch
 ):
     project = s3_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     new = "openai:text-embedding-3-large"
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:

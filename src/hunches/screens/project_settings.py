@@ -173,14 +173,13 @@ class ProjectSettingsScreen(Screen):
 
     def pick(self, name: str) -> None:
         field = f"{name}_model"
-        current = getattr(self.config, field)
 
         def done(model: str | None) -> None:
             if model:
                 setattr(self.config, field, model)
                 self.refresh_models()
 
-        self.app.push_screen(ModelPicker(current.partition(":")[0]), done)
+        self.app.push_screen(ModelPicker(), done)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "backend":
@@ -214,14 +213,13 @@ class ProjectSettingsScreen(Screen):
         elif button == "check-store":
             self.check_store()
         elif button == "pick-embedding":
-            provider = self.s3_embedding.partition(":")[0] or "openai"
 
             def picked(model: str | None) -> None:
                 if model:
                     self.s3_embedding = model
                     self.show_embedding()
 
-            self.app.push_screen(ModelPicker(provider, embedding=True), picked)
+            self.app.push_screen(ModelPicker(embedding=True), picked)
         elif button.startswith("pick-"):
             self.pick(button.removeprefix("pick-"))
 

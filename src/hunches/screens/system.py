@@ -220,7 +220,7 @@ class SystemSettingsScreen(Screen[bool]):
                 self.edited = True
                 self.refresh_models()
 
-        self.app.push_screen(ModelPicker(self.provider), done)
+        self.app.push_screen(ModelPicker(), done)
 
     def refresh_keys(self) -> None:
         for var in keys.VARS:

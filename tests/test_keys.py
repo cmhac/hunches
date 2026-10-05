@@ -114,3 +114,13 @@ def test_sentinel_never_in_any_returned_text(monkeypatch):
         keys.provider_var("anthropic:x"),
     ]
     assert SENTINEL not in repr(results) + str(results)
+
+
+def test_providers_follow_the_keys_present(monkeypatch):
+    for var in keys.VARS:
+        monkeypatch.delenv(var, raising=False)
+    assert keys.providers() == []
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert keys.providers() == ["openai"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert keys.providers() == ["anthropic", "openai"]

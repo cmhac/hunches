@@ -1,4 +1,4 @@
-"""Modal list of known models for one provider, with prices, plus Other… for any string."""
+"""Modal list of known models for every provider that has an API key, with prices, plus Other… for any string."""
 
 from typing import ClassVar
 
@@ -9,7 +9,7 @@ from textual.markup import escape
 from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 
-from hunches import models
+from hunches import keys, models
 from hunches.models import NO_PRICE
 
 
@@ -22,10 +22,14 @@ class ModelPicker(ModalScreen[str | None]):
     """
     BINDINGS: ClassVar = [Binding("escape", "dismiss(None)", "Cancel")]
 
-    def __init__(self, provider: str, embedding: bool = False) -> None:
+    def __init__(self, embedding: bool = False) -> None:
         super().__init__()
         self.embedding = embedding
-        self.rows = models.model_rows(provider, embedding)
+        self.rows = [
+            row
+            for provider in keys.providers()
+            for row in models.model_rows(provider, embedding)
+        ]
 
     def compose(self) -> ComposeResult:
         with Vertical() as box:
@@ -34,7 +38,11 @@ class ModelPicker(ModalScreen[str | None]):
                 *(self.option(r) for r in self.rows), "Other… (type any provider:model)"
             )
             yield Input(placeholder="provider:model", id="other")
-            yield Static("", id="note", classes="warn")
+            yield Static(
+                "" if self.rows else "No API key set: add one in System settings (F5)",
+                id="note",
+                classes="warn",
+            )
 
     @staticmethod
     def option(row: models.ModelRow) -> str:

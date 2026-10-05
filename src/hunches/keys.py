@@ -51,3 +51,10 @@ def load_into_env() -> None:
 
 def provider_var(model: str) -> str | None:
     return {"anthropic": VARS[0], "openai": VARS[1]}.get(model.partition(":")[0])
+
+
+def providers() -> list[str]:
+    """Providers that have an API key (env or keyring), in VARS order."""
+    return [
+        p for p, var in zip(("anthropic", "openai"), VARS) if status(var) != "missing"
+    ]

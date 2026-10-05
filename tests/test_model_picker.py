@@ -8,19 +8,27 @@ from hunches.screens.model_picker import ModelPicker
 class PickApp(App):
     result = "unset"
 
-    def __init__(self, provider="openai", embedding=False):
+    def __init__(self, embedding=False):
         super().__init__()
-        self.provider = provider
         self.embedding = embedding
 
     def on_mount(self):
-        self.push_screen(ModelPicker(self.provider, self.embedding), self.got)
+        self.push_screen(ModelPicker(self.embedding), self.got)
 
     def got(self, model):
         self.result = model
 
 
+def with_keys(monkeypatch, anthropic=False, openai=False):
+    for var, on in (("ANTHROPIC_API_KEY", anthropic), ("OPENAI_API_KEY", openai)):
+        if on:
+            monkeypatch.setenv(var, "sk-test")
+        else:
+            monkeypatch.delenv(var, raising=False)
+
+
 def fake_known(monkeypatch):
+    with_keys(monkeypatch, openai=True)
     monkeypatch.setattr(
         models,
         "known_models",
@@ -99,3 +107,41 @@ async def test_other_with_empty_value_does_not_dismiss(monkeypatch):
         await pilot.press("down", "down", "enter", "enter")
         await pilot.pause()
         assert app.result == "unset"
+
+
+def option_text(app):
+    options = app.screen.query_one(OptionList)
+    return [
+        str(options.get_option_at_index(i).prompt) for i in range(options.option_count)
+    ]
+
+
+async def test_both_keys_show_both_providers(monkeypatch):
+    fake_known(monkeypatch)
+    with_keys(monkeypatch, anthropic=True, openai=True)
+    app = PickApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        text = "".join(option_text(app))
+        assert "openai:gpt-6-sol" in text and "anthropic:claude-haiku-4-5" in text
+
+
+async def test_anthropic_key_only_shows_anthropic(monkeypatch):
+    fake_known(monkeypatch)
+    with_keys(monkeypatch, anthropic=True)
+    app = PickApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        text = "".join(option_text(app))
+        assert "claude-haiku" in text and "gpt-6" not in text
+
+
+async def test_no_keys_shows_no_models_and_says_why(monkeypatch):
+    fake_known(monkeypatch)
+    with_keys(monkeypatch)
+    app = PickApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        text = option_text(app)
+        assert len(text) == 1 and "Other" in text[0]
+        assert "No API key" in str(app.screen.query_one("#note").render())
