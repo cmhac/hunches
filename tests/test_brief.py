@@ -1,10 +1,10 @@
 import pytest
 from conftest import panel_title
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
-from textual.widgets import DataTable, Input, RichLog
+from textual.widgets import DataTable, Input
 
 from hunches import candidates, files
-from hunches.app import HunchesApp, StatusHeader
+from hunches.app import ChatPanel, HunchesApp, StatusHeader
 from hunches.screens.brief import BriefScreen
 
 pytestmark = pytest.mark.usefixtures("system_ready")
@@ -107,8 +107,12 @@ async def test_resume_restores_chat_and_seeds(tmp_path, monkeypatch):
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         assert app.screen.query_one("#seeds", DataTable).row_count == 2
-        log = app.screen.query_one("#log", RichLog)
-        assert any("hello" in str(line.text) for line in log.lines)
+        panel = app.screen.query_one(ChatPanel)
+        assert [(line.kind, line.text) for line in panel.lines] == [
+            ("user", "hello"),
+            ("tool", "propose_seeds Added 2 seeds."),
+            ("assistant", "Done."),
+        ]
         assert app.screen.query_one(StatusHeader)
 
 

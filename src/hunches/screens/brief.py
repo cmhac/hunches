@@ -135,14 +135,15 @@ class BriefScreen(Screen):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
-        if event.input.id == "seed-input":
-            if text and self.editing is not None:
-                self.seeds[self.editing] = text
-                self.save()
-            elif text:
-                self.add_seeds([text])
-            event.input.value = ""
-            self.editing = None
-            self.query_one("#seeds", DataTable).focus()
-        elif text and files.read_text("brief.md") is None:
-            files.write_text("brief.md", text + "\n")  # first message, verbatim
+        if text and self.editing is not None:
+            self.seeds[self.editing] = text
+            self.save()
+        elif text:
+            self.add_seeds([text])
+        event.input.value = ""
+        self.editing = None
+        self.query_one("#seeds", DataTable).focus()
+
+    def on_chat_panel_submitted(self, event: ChatPanel.Submitted) -> None:
+        if files.read_text("brief.md") is None:
+            files.write_text("brief.md", event.text + "\n")  # first message, verbatim

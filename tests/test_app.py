@@ -293,8 +293,8 @@ async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
         assert files.read_state().seeds_approved
 
 
-def log_lines(panel) -> list[str]:
-    return [strip.text.rstrip() for strip in panel.query_one("#log").lines]
+def turns(panel) -> list[tuple[str, str]]:
+    return [(line.kind, line.text) for line in panel.lines]
 
 
 async def test_chat_panel_gutters_title_and_blank_rows(tmp_path, monkeypatch):
@@ -310,9 +310,14 @@ async def test_chat_panel_gutters_title_and_blank_rows(tmp_path, monkeypatch):
         panel.query_one("#chat-input", Input).focus()
         await pilot.press("h", "i", "enter", "y", "o", "enter")
         await pilot.pause(0.5)
-        lines = log_lines(panel)
-        assert lines[:3] == ["› hi", "", "│ hello there"]
-        assert lines[3:6] == ["", "› yo", ""]  # one blank row between turns
+        assert turns(panel) == [
+            ("user", "hi"),
+            ("assistant", "hello there"),
+            ("user", "yo"),
+            ("assistant", "hello there"),
+        ]
+        a, b, c, _ = panel.lines
+        assert (b.region.y - a.region.bottom, c.region.y - b.region.bottom) == (1, 1)
 
 
 async def test_chat_panel_restores_history_with_tool_calls(tmp_path, monkeypatch):
@@ -331,7 +336,13 @@ async def test_chat_panel_restores_history_with_tool_calls(tmp_path, monkeypatch
         [
             ModelRequest(parts=[UserPromptPart(content="find layoffs")]),
             ModelResponse(
-                parts=[ToolCallPart(tool_name="propose_seeds", args={"seeds": ["a"]})]
+                parts=[
+                    ToolCallPart(
+                        tool_name="propose_seeds",
+                        args={"seeds": ["a"]},
+                        tool_call_id="1",
+                    )
+                ]
             ),
             ModelRequest(
                 parts=[
@@ -351,13 +362,14 @@ async def test_chat_panel_restores_history_with_tool_calls(tmp_path, monkeypatch
         panel = ChatPanel("brief", Agent(TestModel()))
         await app.screen.mount(panel)
         await pilot.pause()
-        assert log_lines(panel) == [
-            "› find layoffs",
-            "",
-            "↳ propose_seeds · Added 6 seeds.",
-            "",
-            "│ Done.",
+        assert turns(panel) == [
+            ("user", "find layoffs"),
+            ("tool", "propose_seeds Added 6 seeds."),
+            ("assistant", "Done."),
         ]
+        user, tool, done = panel.lines
+        assert tool.region.y == user.region.bottom  # no blank row before a tool line
+        assert done.region.y - tool.region.bottom == 1
 
 
 async def test_chat_panel_error_line(tmp_path, monkeypatch):
@@ -376,7 +388,7 @@ async def test_chat_panel_error_line(tmp_path, monkeypatch):
         panel.query_one("#chat-input", Input).focus()
         await pilot.press("h", "enter")
         await pilot.pause(0.3)
-        assert log_lines(panel)[-1] == "Error: no key"
+        assert turns(panel)[-1] == ("error", "Error: no key")
 
 
 async def test_header_keeps_cost_warning_visible_at_80_columns(tmp_path, monkeypatch):

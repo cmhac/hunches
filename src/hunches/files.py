@@ -5,7 +5,12 @@ from typing import Literal
 
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
-from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    UserPromptPart,
+)
 from pydantic_ai.settings import ModelSettings, ThinkingEffort
 
 OFF_TOPIC = "off_topic"
@@ -186,7 +191,24 @@ def write_gold(rows: list[GoldRow]) -> None:
     write_jsonl("gold.jsonl", [r.model_dump() for r in rows])
 
 
+def edit_message(summary: str, body: str) -> ModelRequest:
+    """The record of a user edit, delivered with the agent's next turn (no model call). `body` carries the
+    diff detail and the `# Current <artifact>` section; the chat shows `summary` as a YOU EDITED line."""
+    text = (
+        f"# What changed\n{summary}\n\n{body}\n\n# Instructions\n"
+        "No reply needed. Treat this as the current state in your next turn."
+    )
+    return ModelRequest(
+        parts=[UserPromptPart(content=text)],
+        metadata={"hunches": "edit", "summary": summary},
+    )
+
+
 def save_chat(stage: str, messages: list[ModelMessage]) -> None:
+    """Persist the history. Per-run `instructions` are recomputed every run, so they are not stored."""
+    for message in messages:
+        if isinstance(message, ModelRequest):
+            message.instructions = None
     ensure_root()
     (root() / "chat").mkdir(exist_ok=True)
     (root() / "chat" / f"{stage}.json").write_bytes(

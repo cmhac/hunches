@@ -4,10 +4,10 @@ import pytest
 import yaml
 from conftest import panel_title
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
-from textual.widgets import Input, RichLog, TextArea
+from textual.widgets import Input, TextArea
 
 from hunches import files
-from hunches.app import HunchesApp
+from hunches.app import ChatPanel, HunchesApp
 from hunches.screens.taxonomy import TaxonomyScreen
 
 pytestmark = pytest.mark.usefixtures("system_ready")
@@ -161,8 +161,8 @@ async def test_approve_blocked_without_files_and_resume_restores_chat(
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         assert isinstance(app.screen, TaxonomyScreen)
-        log = app.screen.query_one("#log", RichLog)
-        assert any("multi please" in str(line.text) for line in log.lines)
+        panel = app.screen.query_one(ChatPanel)
+        assert any("multi please" in line.text for line in panel.lines)
         assert "layoff" in app.screen.query_one("#taxonomy", TextArea).text
 
 

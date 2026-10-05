@@ -67,8 +67,24 @@ Button:disabled, Button.-primary:disabled, Button.-success:disabled, Button.-err
 
 FooterKey .footer-key--key { background: $boost; color: #EEF1F5; text-style: bold; }
 
-ChatPanel RichLog { background: $background; padding: 0 1; }
-ChatPanel #live   { color: $accent; padding: 0 1; }
+ChatPanel #messages { background: $background; }
+ChatPanel #empty { color: $text-muted; padding: 0 2; }
+ChatLine .gutter { width: 2; }
+ChatLine .body { width: 1fr; }
+.chat-user .gutter { color: $primary; }
+.chat-user .body { color: #EEF1F5; }
+.chat-assistant .gutter { color: $accent; }
+.chat-error .body { color: $error; }
+FoldLine .head { height: 1; color: $text-muted; }
+FoldLine .head > Static { height: 1; width: auto; }
+FoldLine .gutter { width: 2; }
+FoldLine .name { color: $text; margin-right: 1; }
+FoldLine .badge { margin-right: 1; }
+FoldLine .summary { width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }
+FoldLine .toggle { margin-left: 1; color: $text-disabled; }
+FoldLine .detail { margin-left: 2; padding: 0 1; background: $boost; color: $text-muted; height: auto; }
+ChatPanel #chat-input { width: 1fr; }
+ChatPanel #send { width: 3; margin-left: 1; }
 
 ModalScreen { background: $background 70%; align: center middle; }
 /* Modals (ConfirmScreen, RemoveModal, RecommendationModal, ModelPicker, PathPicker, ProposalScreen) */
