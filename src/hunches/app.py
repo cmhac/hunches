@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -10,9 +11,9 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.markup import escape
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Input, Label, RichLog, Select, Static
+from textual.widgets import Button, Footer, Input, Label, RichLog, Static
 
-from hunches import cost, files
+from hunches import cost, files, keys, system
 from hunches.theme import HUNCHES
 
 
@@ -46,7 +47,12 @@ class StatusHeader(Static):
 
     def refresh_cost(self) -> None:
         stage = getattr(self.app, "stage", 0)
-        name = next((n for num, n, _ in STAGES if num == stage), "Setup")
+        name = next(
+            (n for num, n, _ in STAGES if num == stage),
+            getattr(
+                self.screen, "stage_name", "Setup"
+            ),  # non-stage screens name themselves
+        )
         project = Path.cwd().name
         if len(project) > 16:
             project = project[:15] + "…"
@@ -94,89 +100,6 @@ class StatusHeader(Static):
             right = f"[$text-muted]cost[/] [b #EEF1F5]${dollars:.4f}[/]"
         pad = max(2, room - width - len(right_plain))
         self.update(markup + " " * pad + right)
-
-
-class SetupScreen(Screen):
-    """First run: write .hunches/config.toml."""
-
-    DEFAULT_CSS = """
-    SetupScreen #config { height: auto; }
-    SetupScreen .row { height: 1; }
-    SetupScreen .row Label { width: 16; color: $text-muted; }
-    SetupScreen .row Input, SetupScreen .row Select { width: 1fr; }
-    SetupScreen .gap { height: 1; }
-    SetupScreen #actions { height: 1; margin-top: 1; }
-    SetupScreen #save { width: 10; }
-    SetupScreen #error { margin-left: 2; }
-    """
-
-    def compose(self) -> ComposeResult:
-        c = files.Config()
-        yield StatusHeader()
-        yield Static("Set up hunches (writes .hunches/config.toml)", classes="note")
-        with panel(Vertical(id="config"), "config.toml"):
-            with Horizontal(classes="row"):
-                yield Label("backend")
-                yield Select(
-                    [("Local (numpy)", "local"), ("S3 Vectors", "s3")],
-                    value="local",
-                    allow_blank=False,
-                    compact=True,
-                    id="backend",
-                )
-            yield Static("", classes="gap")
-            for id_, placeholder in [
-                ("corpus_dir", "local: corpus directory"),
-                ("s3_bucket", "s3: bucket"),
-                ("s3_index", "s3: index"),
-            ]:
-                yield self.field(
-                    id_, Input(placeholder=placeholder, compact=True, id=id_)
-                )
-            yield Static("", classes="gap")
-            yield self.field(
-                "embedding_model",
-                Input(
-                    placeholder="e.g. openai:text-embedding-3-small",
-                    compact=True,
-                    id="embedding_model",
-                ),
-            )
-            yield self.field(
-                "smart_model",
-                Input(value=c.smart_model, compact=True, id="smart_model"),
-            )
-            yield self.field(
-                "cheap_model",
-                Input(value=c.cheap_model, compact=True, id="cheap_model"),
-            )
-        with Horizontal(id="actions"):
-            yield Button("Save", id="save", variant="primary", compact=True)
-            yield Label("", id="error", classes="error")
-        yield Footer()
-
-    def field(self, name: str, widget: Input) -> Horizontal:
-        return Horizontal(Label(name), widget, classes="row")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        value = lambda i: self.query_one(f"#{i}", Input).value.strip()
-        backend = self.query_one("#backend", Select).value
-        data = {
-            "backend": backend,
-            "corpus_dir": value("corpus_dir") or None,
-            "s3_bucket": value("s3_bucket") or None,
-            "s3_index": value("s3_index") or None,
-            "embedding_model": value("embedding_model"),
-            "smart_model": value("smart_model"),
-            "cheap_model": value("cheap_model"),
-        }
-        needed = ["corpus_dir"] if backend == "local" else ["s3_bucket", "s3_index"]
-        missing = [k for k in [*needed, "embedding_model"] if not data[k]]
-        if missing:
-            self.query_one("#error", Label).update(f"Required: {', '.join(missing)}")
-            return
-        files.write_config(files.Config.model_validate(data))
-        self.dismiss()
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -303,8 +226,11 @@ from hunches.screens.brief import BriefScreen
 from hunches.screens.browse import BrowseScreen
 from hunches.screens.final import test_stage
 from hunches.screens.gold import GoldScreen
+from hunches.screens.project_settings import ProjectSettingsScreen
+from hunches.screens.projects import ProjectsScreen
 from hunches.screens.run import RunScreen
 from hunches.screens.search import SearchScreen
+from hunches.screens.system import RecommendationModal, SystemSettingsScreen
 from hunches.screens.taxonomy import TaxonomyScreen
 from hunches.screens.threshold import ThresholdScreen
 from hunches.screens.tune import TuneScreen
@@ -330,6 +256,9 @@ class HunchesApp(App):
         ("q", "quit", "Quit"),
         ("n", "goto(1)", "Next stage"),
         ("p", "goto(-1)", "Previous stage"),
+        ("f3", "settings", "Project settings"),
+        ("f4", "projects", "Projects"),
+        ("f5", "system_settings", "System settings"),
     ]
 
     stage = 0  # 1-9 once running
@@ -338,10 +267,22 @@ class HunchesApp(App):
     def on_mount(self) -> None:
         self.register_theme(HUNCHES)
         self.theme = "hunches"
-        if (files.root() / "config.toml").exists():
-            self.goto_stage(files.first_incomplete_stage())
+        current = system.read_system()
+        if current is None:  # first run
+            self.push_screen(SystemSettingsScreen(), lambda _: self.start())
+        elif system.recommended_changed(current):
+            self.push_screen(RecommendationModal(current), lambda _: self.start())
         else:
-            self.push_screen(SetupScreen(), lambda _: self.goto_stage(1))
+            self.start()
+
+    def start(self) -> None:
+        """Open the project in the current directory, or show Projects."""
+        if (files.root() / "config.toml").exists():
+            system.add_project(Path.cwd())
+            self.open_project(Path.cwd())
+            if self.stage:
+                return
+        self.push_screen(ProjectsScreen())
 
     def goto_stage(self, number: int) -> None:
         number = max(1, min(len(STAGES), number))
@@ -353,6 +294,64 @@ class HunchesApp(App):
             self.stage_shown = True
             self.push_screen(screen)
 
+    def open_project(self, path: str | Path) -> None:
+        """Switch to the project at `path`. The only place that changes the working directory."""
+        path = Path(path)
+        status, detail = system.project_status(path)
+        if status not in ("OK", "OK (s3 not checked)"):
+            self.notify(f"Cannot open {path.name}: {status} {detail}", severity="error")
+            return
+        if any(w.is_running for w in self.workers):
+            self.push_screen(
+                ConfirmScreen("A run is in progress; stop it and switch?"),
+                lambda stop: stop and self.switch_to(path),
+            )
+        else:
+            self.switch_to(path)
+
+    def switch_to(self, path: Path) -> None:
+        try:
+            os.chdir(path)
+        except OSError as e:
+            self.notify(f"Cannot open {path.name}: {e}", severity="error")
+            return
+        self.workers.cancel_all()
+        self.stage = 0
+        while len(self.screen_stack) > 1:
+            self.pop_screen()
+        system.touch_project(path)
+        self.stage_shown = False
+        self.goto_stage(files.first_incomplete_stage())
+
+    def action_settings(self) -> None:
+        """Project settings of the open project (not on top of a modal or itself)."""
+        if self.stage and not isinstance(
+            self.screen, (ModalScreen, ProjectSettingsScreen)
+        ):
+            self.push_screen(ProjectSettingsScreen())
+
+    def action_projects(self) -> None:
+        """Not on a modal, over itself, or before first-run setup has written system.json."""
+        if (
+            not isinstance(self.screen, (ModalScreen, ProjectsScreen))
+            and system.read_system()
+        ):
+            self.push_screen(ProjectsScreen())
+
+    def action_system_settings(self) -> None:
+        if (
+            not isinstance(self.screen, (ModalScreen, SystemSettingsScreen))
+            and system.read_system()
+        ):
+            self.push_screen(SystemSettingsScreen())
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if (
+            action == "goto"
+        ):  # n/p mean nothing outside a project (Projects uses n for New)
+            return self.stage > 0 and not isinstance(self.screen, ProjectsScreen)
+        return True
+
     def action_goto(self, step: int) -> None:
         if self.stage and not isinstance(self.screen, ModalScreen):
             self.goto_stage(self.stage + step)
@@ -360,4 +359,5 @@ class HunchesApp(App):
 
 def main() -> None:
     load_dotenv()
+    keys.load_into_env()
     HunchesApp().run()

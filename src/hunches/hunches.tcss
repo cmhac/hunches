@@ -48,6 +48,9 @@ ConfirmScreen > Vertical {
 }
 ConfirmScreen Horizontal { height: auto; align-horizontal: right; }
 
+PathPicker > Vertical { border: round $primary; background: $surface; }
+PathPicker DirTree { background: $surface; }
+
 Footer { background: $footer-background; }
 
 /* ProgressBar: primary while running, success at 100% */

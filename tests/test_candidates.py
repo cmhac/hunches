@@ -39,7 +39,14 @@ def project(tmp_path, monkeypatch):
     items = [{"id": f"i{i}", "text": f"t{i}"} for i in range(5)]
     (corpus / "items.jsonl").write_text("".join(json.dumps(r) + "\n" for r in items))
     (corpus / "meta.json").write_text(json.dumps({"embedding_model": "m"}))
-    files.write_config(files.Config(corpus_dir=str(corpus), embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir=str(corpus),
+            embedding_model="m",
+        )
+    )
     files.write_text("seeds.csv", "seed\nalpha\n\nbeta\n")
 
 

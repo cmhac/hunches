@@ -10,9 +10,18 @@ from hunches.app import HunchesApp
 from hunches.classifier import Prediction
 from hunches.screens.gold import GoldScreen, draw
 
+pytestmark = pytest.mark.usefixtures("system_ready")
+
 
 def project(mode="single", n=60, gold=()):
-    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+        )
+    )
     files.write_text("seeds.csv", "seed\nx\n")
     files.write_state(files.State(seeds_approved=True, taxonomy_approved=True))
     files.write_jsonl(
@@ -247,7 +256,14 @@ async def test_prediction_line_variants():
 
 
 async def test_not_ready_notice():
-    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+        )
+    )
     app = HunchesApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()

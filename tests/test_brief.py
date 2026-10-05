@@ -1,9 +1,12 @@
+import pytest
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import DataTable, Input, RichLog
 
 from hunches import candidates, files
 from hunches.app import HunchesApp, StatusHeader
 from hunches.screens.brief import BriefScreen
+
+pytestmark = pytest.mark.usefixtures("system_ready")
 
 
 async def stream(messages, info: AgentInfo):
@@ -20,7 +23,14 @@ async def stream(messages, info: AgentInfo):
 
 def setup(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+        )
+    )
 
 
 async def test_chat_proposes_seeds_and_edits_persist(tmp_path, monkeypatch):

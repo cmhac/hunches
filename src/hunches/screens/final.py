@@ -27,11 +27,13 @@ def test_stage() -> Screen:
 
 
 def prompt_hash() -> str:
-    return hashlib.sha256((files.read_text("prompt.md") or "").encode()).hexdigest()
+    # JSON keeps ("ab", "c") and ("a", "bc") distinct
+    data = [files.read_text("prompt.md") or "", files.read_config().classifier_model]
+    return hashlib.sha256(json.dumps(data).encode()).hexdigest()
 
 
 class FinalScreen(Screen):
-    """Stage 6: the test set is classified once; the result goes stale if prompt.md changes."""
+    """Stage 6: the test set is classified once; the result goes stale if prompt.md or the classifier model changes."""
 
     BINDINGS: ClassVar = [
         ("r", "rerun", "Re-run"),
@@ -53,7 +55,7 @@ class FinalScreen(Screen):
         super().__init__()
         self.taxonomy = files.read_taxonomy()
         self.config = files.read_config()
-        self.model = self.config.cheap_model
+        self.model = self.config.classifier_model
         self.rows = [r for r in files.read_gold() if r.split == "test" and r.labels]
         text = files.read_text(RESULT)
         self.result: dict | None = json.loads(text) if text else None
@@ -154,7 +156,7 @@ class FinalScreen(Screen):
         banner = self.query_one("#banner", Static)
         banner.display = self.stale()
         banner.update(
-            "STALE: prompt.md changed since this result was computed. Press r to re-run."
+            "STALE: prompt.md or classifier model changed since this result was computed. Press r to re-run."
         )
         names = [lab.name for lab in self.taxonomy.labels]
         self.query_one("#metrics-panel").border_title = "test set · held out" + (

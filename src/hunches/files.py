@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
+from pydantic_ai.settings import ModelSettings, ThinkingEffort
 
 OFF_TOPIC = "off_topic"
 SAMPLE_SIZE = 50  # gold rows per split (spec stages 4 and 6)
@@ -19,12 +20,36 @@ class Config(BaseModel):
     s3_bucket: str | None = None
     s3_index: str | None = None
     embedding_model: str = ""
-    smart_model: str = "anthropic:claude-sonnet-5-5"
-    cheap_model: str = "anthropic:claude-haiku-4-5"
+    s3_region: str | None = None  # None: boto3's default resolution
+    assistant_model: str
+    assistant_thinking: ThinkingEffort | None = None  # None: no thinking setting
+    classifier_model: str
     target_metric: Literal["accuracy", "macro_f1", "micro_f1", "exact_match"] = (
         "accuracy"
     )
     target_score: float = 0.90
+
+    @model_validator(mode="before")
+    @classmethod
+    def _old_keys(cls, data):
+        # 001 wrote smart_model/cheap_model; a new key wins over an old one
+        if isinstance(data, dict):
+            data = dict(data)
+            for old, new in [
+                ("smart_model", "assistant_model"),
+                ("cheap_model", "classifier_model"),
+            ]:
+                if old in data:
+                    data.setdefault(new, data.pop(old))
+                    data.pop(old, None)
+        return data
+
+
+def thinking_settings(config: Config) -> ModelSettings | None:
+    """model_settings for assistant Agents; None leaves the provider's default."""
+    if config.assistant_thinking is None:
+        return None
+    return {"thinking": config.assistant_thinking}
 
 
 class State(BaseModel):
@@ -79,18 +104,24 @@ def write_text(name: str, text: str) -> None:
     (root() / name).write_text(text)
 
 
-def read_config() -> Config:
-    return Config.model_validate(tomllib.loads((root() / "config.toml").read_text()))
+def read_config(project: Path | None = None) -> Config:
+    """Read config.toml of `project` (default: the current directory's project)."""
+    path = (project / ".hunches" if project else root()) / "config.toml"
+    return Config.model_validate(tomllib.loads(path.read_text()))
 
 
-def write_config(config: Config) -> None:
+def write_config(config: Config, project: Path | None = None) -> None:
     # json.dumps output is a valid TOML basic string / number / bool for our value types
     lines = [
         f"{k} = {json.dumps(v)}"
         for k, v in config.model_dump().items()
         if v is not None
     ]
-    write_text("config.toml", "\n".join(lines) + "\n")
+    text = "\n".join(lines) + "\n"
+    if project:  # another project's config: never chdir to it
+        (project / ".hunches" / "config.toml").write_text(text)
+    else:
+        write_text("config.toml", text)
 
 
 def read_state() -> State:

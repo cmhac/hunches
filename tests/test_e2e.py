@@ -2,6 +2,8 @@
 
 import json
 import math
+import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,10 +14,12 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.usage import RequestUsage
 from textual.widgets import DataTable, Input
 
-from hunches import classifier, cost, files
+from hunches import classifier, cost, files, system
 from hunches.app import HunchesApp
 from hunches.screens.brief import BriefScreen
 from hunches.screens.gold import GoldScreen
+from hunches.screens.new_project import NewProjectScreen
+from hunches.screens.projects import ProjectsScreen
 from hunches.screens.search import SearchScreen
 from hunches.screens.taxonomy import TaxonomyScreen
 
@@ -76,6 +80,15 @@ def classify_fn(messages, info: AgentInfo):
 @pytest.fixture(autouse=True)
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")  # never used: models are stubbed
+    system.write_system(
+        system.System(
+            provider="anthropic",
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            recommendation_seen=system.RECOMMENDED_REVISION,
+        )
+    )
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     vectors = [[s, math.sqrt(1 - s * s)] for s in SIMS]
@@ -124,11 +137,14 @@ async def test_all_nine_stages_with_resume():
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        assert app.stage == 0
+        assert app.stage == 0 and isinstance(app.screen, ProjectsScreen)
+        await pilot.press("n")
+        await pilot.pause()
         screen = app.screen
-        screen.query_one("#corpus_dir", Input).value = "corpus"
-        screen.query_one("#embedding_model", Input).value = "m"
-        await pilot.click("#save")
+        assert isinstance(screen, NewProjectScreen)
+        screen.query_one("#corpus", Input).value = "corpus"  # location: this folder
+        await pilot.pause()
+        await pilot.click("#create")
         await pilot.pause()
         assert app.stage == 1 and isinstance(app.screen, BriefScreen)
         await chat(app, pilot, brief_stream, "Find even items")
@@ -247,3 +263,50 @@ async def test_all_nine_stages_with_resume():
 
     # the stand-in model has no known price, so cost is unknown, never $0
     assert cost.total()[1]
+
+
+async def test_first_run_new_project_then_open_another_from_projects(
+    tmp_path, monkeypatch
+):
+    import os
+
+    from textual.widgets import Button
+
+    from hunches.screens.system import SystemSettingsScreen
+
+    system._path().unlink()  # undo the fixture: a true first run
+    other = tmp_path / "other"
+    shutil.copytree(tmp_path / "corpus", other / "corpus")
+    (other / ".hunches").mkdir()
+    files.write_config(
+        files.Config(
+            assistant_model="a",
+            classifier_model="c",
+            corpus_dir="corpus",
+            embedding_model="m",
+        ),
+        other,
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, SystemSettingsScreen)
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert app.stage == 0 and isinstance(app.screen, ProjectsScreen)
+        await pilot.press("n")
+        await pilot.pause()
+        app.screen.query_one("#corpus", Input).value = "corpus"
+        await pilot.pause()
+        await pilot.click("#create")
+        await pilot.pause()
+        assert app.stage == 1 and Path.cwd() == tmp_path
+        system.add_project(other)
+        await pilot.press("f4")
+        await pilot.pause()
+        table = app.screen.query_one(DataTable)
+        table.move_cursor(row=[r.value for r in table.rows].index(str(other)))
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.stage == 1 and isinstance(app.screen, BriefScreen)
+        assert os.getcwd() == str(other)

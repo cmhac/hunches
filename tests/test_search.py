@@ -22,7 +22,14 @@ def local_corpus(tmp_path, model="m"):
     items = [{"id": f"i{i}", "text": f"t{i}"} for i in range(5)]
     (d / "items.jsonl").write_text("".join(json.dumps(r) + "\n" for r in items))
     (d / "meta.json").write_text(json.dumps({"embedding_model": model}))
-    files.write_config(files.Config(corpus_dir=str(d), embedding_model="m"))
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir=str(d),
+            embedding_model="m",
+        )
+    )
     return d
 
 
@@ -63,10 +70,17 @@ def vec(key, distance):
 
 def s3_setup(monkeypatch, pages):
     files.write_config(
-        files.Config(backend="s3", s3_bucket="b", s3_index="i", embedding_model="m")
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            backend="s3",
+            s3_bucket="b",
+            s3_index="i",
+            embedding_model="m",
+        )
     )
     fake = FakeS3(pages)
-    monkeypatch.setattr("boto3.client", lambda name: fake)
+    monkeypatch.setattr("boto3.client", lambda name, **kw: fake)
     return fake
 
 
@@ -92,3 +106,19 @@ def test_s3_capped(monkeypatch):
     s3_setup(monkeypatch, [{"vectors": [vec("a", 0.1), vec("b", 0.2)]}])
     hits, capped = search.search([1.0, 0.0], 0.6)
     assert len(hits) == 2 and capped
+
+
+def test_s3_uses_the_configured_region(monkeypatch):
+    s3_setup(monkeypatch, [{"vectors": []}])
+    made = []
+
+    def client(name, **kw):
+        made.append((name, kw))
+        return FakeS3([{"vectors": []}])
+
+    monkeypatch.setattr("boto3.client", client)
+    config = files.read_config()
+    config.s3_region = "eu-west-1"
+    files.write_config(config)
+    search.search([1.0, 0.0], 0.6)
+    assert made == [("s3vectors", {"region_name": "eu-west-1"})]

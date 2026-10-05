@@ -10,9 +10,33 @@ from hunches import cost, files
 from hunches.app import ChatPanel, HunchesApp, StatusHeader, confirm_approve
 
 
-def make_project(tmp_path, monkeypatch, **state):
+def make_project(tmp_path, monkeypatch, first_run=False, **state):
+    """A healthy project in cwd; system.json exists unless `first_run`."""
+    from hunches import system
+
     monkeypatch.chdir(tmp_path)
-    files.write_config(files.Config(corpus_dir="c", embedding_model="m"))
+    if not first_run:
+        system.write_system(
+            system.System(
+                provider="anthropic",
+                assistant_model="a",
+                classifier_model="c",
+                recommendation_seen=system.RECOMMENDED_REVISION,
+            )
+        )
+    files.write_config(
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            classifier_model="anthropic:claude-haiku-4-5",
+            corpus_dir="c",
+            embedding_model="m",
+        )
+    )
+    (tmp_path / "c").mkdir(exist_ok=True)
+    for name in ("vectors.npy", "items.jsonl", "meta.json"):
+        (tmp_path / "c" / name).write_text(
+            "x"
+        )  # healthy as far as project_status looks
     files.write_text("seeds.csv", "seed\nfoo\n")
     files.write_state(files.State(**state))
 
@@ -21,22 +45,119 @@ def header_text(app) -> str:
     return str(app.screen.query_one(StatusHeader).render())
 
 
-async def test_first_run_setup_then_stage_1(tmp_path, monkeypatch):
+async def test_not_in_a_project_shows_projects_or_first_run_setup(
+    tmp_path, monkeypatch
+):
+    from hunches import system
+    from hunches.screens.projects import ProjectsScreen
+    from hunches.screens.system import SystemSettingsScreen
+
     monkeypatch.chdir(tmp_path)
     app = HunchesApp()
-    async with app.run_test(size=(80, 40)) as pilot:
+    async with app.run_test() as pilot:
         await pilot.pause()
-        assert app.stage == 0
-        await pilot.click("#save")  # empty form is rejected
+        assert isinstance(app.screen, SystemSettingsScreen)  # no system.json yet
+    system.write_system(
+        system.System(
+            provider="anthropic",
+            assistant_model="a",
+            classifier_model="c",
+            recommendation_seen=system.RECOMMENDED_REVISION,
+        )
+    )
+    app = HunchesApp()
+    async with app.run_test() as pilot:
         await pilot.pause()
-        assert not (tmp_path / ".hunches" / "config.toml").exists()
-        app.screen.query_one("#corpus_dir", Input).value = "corpus"
-        app.screen.query_one("#embedding_model", Input).value = "openai:x"
+        assert isinstance(app.screen, ProjectsScreen) and app.stage == 0
+
+
+async def test_first_run_in_a_project_shows_system_setup_then_opens_it(
+    tmp_path, monkeypatch
+):
+    from hunches import system
+    from hunches.screens.system import SystemSettingsScreen
+
+    make_project(tmp_path, monkeypatch, first_run=True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, SystemSettingsScreen) and app.stage == 0
         app.screen.query_one("#save", Button).press()
         await pilot.pause()
         assert app.stage == 1
-    config = files.read_config()
-    assert config.corpus_dir == "corpus" and config.embedding_model == "openai:x"
+        saved = system.read_system()
+        assert saved is not None
+        assert [p.path for p in saved.projects] == [str(tmp_path)]
+
+
+async def test_project_that_cannot_open_falls_back_to_projects(tmp_path, monkeypatch):
+    from hunches.screens.projects import ProjectsScreen
+
+    make_project(tmp_path, monkeypatch)
+    (tmp_path / "c" / "meta.json").unlink()  # MISSING CORPUS: open_project refuses
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, ProjectsScreen) and app.stage == 0
+
+
+async def test_cwd_project_is_registered_and_opened(tmp_path, monkeypatch):
+    from hunches import system
+
+    make_project(tmp_path, monkeypatch)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.stage == 1
+    saved = system.read_system()
+    assert saved is not None
+    assert [p.path for p in saved.projects] == [str(tmp_path)]
+
+
+async def test_changed_recommendation_asks_first_then_continues(tmp_path, monkeypatch):
+    from hunches import system
+    from hunches.screens.system import RecommendationModal
+
+    make_project(tmp_path, monkeypatch)
+    stale = system.read_system()
+    assert stale is not None
+    stale.recommendation_seen = system.RECOMMENDED_REVISION - 1  # models "a"/"c" differ
+    system.write_system(stale)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, RecommendationModal) and app.stage == 0
+        await pilot.click("#keep-mine")
+        await pilot.pause()
+        assert app.stage == 1
+    kept = system.read_system()
+    assert kept is not None
+    assert (kept.assistant_model, kept.recommendation_seen) == (
+        "a",
+        system.RECOMMENDED_REVISION,
+    )
+
+
+async def test_matching_recommendation_is_bumped_silently(tmp_path, monkeypatch):
+    from hunches import system
+
+    make_project(tmp_path, monkeypatch)
+    rec = system.RECOMMENDED["anthropic"]
+    stale = system.System(
+        provider="anthropic",
+        assistant_model=str(rec["assistant"]),
+        assistant_thinking=rec["thinking"],
+        classifier_model=str(rec["classifier"]),
+        recommendation_seen=system.RECOMMENDED_REVISION - 1,
+    )
+    system.write_system(stale)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.stage == 1  # no modal
+    seen = system.read_system()
+    assert seen is not None and seen.recommendation_seen == system.RECOMMENDED_REVISION
 
 
 async def test_starts_at_first_incomplete_stage(tmp_path, monkeypatch):
@@ -171,26 +292,6 @@ async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
         assert files.read_state().seeds_approved
 
 
-async def test_setup_screen_fits_80x24_in_a_config_panel(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    app = HunchesApp()
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        screen = app.screen
-        panel = screen.query_one("#config")
-        assert panel.border_title == "config.toml"
-        for id_ in ("corpus_dir", "s3_bucket", "s3_index", "embedding_model"):
-            widget = screen.query_one(f"#{id_}")
-            assert widget.size.height == 1  # compact
-            assert widget.region.bottom <= 23
-        assert screen.query_one("#save").region.bottom <= 23
-        await pilot.click("#save")
-        await pilot.pause()
-        error = screen.query_one("#error")
-        assert str(error.render()) == "Required: corpus_dir, embedding_model"
-        assert error.has_class("error")
-
-
 def log_lines(panel) -> list[str]:
     return [strip.text.rstrip() for strip in panel.query_one("#log").lines]
 
@@ -291,3 +392,67 @@ async def test_header_keeps_cost_warning_visible_at_80_columns(tmp_path, monkeyp
         assert (
             "cost ? · no price for" in text
         )  # the warning survives, the models list may be cut
+
+
+async def test_projects_and_system_settings_keys_work_from_a_stage(
+    tmp_path, monkeypatch
+):
+    from textual.widgets import Input
+
+    from hunches.screens.projects import ProjectsScreen
+    from hunches.screens.system import SystemSettingsScreen
+
+    make_project(tmp_path, monkeypatch)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.screen.query_one(
+            "#chat-input", Input
+        ).focus()  # works with an Input focused
+        await pilot.press("f4")
+        await pilot.pause()
+        assert isinstance(app.screen, ProjectsScreen)
+        await pilot.press("p")  # Previous stage is not available over Projects
+        await pilot.pause()
+        assert isinstance(app.screen, ProjectsScreen) and app.stage == 1
+        await pilot.press("f4")  # already open: no second copy
+        await pilot.pause()
+        assert len(app.screen_stack) == 3
+        await pilot.press("f5")
+        await pilot.pause()
+        assert isinstance(app.screen, SystemSettingsScreen)
+        await pilot.press("f5")
+        await pilot.pause()
+        assert len(app.screen_stack) == 4
+
+
+async def test_projects_key_is_ignored_during_first_run_setup(tmp_path, monkeypatch):
+    from hunches.screens.system import SystemSettingsScreen
+
+    monkeypatch.chdir(tmp_path)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("f4")
+        await pilot.pause()
+        assert isinstance(app.screen, SystemSettingsScreen)
+        assert len(app.screen_stack) == 2
+
+
+def test_main_loads_keyring_keys_into_the_environment(monkeypatch):
+    import os
+
+    from hunches import app as app_module
+    from hunches import keys
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(app_module, "load_dotenv", lambda: None)
+    seen = {}
+    monkeypatch.setattr(
+        HunchesApp,
+        "run",
+        lambda self: seen.update(key=os.environ.get("ANTHROPIC_API_KEY")),
+    )
+    keys.save("ANTHROPIC_API_KEY", "sk-sentinel")
+    app_module.main()
+    assert seen["key"] == "sk-sentinel"

@@ -10,6 +10,8 @@ from hunches.app import HunchesApp
 from hunches.screens.final import FinalScreen
 from hunches.screens.gold import GoldScreen
 
+pytestmark = pytest.mark.usefixtures("system_ready")
+
 
 def classifier(messages, info: AgentInfo):
     """Answers "b" for item 0 and "a" for the rest, whatever the prompt says."""
@@ -26,7 +28,12 @@ def classifier(messages, info: AgentInfo):
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     files.write_config(
-        files.Config(corpus_dir="c", embedding_model="m", cheap_model="test")
+        files.Config(
+            assistant_model="anthropic:claude-sonnet-5-5",
+            corpus_dir="c",
+            embedding_model="m",
+            classifier_model="test",
+        )
     )
     files.write_text("seeds.csv", "seed\nx\n")
     files.write_state(
@@ -118,6 +125,28 @@ async def test_run_metrics_staleness_and_accept():
         await pilot.pause()
         await app.workers.wait_for_complete()
         assert not screen.stale()
+        files.write_config(
+            files.Config(
+                assistant_model="anthropic:claude-sonnet-5-5",
+                corpus_dir="c",
+                embedding_model="m",
+                classifier_model="other",
+            )
+        )
+        assert screen.stale()  # a classifier change alone marks the result STALE
+        screen.show()
+        assert str(screen.query_one("#banner", Static).render()).startswith(
+            "STALE: prompt.md or classifier model changed"
+        )
+        files.write_config(
+            files.Config(
+                assistant_model="anthropic:claude-sonnet-5-5",
+                corpus_dir="c",
+                embedding_model="m",
+                classifier_model="test",
+            )
+        )
+        assert not screen.stale()
         await pilot.press("f2")
         await pilot.pause()
         assert files.read_state().test_done
@@ -182,7 +211,7 @@ async def test_redesigned_panels_banner_and_tables():
         banner = screen.query_one("#banner", Static)
         assert banner.display and banner.has_class("banner", "-stale")
         assert str(banner.render()) == (
-            "STALE: prompt.md changed since this result was computed. Press r to re-run."
+            "STALE: prompt.md or classifier model changed since this result was computed. Press r to re-run."
         )
         await pilot.press("f2")
         note = screen.query_one("#note")

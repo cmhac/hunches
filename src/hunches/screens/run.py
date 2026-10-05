@@ -65,7 +65,7 @@ class RunScreen(Screen):
             files.read_text("taxonomy.yaml") is not None
             and files.read_text("threshold.json") is not None
         )
-        self.model = files.read_config().cheap_model if self.ready else ""
+        self.model = files.read_config().classifier_model if self.ready else ""
         self.running = False
         self.started = False
         self.warned = False
@@ -123,7 +123,7 @@ class RunScreen(Screen):
             self.warned = True
             self.query_one("#warn").display = True
             self.query_one("#warn", Static).update(
-                "WARNING: prompt.md differs from the tested prompt (or was never tested). "
+                "WARNING: prompt.md or classifier model differs from the tested one (or was never tested). "
                 "Press s again to start anyway."
             )
             return

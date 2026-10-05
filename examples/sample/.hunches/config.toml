@@ -1,7 +1,7 @@
 backend = "local"
 corpus_dir = "corpus"
 embedding_model = "hand-built-2d"
-smart_model = "anthropic:claude-sonnet-5-5"
-cheap_model = "anthropic:claude-haiku-4-5"
+assistant_model = "anthropic:claude-sonnet-5-5"
+classifier_model = "anthropic:claude-haiku-4-5"
 target_metric = "accuracy"
 target_score = 0.9
