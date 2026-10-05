@@ -84,7 +84,7 @@ class NewProjectScreen(Screen):
             with panel(Vertical(), "location"), Horizontal(classes="row"):
                 yield Label("folder")
                 yield PathInput(str(Path.cwd()), id="location", compact=True)
-                yield Button(id="browse-location", compact=True)
+                yield Button("Browse", id="browse-location", compact=True)
             with panel(Vertical(), "corpus"):
                 with Horizontal(classes="row"):
                     yield Label("backend")
@@ -99,7 +99,7 @@ class NewProjectScreen(Screen):
                     with Horizontal(classes="row"):
                         yield Label("corpus")
                         yield PathInput(id="corpus", compact=True)
-                        yield Button(id="browse-corpus", compact=True)
+                        yield Button("Browse", id="browse-corpus", compact=True)
                     yield Static("", id="corpus-status")
                 with Vertical(id="s3"):
                     with Horizontal(classes="row"):

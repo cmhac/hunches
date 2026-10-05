@@ -448,3 +448,14 @@ async def test_browse_writes_the_chosen_folder_back(tmp_path, monkeypatch):
         app.screen.query_one("#select", Button).press()
         await pilot.pause()
         assert form.query_one("#location", Input).value == str(tmp_path)
+
+
+async def test_every_button_has_a_visible_label(tmp_path, monkeypatch):
+    # a Button created without a label renders its repr, e.g. "Button#browse-corpus"
+    monkeypatch.chdir(tmp_path)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        for button in app.screen.query(Button):
+            assert not str(button.label).startswith("Button#"), button.id
+        assert str(app.screen.query_one("#browse-location", Button).label) == "Browse"
