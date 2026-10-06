@@ -1,5 +1,7 @@
 import json
+import shutil
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -189,6 +191,100 @@ def read_gold() -> list[GoldRow]:
 
 def write_gold(rows: list[GoldRow]) -> None:
     write_jsonl("gold.jsonl", [r.model_dump() for r in rows])
+
+
+# ---- taxonomy versions (spec 003, D12): archives are only ever added to, never deleted
+VERSIONED = ["taxonomy.yaml", "prompt.md", "gold.jsonl", "state.json"]
+DERIVED = [
+    "test_result.json",
+    "threshold.json",
+    "threshold_sample.json",
+    "results.jsonl",
+]
+
+
+def taxonomy_in_use() -> bool:
+    """True when any gold row has labels, i.e. changing the label set would invalidate work."""
+    return any(r["labels"] for r in read_jsonl("gold.jsonl"))
+
+
+def labels_changed(old: Taxonomy, new: Taxonomy) -> bool:
+    """The mode or the set of label names differs (order and descriptions do not matter)."""
+    return old.mode != new.mode or {x.name for x in old.labels} != {
+        x.name for x in new.labels
+    }
+
+
+def version_numbers() -> list[int]:
+    path = root() / "versions"
+    if not path.exists():
+        return []
+    return sorted(int(p.name) for p in path.iterdir() if p.name.isdigit())
+
+
+def list_versions() -> list[dict]:
+    return [
+        json.loads((root() / "versions" / str(n) / "meta.json").read_text())
+        for n in version_numbers()
+    ]
+
+
+def archive_version(note: str = "") -> int:
+    """Copy the live version into the next `versions/<n>/` and return n. Copies; changes nothing else."""
+    numbers = version_numbers()
+    n = numbers[-1] + 1 if numbers else 1
+    target = root() / "versions" / str(n)
+    target.mkdir(parents=True)  # raises if it exists: an archive is never overwritten
+    for name in [*VERSIONED, *DERIVED]:
+        if (root() / name).exists():
+            shutil.copy2(root() / name, target / name)
+    gold = read_jsonl("gold.jsonl")
+    try:
+        taxonomy = read_taxonomy()
+        mode, names = taxonomy.mode, [x.name for x in taxonomy.labels]
+    except (OSError, ValueError, TypeError, yaml.YAMLError):
+        mode, names = None, []
+    meta = {
+        "version": n,
+        "created_at": datetime.now(UTC).isoformat(),
+        "mode": mode,
+        "labels": names,
+        "dev_labelled": sum(r["split"] == "dev" and bool(r["labels"]) for r in gold),
+        "test_labelled": sum(r["split"] == "test" and bool(r["labels"]) for r in gold),
+        "note": note,
+    }
+    (target / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return n
+
+
+def start_new_version(new: Taxonomy) -> int:
+    """Archive the current version, then write `new` with the same gold items unlabelled. Returns the
+    archived version's number. Archiving comes first so a crash afterwards loses nothing."""
+    n = archive_version()
+    write_taxonomy(new)
+    write_gold([r.model_copy(update={"labels": []}) for r in read_gold()])
+    state = read_state()
+    state.taxonomy_approved = state.dev_done = state.test_done = False
+    state.threshold_chosen = False
+    write_state(state)
+    for (
+        name
+    ) in DERIVED:  # the archive holds them; the live copies describe the old labels
+        (root() / name).unlink(missing_ok=True)
+    return n
+
+
+def restore_version(n: int) -> None:
+    """Make archived version n live again. The current state is archived first as a new version."""
+    source = root() / "versions" / str(n)
+    if not (source / "meta.json").exists():
+        raise FileNotFoundError(f"no archived version {n}")
+    archive_version(f"before restoring version {n}")
+    for name in [*VERSIONED, *DERIVED]:
+        if (source / name).exists():
+            shutil.copy2(source / name, root() / name)
+        elif name in DERIVED:
+            (root() / name).unlink(missing_ok=True)
 
 
 def edit_message(summary: str, body: str) -> ModelRequest:

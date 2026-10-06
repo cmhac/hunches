@@ -411,7 +411,7 @@ async def test_read_view_lists_labels_and_the_built_in_row(tmp_path, monkeypatch
     async with HunchesApp().run_test(size=(120, 40)) as pilot:
         screen = await start(pilot.app, pilot)
         title, subtitle = panel_title(screen.query_one("#labels-panel"))
-        assert title == "Labels" and subtitle == "single · 2 labels"
+        assert title == "Labels" and subtitle == "single · 2 labels · version 1"
         rows = [str(r.render()) for r in screen.query(".label-row-view")]
         assert len(rows) == 3
         assert "■ layoff" in rows[0] and "lost a job" in rows[0]
@@ -904,3 +904,269 @@ def test_yaml_format_is_unchanged(tmp_path, monkeypatch):
     setup(tmp_path, monkeypatch)
     with_files()
     assert yaml.safe_load(files.read_text("taxonomy.yaml") or "") == TWO
+
+
+# ---- taxonomy versions (003/17) -----------------------------------------------------
+
+CONFIRM = (
+    "Gold labels were made with the current labels. Saving starts a new taxonomy "
+    "version: dev and test labelling restart on the same items (your current labels, "
+    "prompt and results are kept as version {n} and can be restored). Continue?"
+)
+
+
+def gold_in_use():
+    """Hand-built gold: 2 dev rows and 1 test row, all labelled, plus a threshold file."""
+    files.write_gold(
+        [
+            files.GoldRow(id="1", text="I lost my job", labels=["layoff"], split="dev"),
+            files.GoldRow(id="2", text="worried", labels=["fear"], split="dev"),
+            files.GoldRow(id="3", text="laid off", labels=["layoff"], split="test"),
+        ]
+    )
+    files.write_text("threshold.json", '{"threshold": 0.7}')
+    # taxonomy_approved stays false so the app opens on this screen (startup picks the first
+    # incomplete stage); dev_done stands for the later flags the new version must clear
+    files.write_state(files.State(seeds_approved=True, dev_done=True))
+
+
+async def rename_fear(pilot, screen):
+    await edit_labels(pilot, screen)
+    screen.query(".label-name").last(Input).value = "worry"
+    await pilot.pause()
+    await pilot.press("ctrl+s")
+    await pilot.pause()
+
+
+async def test_description_edit_with_gold_in_use_saves_without_a_confirm(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        screen = await start(pilot.app, pilot)
+        await edit_labels(pilot, screen)
+        screen.query(".label-desc").last(Input).value = "scared"
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert pilot.app.screen is screen
+        assert files.read_taxonomy().labels[1].description == "scared"
+        assert files.list_versions() == []
+        assert files.taxonomy_in_use()
+
+
+async def test_rename_with_gold_in_use_confirms_then_archives_and_clears(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    gold_before = files.read_text("gold.jsonl")
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        app = pilot.app
+        screen = await start(app, pilot)
+        before = len(calls.prompts)
+        assert screen.query_one("#versions", Button).disabled
+        await rename_fear(pilot, screen)
+        assert isinstance(app.screen, ConfirmScreen)
+        assert app.screen.question == CONFIRM.format(n=1)
+        # Cancel: nothing changes and the draft stays open
+        await pilot.click("#no")
+        await pilot.pause()
+        assert app.screen is screen and screen.edit == "labels"
+        assert names(screen) == ["layoff", "worry"]
+        assert files.read_text("gold.jsonl") == gold_before
+        assert files.list_versions() == []
+        assert files.read_taxonomy().labels[1].name == "fear"
+        # Confirm
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.click("#yes")
+        await pilot.pause()
+        assert app.screen is screen and screen.edit is None
+        assert [lb.name for lb in files.read_taxonomy().labels] == ["layoff", "worry"]
+        assert [r.labels for r in files.read_gold()] == [[], [], []]
+        assert [r.id for r in files.read_gold()] == ["1", "2", "3"]
+        assert not files.taxonomy_in_use()
+        assert files.read_text("threshold.json") is None
+        assert not files.read_state().dev_done
+        assert files.first_incomplete_stage() == 3
+        [v] = files.list_versions()
+        assert (v["version"], v["dev_labelled"], v["test_labelled"]) == (1, 2, 1)
+        archived = (files.root() / "versions" / "1" / "gold.jsonl").read_text()
+        assert archived == gold_before
+        assert not screen.query_one("#versions", Button).disabled
+        assert "Version 1 archived. Approve to relabel the dev set." in str(
+            screen.query_one("#note").render()
+        )
+        assert "version 2" in panel_title(screen.query_one("#labels-panel"))[1]
+        [edit] = edits()
+        assert edit.metadata["summary"] == "Taxonomy version 2 started"
+        text = str(edit.parts[0].content)
+        assert (
+            "Taxonomy version 2 started: label set/mode changed; gold labels cleared "
+            "on the same items; version 1 archived" in text
+        )
+        assert "  - worry" in text  # the current taxonomy
+        assert len(calls.prompts) == before  # no model call
+
+
+async def test_label_change_without_labelled_gold_saves_normally(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    files.write_gold([files.GoldRow(id="1", text="t", labels=[], split="dev")])
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        screen = await start(pilot.app, pilot)
+        await rename_fear(pilot, screen)
+        assert pilot.app.screen is screen
+        assert files.read_taxonomy().labels[1].name == "worry"
+        assert files.list_versions() == []
+        assert not screen.query_one("#note").display
+
+
+async def test_versions_modal_lists_and_restores(tmp_path, monkeypatch, calls):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    original = {
+        n: (files.root() / n).read_bytes()
+        for n in ("taxonomy.yaml", "gold.jsonl", "threshold.json", "prompt.md")
+    }
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        app = pilot.app
+        screen = await start(app, pilot)
+        await rename_fear(pilot, screen)
+        await pilot.click("#yes")
+        await pilot.pause()
+        before = len(calls.prompts)
+        await pilot.click("#versions")
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, tx.VersionsScreen)
+        listing = " ".join(str(w.render()) for w in modal.query("Static"))
+        assert "single" in listing and "layoff, fear" in listing
+        assert "dev 2" in listing and "test 1" in listing
+        await pilot.click("#restore-1")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        assert "version 1" in app.screen.question
+        await pilot.click("#yes")
+        await pilot.pause()
+        assert app.screen is screen
+        for name, data in original.items():
+            assert (files.root() / name).read_bytes() == data
+        assert [v["version"] for v in files.list_versions()] == [1, 2]
+        assert [lb.name for lb in screen.taxonomy.labels] == ["layoff", "fear"]
+        assert names_in_view(screen) == ["layoff", "fear"]
+        assert "version 3" in panel_title(screen.query_one("#labels-panel"))[1]
+        summaries = [e.metadata["summary"] for e in edits()]
+        assert summaries[-1] == "Restored taxonomy version 1"
+        assert (
+            "Restored taxonomy version 1; the previous state is archived as version 2"
+            in str(edits()[-1].parts[0].content)
+        )
+        assert len(calls.prompts) == before
+        # the version being left is kept
+        assert (files.root() / "versions" / "2" / "taxonomy.yaml").exists()
+
+
+async def test_versions_modal_close_and_restore_blocked_while_editing(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    files.archive_version()
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        app = pilot.app
+        screen = await start(app, pilot)
+        assert not screen.query_one("#versions", Button).disabled
+        await pilot.click("#versions", offset=(2, 0))
+        await pilot.pause()
+        assert isinstance(app.screen, tx.VersionsScreen)
+        await pilot.click("#close")
+        await pilot.pause()
+        assert app.screen is screen
+        await edit_labels(pilot, screen)
+        assert not screen.query_one("#labels-view-buttons").display
+        screen.action_versions()
+        await pilot.pause()
+        assert app.screen is screen  # no modal while a draft is open
+
+
+async def agent_write(pilot, screen, answer: str | None):
+    box = screen.query_one("#chat-input", Input)
+    box.focus()
+    box.value = "write it"
+    await pilot.press("enter")
+    await pilot.pause(0.5)
+    if answer:
+        assert isinstance(pilot.app.screen, ConfirmScreen)
+        await pilot.click(f"#{answer}")
+    await pilot.app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def test_agent_write_that_changes_labels_awaits_the_confirm(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        screen = await start(pilot.app, pilot)
+        calls.tool = ("write_taxonomy", GOOD)  # mode single -> multi, one label
+        await agent_write(pilot, screen, "no")
+        assert calls.returns[-1] == (
+            "Not written: the user declined starting a new taxonomy version."
+        )
+        assert files.read_taxonomy().mode == "single"
+        assert files.list_versions() == [] and files.taxonomy_in_use()
+        await agent_write(pilot, screen, "yes")
+        assert calls.returns[-1] == (
+            "Written as version 2; gold labels were cleared and will need relabelling."
+        )
+        assert files.read_taxonomy().mode == "multi"
+        assert not files.taxonomy_in_use()
+        assert [v["version"] for v in files.list_versions()] == [1]
+        assert edits() == []  # an agent write is not a user edit
+
+
+async def test_agent_write_without_label_change_needs_no_confirm(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    same = {
+        "mode": "single",
+        "labels": [
+            {"name": "fear", "description": "new words"},
+            {"name": "layoff", "description": "lost a job"},
+        ],
+    }
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        screen = await start(pilot.app, pilot)
+        calls.tool = ("write_taxonomy", same)
+        await agent_write(pilot, screen, None)
+        assert calls.returns[-1] == "Taxonomy written."
+        assert files.taxonomy_in_use() and files.list_versions() == []
+
+
+async def test_agent_edit_rule_still_wins_over_the_confirm(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        screen = await start(pilot.app, pilot)
+        await edit_labels(pilot, screen)
+        calls.tool = ("write_taxonomy", GOOD)
+        await agent_write(pilot, screen, None)
+        assert calls.returns[-1].startswith("Not written: the user is editing")
+        assert files.list_versions() == []

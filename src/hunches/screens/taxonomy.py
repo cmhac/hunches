@@ -20,18 +20,21 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus
 from textual.markup import escape
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, Markdown, Select, Static, TextArea
 
 from hunches import candidates, files, metrics
 from hunches.app import (
     AppFooter,
     ChatPanel,
+    ConfirmScreen,
     StatusHeader,
     confirm_approve,
     key_button,
+    modal_box,
     panel,
     retitle,
+    say,
 )
 from hunches.screens.brief import numbered
 from hunches.theme import editor, label_tag
@@ -305,6 +308,55 @@ class LabelEditRow(Horizontal):
         yield Button("✕", classes="label-delete")
 
 
+def version_question(n: int) -> str:
+    return (
+        "Gold labels were made with the current labels. Saving starts a new taxonomy version: "
+        "dev and test labelling restart on the same items (your current labels, prompt and "
+        f"results are kept as version {n} and can be restored). Continue?"
+    )
+
+
+class VersionsScreen(ModalScreen[int | None]):
+    """The archived taxonomy versions; dismisses with the number to restore, or None."""
+
+    BINDINGS: ClassVar = [("escape", "close", "Close")]
+    DEFAULT_CSS = """
+    VersionsScreen > Vertical { width: 76; height: auto; max-height: 90%; }
+    VersionsScreen VerticalScroll { height: auto; max-height: 14; }
+    VersionsScreen .version-row { height: auto; }
+    VersionsScreen .version-text { width: 1fr; }
+    VersionsScreen .version-row Button { margin-left: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with modal_box(Vertical(), "Taxonomy versions"):
+            with VerticalScroll():
+                for v in files.list_versions():
+                    names = ", ".join(v["labels"])
+                    with Horizontal(classes="version-row"):
+                        yield Static(
+                            f"[b]version {v['version']}[/]  {v['created_at'][:10]}  "
+                            f"{v['mode']}  {escape(names)}\n"
+                            f"[$text-muted]labelled: dev {v['dev_labelled']} · "
+                            f"test {v['test_labelled']}[/]",
+                            classes="version-text",
+                        )
+                        yield Button("Restore", id=f"restore-{v['version']}")
+            with Horizontal(classes="buttons"):
+                yield key_button("Close", "Esc", id="close")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        self.dismiss(
+            int(button_id.removeprefix("restore-"))
+            if button_id.startswith("restore-")
+            else None
+        )
+
+
 class TaxonomyScreen(Screen):
     BINDINGS: ClassVar = [
         ("e", "edit", "Edit"),
@@ -395,10 +447,23 @@ class TaxonomyScreen(Screen):
                 return f"Rejected, nothing written: {e}"
             if not labels:
                 return "Rejected, nothing written: at least one label is required"
+            versioned = self.needs_version(taxonomy)
+            if versioned:
+                n = len(files.list_versions()) + 1
+                if not await self.app.push_screen_wait(
+                    ConfirmScreen(version_question(n))
+                ):
+                    return "Not written: the user declined starting a new taxonomy version."
+                if (
+                    self.edit == "labels"
+                ):  # the user began editing while the question was open
+                    return "Not written: the user is editing the taxonomy. Ask them to save or discard first."
             self.commit_taxonomy(taxonomy, by_user=False)
             self.updated.add("labels")
             self.show_labels()
             self.sync()
+            if versioned:
+                return f"Written as version {n + 1}; gold labels were cleared and will need relabelling."
             return "Taxonomy written."
 
         @self.agent.tool_plain
@@ -441,6 +506,7 @@ class TaxonomyScreen(Screen):
                     yield Static(EMPTY_LABELS, id="empty-labels", classes="empty")
                     with Horizontal(id="labels-view-buttons", classes="buttons-row"):
                         yield key_button("Edit labels", "e", id="edit-labels")
+                        yield Button("Versions", id="versions")
                     with Vertical(id="labels-edit-buttons"):
                         with Horizontal(classes="buttons-row"):
                             yield key_button("Add label", "a", id="add-label")
@@ -461,6 +527,7 @@ class TaxonomyScreen(Screen):
                             "Save", "^s", id="save-prompt", variant="success"
                         )
                         yield key_button("Discard", "Esc", id="discard-prompt")
+                yield Static("", id="note", classes="note")
                 with Horizontal(id="approve-row"):
                     yield key_button(
                         "Approve taxonomy and prompt",
@@ -471,6 +538,7 @@ class TaxonomyScreen(Screen):
         yield AppFooter()
 
     def on_mount(self) -> None:
+        say(self.query_one("#note", Static), "")
         self.show_labels()
         self.show_prompt()
         self.sync()
@@ -605,7 +673,9 @@ class TaxonomyScreen(Screen):
             sub = badge("UPDATED BY ASSISTANT", "secondary")
         else:
             sub = f"{t.mode} · {n} label{'' if n == 1 else 's'}" if t else ""
+            sub += f" · version {len(files.list_versions()) + 1}" if t else ""
         retitle(self.query_one("#labels-panel"), subtitle=sub)
+        self.query_one("#versions", Button).disabled = not files.version_numbers()
         if prompt:
             sub = badge("UNSAVED" if self.prompt_dirty() else "EDITING")
         elif "prompt" in self.updated:
@@ -690,10 +760,38 @@ class TaxonomyScreen(Screen):
     def commit_taxonomy(self, new: files.Taxonomy, by_user: bool = True) -> None:
         """The one place a taxonomy is written: the Labels Save and the agent's tool both come here."""
         old = self.taxonomy
+        if self.needs_version(
+            new
+        ):  # the callers have asked the user (version_question)
+            archived = files.start_new_version(new)
+            self.taxonomy = new
+            if by_user:
+                summary = f"Taxonomy version {archived + 1} started"
+                detail = labels_change(old, new)
+                current = "# Current taxonomy\n" + taxonomy_text(
+                    new.mode, [(x.name, x.description) for x in new.labels]
+                )
+                self.query_one(ChatPanel).record(
+                    summary,
+                    f"Taxonomy version {archived + 1} started: label set/mode changed; gold labels "
+                    f"cleared on the same items; version {archived} archived\n"
+                    + (f"{detail[1]}\n" if detail else "")
+                    + f"\n{current}",
+                )
+            say(
+                self.query_one("#note", Static),
+                f"Version {archived} archived. Approve to relabel the dev set.",
+            )
+            return
         files.write_taxonomy(new)
         self.taxonomy = new
         if by_user:
             self.record_taxonomy(old, new)
+
+    def needs_version(self, new: files.Taxonomy) -> bool:
+        """Saving `new` would invalidate labelled gold rows: it needs a new taxonomy version."""
+        old = self.taxonomy
+        return bool(old and files.taxonomy_in_use() and files.labels_changed(old, new))
 
     def record_taxonomy(self, old: files.Taxonomy | None, new: files.Taxonomy) -> None:
         chat = self.query_one(ChatPanel)
@@ -719,9 +817,75 @@ class TaxonomyScreen(Screen):
                 for n, d in self.draft
             ],
         )
+        if self.needs_version(new):  # the draft stays open until the user decides
+
+            def decided(yes: bool | None) -> None:
+                if yes:
+                    self.edit = None
+                    self.commit_taxonomy(new)
+                    self.end_edit("#edit-labels")
+
+            self.app.push_screen(
+                ConfirmScreen(version_question(len(files.list_versions()) + 1)), decided
+            )
+            return
         self.edit = None
         self.commit_taxonomy(new)
         self.end_edit("#edit-labels")
+
+    # ---- versions
+
+    def action_versions(self) -> None:
+        if self.edit is not None or not files.version_numbers():
+            return
+        self.app.push_screen(VersionsScreen(), self.restore_chosen)
+
+    def restore_chosen(self, n: int | None) -> None:
+        if n is None or self.edit is not None:
+            return
+        made = len(files.list_versions()) + 1
+
+        def decided(yes: bool | None) -> None:
+            if yes:
+                self.restore(n, made)
+
+        self.app.push_screen(
+            ConfirmScreen(
+                f"Restore taxonomy version {n}? The current state is archived first as version "
+                f"{made}, so nothing is lost."
+            ),
+            decided,
+        )
+
+    def restore(self, n: int, made: int) -> None:
+        files.restore_version(n)
+        self.taxonomy = None
+        try:
+            self.taxonomy = files.read_taxonomy()
+        except (OSError, ValidationError, yaml.YAMLError, TypeError):
+            pass
+        self.prompt = files.read_text("prompt.md") or ""
+        self.updated.clear()
+        self.show_labels()
+        self.show_prompt()
+        self.sync()
+        current = "# Current taxonomy\n" + (
+            taxonomy_text(
+                self.taxonomy.mode,
+                [(x.name, x.description) for x in self.taxonomy.labels],
+            )
+            if self.taxonomy
+            else "None yet."
+        )
+        self.query_one(ChatPanel).record(
+            f"Restored taxonomy version {n}",
+            f"Restored taxonomy version {n}; the previous state is archived as version {made}\n\n"
+            f"{current}\n\n# Current prompt\n{self.prompt or 'None yet.'}",
+        )
+        say(
+            self.query_one("#note", Static),
+            f"Restored version {n}; the previous state is version {made}.",
+        )
 
     # ---- prompt
 
@@ -795,6 +959,7 @@ class TaxonomyScreen(Screen):
             "save-prompt": self.save_prompt,
             "discard-prompt": self.action_discard,
             "approve": self.action_approve,
+            "versions": self.action_versions,
         }.get(button.id or "")
         if action:
             action()
