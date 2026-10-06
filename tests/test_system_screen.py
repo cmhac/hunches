@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import panel_title
 from textual.app import App
 from textual.widgets import Button, Input, Select, Static
 
@@ -47,18 +48,42 @@ def clean_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-async def test_first_run_has_no_cancel_and_save_needs_a_key():
+async def test_first_run_has_no_cancel_and_save_is_disabled_until_a_key():
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         screen = app.screen
         assert "Welcome" in text_of(screen)
         assert not screen.query("#cancel")
-        screen.query_one("#save", Button).press()
+        save = screen.query_one("#save", Button)
+        assert save.disabled
+        assert "Add at least one API key to save" in str(
+            screen.query_one("#error", Static).render()
+        )
+        screen.save()  # ty: ignore[unresolved-attribute]
         await pilot.pause()
-        assert "at least one API key" in text_of(screen)
         assert system.read_system() is None
         assert app.result == "unset"
+        box = screen.query_one("#key-ANTHROPIC_API_KEY", Input)
+        box.value = SENTINEL
+        screen.query_one("#savekey-ANTHROPIC_API_KEY", Button).press()
+        await pilot.pause()
+        assert not save.disabled
+        assert str(screen.query_one("#error", Static).render()) == ""
+        screen.query_one("#removekey-ANTHROPIC_API_KEY", Button).press()
+        await pilot.pause()
+        assert save.disabled
+        assert "Add at least one API key" in str(
+            screen.query_one("#error", Static).render()
+        )
+
+
+async def test_env_key_enables_save(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", SENTINEL)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert not app.screen.query_one("#save", Button).disabled
 
 
 async def test_save_and_remove_key_updates_status_and_never_shows_key():
@@ -164,40 +189,57 @@ def test_thinking_choices_match_what_a_project_config_accepts():
         assert rec["thinking"] is None or rec["thinking"] in EFFORTS
 
 
-async def test_picking_a_model_shows_differs_and_unknown_price_warning_then_reset(
+async def test_model_rows_end_with_recommended_or_differs_and_unpriced_row(
     monkeypatch,
 ):
     from hunches import models
 
     monkeypatch.setattr(models, "known_models", lambda embedding=False: ["anthropic:x"])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         screen = app.screen
-        badge = screen.query_one("#differs", Static)
-        warn = screen.query_one("#pricewarn", Static)
-        assert "DIFFERS" not in str(badge.render())
-        assert str(warn.render()) == ""
+        assert not screen.query("#differs") and not screen.query("#pricewarn")
+
+        def row(name):
+            return str(screen.query_one(f"#{name}", Static).render())
+
+        assert row("assistant").rstrip().endswith("RECOMMENDED")
+        assert "DIFFERS" not in row("assistant")
+        assert row("classifier").rstrip().endswith("RECOMMENDED")
         screen.query_one("#pick-classifier", Button).press()
         await pilot.pause()
-        await pilot.press("down", "enter")  # Other…
+        await pilot.press("down", "enter")  # Other...
         await pilot.pause()
         app.screen.query_one("#other", Input).value = "anthropic:mystery-9"
         await pilot.press("enter")
         await pilot.pause()
-        assert "anthropic:mystery-9" in str(
-            screen.query_one("#classifier", Static).render()
-        )
-        assert "DIFFERS from recommended" in str(badge.render())
-        assert "no price" in str(warn.render())
-        assert "anthropic:mystery-9" in str(warn.render())
+        assert "anthropic:mystery-9" in row("classifier")
+        assert "DIFFERS FROM RECOMMENDED" in row("classifier")
+        # the unpriced warning is its own line in that row, not a separate widget
+        first, second = row("classifier").splitlines()
+        assert "no price" not in first
+        assert second.strip() == "no price: cost will show ?"
+        assert row("assistant").rstrip().endswith("RECOMMENDED")
+        # thinking differing from the recommendation makes the assistant row differ
+        screen.query_one("#thinking", Select).value = "high"
+        await pilot.pause()
+        assert "DIFFERS FROM RECOMMENDED" in row("assistant")
         screen.query_one("#reset", Button).press()
         await pilot.pause()
-        assert "anthropic:claude-haiku-4-5" in str(
-            screen.query_one("#classifier", Static).render()
-        )
-        assert "DIFFERS" not in str(badge.render())
-        assert str(warn.render()) == ""
+        assert row("classifier").rstrip().endswith("RECOMMENDED")
+        assert row("assistant").rstrip().endswith("RECOMMENDED")
+        assert "no price" not in row("classifier")
+
+
+async def test_price_note_says_sidebar_only_in_rail_mode(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    for width, word in ((80, "the header shows"), (120, "the sidebar shows")):
+        app = Host()
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            assert word in text_of(app.screen)
 
 
 def existing(**kw) -> system.System:
@@ -240,8 +282,8 @@ async def test_edit_shows_settings_keeps_projects_and_stores_and_cancel_writes_n
         assert "anthropic:claude-opus-4-5" in str(
             screen.query_one("#classifier", Static).render()
         )
-        assert "DIFFERS from recommended" in str(
-            screen.query_one("#differs", Static).render()
+        assert "DIFFERS FROM RECOMMENDED" in str(
+            screen.query_one("#classifier", Static).render()
         )
         assert "Existing projects keep their models" in text_of(screen)
         screen.query_one("#cancel", Button).press()
@@ -338,7 +380,7 @@ async def test_modal_shows_old_to_new_with_prices_and_use_new_adopts_recommendat
         await pilot.pause()
         shown = text_of(app.screen)
         assert (
-            app.screen.query_one("#modal-box").border_title
+            panel_title(app.screen.query_one("#modal-box"))[0]
             == "Recommended models changed"
         )
         assert "anthropic:claude-opus-4-5" in shown
@@ -346,6 +388,8 @@ async def test_modal_shows_old_to_new_with_prices_and_use_new_adopts_recommendat
         assert "anthropic:claude-sonnet-5-5" in shown
         assert "$2.00 in / $10.00 out per 1M tokens" in shown
         assert "Existing projects keep their models" in shown
+        assert "thinking" in shown and "provider default" in shown and "medium" in shown
+        assert "unchanged" in shown  # the classifier did not change
         app.screen.query_one("#use-new", Button).press()
         await pilot.pause()
     saved = system.read_system()
@@ -382,3 +426,18 @@ async def test_fits_80x24_with_keys_models_stores_and_save_visible(monkeypatch):
             assert region.height and region.right <= 80 and region.bottom <= 24, (
                 selector
             )
+
+
+async def test_modal_groups_now_and_new_lines_and_focuses_use_new(old_system):
+    system.write_system(stored().model_copy(update={"classifier_model": "x:old"}))
+    app = ModalHost()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        modal = app.screen
+        assert modal.focused is modal.query_one("#use-new", Button)
+        lines = [str(w.render()) for w in modal.query(Static)]
+        assert any("now" in t and "anthropic:claude-opus-4-5" in t for t in lines)
+        assert any("new" in t and "anthropic:claude-sonnet-5-5" in t for t in lines)
+        assert any("now" in t and "x:old" in t for t in lines)
+        assert any("new" in t and "anthropic:claude-haiku-4-5" in t for t in lines)
+        assert not any("unchanged" in t for t in lines)

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+from conftest import panel_title
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
@@ -27,7 +29,7 @@ def make_project(tmp_path, monkeypatch, first_run=False, **state):
     files.write_config(
         files.Config(
             assistant_model="anthropic:claude-sonnet-5-5",
-            classifier_model="anthropic:claude-haiku-4-5",
+            classifier_model="test",
             corpus_dir="c",
             embedding_model="m",
         )
@@ -160,6 +162,7 @@ async def test_matching_recommendation_is_bumped_silently(tmp_path, monkeypatch)
     assert seen is not None and seen.recommendation_seen == system.RECOMMENDED_REVISION
 
 
+@pytest.mark.usefixtures("stub_taxonomy_assistant")
 async def test_starts_at_first_incomplete_stage(tmp_path, monkeypatch):
     make_project(tmp_path, monkeypatch)
     app = HunchesApp()
@@ -246,6 +249,7 @@ async def test_quit(tmp_path, monkeypatch):
     assert app.return_code == 0
 
 
+@pytest.mark.usefixtures("stub_taxonomy_assistant")
 async def test_header_stepper_and_stage_name(tmp_path, monkeypatch):
     make_project(tmp_path, monkeypatch, seeds_approved=True)
     files.write_text(
@@ -286,14 +290,14 @@ async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
         assert [b.id for b in modal.query(Button)] == ["no", "yes"]  # Cancel, Approve
         assert app.focused is not None and app.focused.id == "yes"
         box = modal.query_one(Vertical)
-        assert box.border_title == "Confirm" and box.outer_size.width == 58
+        assert panel_title(box)[0] == "Confirm" and box.outer_size.width == 58
         await pilot.press("enter")  # Approve is focused by default
         await pilot.pause()
         assert files.read_state().seeds_approved
 
 
-def log_lines(panel) -> list[str]:
-    return [strip.text.rstrip() for strip in panel.query_one("#log").lines]
+def turns(panel) -> list[tuple[str, str]]:
+    return [(line.kind, line.text) for line in panel.lines]
 
 
 async def test_chat_panel_gutters_title_and_blank_rows(tmp_path, monkeypatch):
@@ -304,14 +308,19 @@ async def test_chat_panel_gutters_title_and_blank_rows(tmp_path, monkeypatch):
         await pilot.pause()
         panel = ChatPanel("brief", agent)
         await app.screen.mount(panel)
-        assert panel.border_title == "chat · brief"
-        assert panel.border_subtitle == "test"  # the model name
+        assert panel_title(panel)[0] == "chat · brief"
+        assert panel_title(panel)[1] == "test"  # the model name
         panel.query_one("#chat-input", Input).focus()
         await pilot.press("h", "i", "enter", "y", "o", "enter")
         await pilot.pause(0.5)
-        lines = log_lines(panel)
-        assert lines[:3] == ["› hi", "", "│ hello there"]
-        assert lines[3:6] == ["", "› yo", ""]  # one blank row between turns
+        assert turns(panel) == [
+            ("user", "hi"),
+            ("assistant", "hello there"),
+            ("user", "yo"),
+            ("assistant", "hello there"),
+        ]
+        a, b, c, _ = panel.lines
+        assert (b.region.y - a.region.bottom, c.region.y - b.region.bottom) == (1, 1)
 
 
 async def test_chat_panel_restores_history_with_tool_calls(tmp_path, monkeypatch):
@@ -330,7 +339,13 @@ async def test_chat_panel_restores_history_with_tool_calls(tmp_path, monkeypatch
         [
             ModelRequest(parts=[UserPromptPart(content="find layoffs")]),
             ModelResponse(
-                parts=[ToolCallPart(tool_name="propose_seeds", args={"seeds": ["a"]})]
+                parts=[
+                    ToolCallPart(
+                        tool_name="propose_seeds",
+                        args={"seeds": ["a"]},
+                        tool_call_id="1",
+                    )
+                ]
             ),
             ModelRequest(
                 parts=[
@@ -350,13 +365,14 @@ async def test_chat_panel_restores_history_with_tool_calls(tmp_path, monkeypatch
         panel = ChatPanel("brief", Agent(TestModel()))
         await app.screen.mount(panel)
         await pilot.pause()
-        assert log_lines(panel) == [
-            "› find layoffs",
-            "",
-            "↳ propose_seeds · Added 6 seeds.",
-            "",
-            "│ Done.",
+        assert turns(panel) == [
+            ("user", "find layoffs"),
+            ("tool", "propose_seeds Added 6 seeds."),
+            ("assistant", "Done."),
         ]
+        user, tool, done = panel.lines
+        assert tool.region.y == user.region.bottom  # no blank row before a tool line
+        assert done.region.y - tool.region.bottom == 1
 
 
 async def test_chat_panel_error_line(tmp_path, monkeypatch):
@@ -375,7 +391,7 @@ async def test_chat_panel_error_line(tmp_path, monkeypatch):
         panel.query_one("#chat-input", Input).focus()
         await pilot.press("h", "enter")
         await pilot.pause(0.3)
-        assert log_lines(panel)[-1] == "Error: no key"
+        assert turns(panel)[-1] == ("error", "Error: no key")
 
 
 async def test_header_keeps_cost_warning_visible_at_80_columns(tmp_path, monkeypatch):

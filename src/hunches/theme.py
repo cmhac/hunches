@@ -35,6 +35,7 @@ HUNCHES = Theme(
     warning="#EAB54D",
     error="#F2557A",
     variables={
+        "boost": "#252E3E",  # Textual derives $boost as a 4% white overlay; the design wants this solid colour
         "text-muted": "#8C96A6",
         "text-disabled": "#5C6676",
         "border": "#6EA8FE",

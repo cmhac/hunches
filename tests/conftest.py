@@ -2,6 +2,7 @@ import keyring
 import pytest
 from keyring.backend import KeyringBackend
 from keyring.errors import PasswordDeleteError
+from pydantic_ai import models
 
 
 class MemoryKeyring(KeyringBackend):
@@ -33,6 +34,61 @@ def isolated_system(tmp_path, monkeypatch):
     keyring.set_keyring(previous)
 
 
+class _ModelRequestsBlocked:
+    """Falsy stand-in for `ALLOW_MODEL_REQUESTS` that remembers it was consulted.
+
+    Screens swallow run errors into a status line, so a blocked request alone would not fail the
+    test; the fixture below fails it at teardown instead.
+    """
+
+    def __init__(self):
+        self.hits = 0
+
+    def __bool__(self):
+        self.hits += 1
+        return False
+
+
+@pytest.fixture(autouse=True)
+def no_real_models(monkeypatch):
+    """No test may reach a real LLM: unusable keys, and any un-stubbed model request fails the test."""
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_ACCESS_KEY_ID"):
+        monkeypatch.setenv(key, "test-invalid")
+    blocked = _ModelRequestsBlocked()
+    monkeypatch.setattr(models, "ALLOW_MODEL_REQUESTS", blocked)
+    yield
+    assert not blocked.hits, (
+        "test made an un-stubbed (real) model request; use TestModel/FunctionModel"
+    )
+
+
+@pytest.fixture
+def stub_taxonomy_assistant(monkeypatch):
+    """The taxonomy screen sends the assistant its context on mount; these tests are not about that."""
+    import hunches.app  # noqa: F401  (import order: screens import the app)
+    from hunches.screens.taxonomy import TaxonomyScreen
+
+    async def no_context_turn(self):
+        pass
+
+    monkeypatch.setattr(TaxonomyScreen, "sync_context", no_context_turn)
+
+
+@pytest.fixture(autouse=True)
+def quiet_tune_assistant(request, monkeypatch):
+    """A finished dev run on the tuning screen messages the assistant; only tests that ask for the
+    `assistant` fixture (tests/test_tune_screen.py, which stubs the model) want that."""
+    if "assistant" in request.fixturenames:
+        return
+    import hunches.app  # noqa: F401  (import order: screens import the app)
+    from hunches.screens.tune import TuneScreen
+
+    async def no_context_turn(self):
+        pass
+
+    monkeypatch.setattr(TuneScreen, "sync_context", no_context_turn)
+
+
 @pytest.fixture
 def no_keyring():
     """The `fail` backend keyring picks on headless systems: every call raises NoKeyringError."""
@@ -61,4 +117,12 @@ def system_ready(tmp_path):
             classifier_model="c",
             recommendation_seen=system.RECOMMENDED_REVISION,
         )
+    )
+
+
+def panel_title(widget) -> tuple[str, str]:
+    """(title, subtitle) markup of a `panel()`'s own title row (the first one under it)."""
+    return (
+        str(widget.query(".panel-title").first().content),
+        str(widget.query(".panel-subtitle").first().content),
     )

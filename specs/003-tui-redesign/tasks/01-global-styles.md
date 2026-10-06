@@ -1,0 +1,25 @@
+# 01 — Global styles: panels, components, buttons, modals, not-ready
+
+Spec: "Resolved decisions" D1. Handoff: `design/README.md` §3.2, §3.3, "Design tokens", "Global rules", and the not-ready entry in the change log. `[visual]` only, plus one small helper.
+
+## Goal
+Restyle most screens at once through `panel()` and `hunches.tcss`, without touching screen logic. Theme colours and variables do not change (`theme.py` stays as is).
+
+## Do
+- **`panel()` (`app.py`).** Keep the signature `panel(widget, title, subtitle="")`. Stop using `border_title`/`border_subtitle` (D1). Add a one-row title child via `widget.compose_add_child(...)`: title left (bold, strong; primary when the panel has focus), subtitle right-aligned and muted, both as markup so a subtitle can carry a badge. Add `retitle(widget, title=None, subtitle=None)` and replace every `border_title =` / `border_subtitle =` assignment in `src/hunches/` with it (grep: `brief`, `gold`, `tune`, `final`, `threshold`, `run`, `search`, `report`, `browse`, `app.ChatPanel`, `new_project`, `project_settings`, `system`). The focus colour on the title follows `:focus-within` / `.-focused`; a title row that has to react to focus can be styled by TCSS (`.panel:focus-within .panel-title { color: $primary; }`).
+- **TCSS** (`hunches.tcss`; check each rule against Textual 8.2.8, the handoff warns they were not run): the block in README §3.2 (`.panel` no border, `$surface`, `padding: 0 1`, `border-left: outer $primary` on focus; `DataTable` transparent with muted header, no bold, cursor `$panel` and `$boost` when focused, **zebra off**; `Input` and `Select` one row, `$panel`, `$boost` and primary left bar when focused; `FooterKey` caps; `.banner` with a left bar in its colour). Delete the now-unused round-border rules.
+- **Buttons.** One row, filled, bold, no border; variants default (`$boost`), primary, success, error; disabled = `$panel` background and `$text-disabled` text, not just dimmed. Add `key_button(label, key, **kwargs) -> Button` that builds the label `"Approve seeds  F2"` (two spaces). It is a plain function in `app.py`. Existing `compact=True` calls keep working; leave them.
+- **Badges** (`.badge`): add `-info` (secondary background) next to the existing `-pass/-fail/-stale`; keep one cell of padding.
+- **Modals.** `ConfirmScreen`, `RemoveModal`, `RecommendationModal`, `ModelPicker`, `PathPicker`, `ProposalScreen`: no border, `$surface`, left bar `$primary`, a first-row title in primary bold (a shared one-row title widget, same idea as D1; replace `box.border_title = …`), buttons right-aligned, default order Cancel then Approve with Approve (success) focused. Padding `1 2`, or `0 1` for the proposal modal. Fold the `PathPicker`/`ConfirmScreen` rules already in `hunches.tcss` into the new shared rule.
+- **Not-ready.** The `#not-ready` Static on Gold, Tune, Threshold and Run: centred horizontally and vertically in the content area, warning colour, footer below. One shared rule (`.not-ready`); change `classes="warn"` to it.
+- **Empty-line rule.** Message Statics (`#note`, `#status`, …) are `height: auto` and `display: none` when empty, so no blank strip sits above the footer. Add a tiny helper `say(widget, text)` (set text, set `display = bool(text)`) next to `panel()` and use it where screens currently `update("")` a note; the per-screen tasks adopt it as they go.
+- **`LabelBar` (new module `src/hunches/screens/progress.py`).** A one-row bar widget with a two-layer label: the label text is drawn over the bar and inverts colour over the filled part (Rich `Text` with spans on a `Static`, or Textual `ProgressBar` restyled; pick the simplest that renders correctly). API: `LabelBar(total, value, label, align="center"|"left", done_style)`; fill `$primary`, `$success` when complete; optional faint dividers at 25/50/75 %. Used by Search (task 07, label `4/12  <seed>` left-aligned), Gold (task 09, centred `17 / 50`) and `RunIndicator` (task 11, which adds to this module).
+- Browse: restyle only through the shared rules (no buttons). Check its label `SelectionList` and the search `Input` (which loses its `tall` border).
+
+## Tests
+- `tests/test_theme.py`: add a Pilot test that `panel(Vertical(), "t", "s")` mounts one title row with both strings, no border, and that `retitle` updates both. Assert on text, not colours.
+- Known breakers (they assert `border_title`/`border_subtitle`): `test_app.py`, `test_brief.py`, `test_browse_screen.py`, `test_final_screen.py`, `test_gold_screen.py`, `test_run_screen.py`, `test_search_screen.py`, `test_system_screen.py`, `test_taxonomy_screen.py`, `test_threshold_screen.py`, `test_tune_screen.py`. Point them at the title row (add a small test helper `panel_title(widget) -> tuple[str, str]` in `tests/conftest.py`).
+- 80×24 smoke for every screen still passes (nothing may overflow because the title row now costs a row where the old border cost two).
+
+## Done when
+- All screens render with the new look; no `border_title` assignments remain; tests pass at 80×24.

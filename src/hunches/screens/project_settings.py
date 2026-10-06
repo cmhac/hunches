@@ -8,10 +8,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Input, Label, Select, Static
+from textual.widgets import Button, Input, Label, Select, Static
 
 from hunches import files, models, system
-from hunches.app import ConfirmScreen, StatusHeader, panel
+from hunches.app import AppFooter, ConfirmScreen, StatusHeader, panel
 from hunches.screens.model_picker import ModelPicker
 from hunches.screens.new_project import (
     NewProjectScreen,
@@ -20,7 +20,7 @@ from hunches.screens.new_project import (
     stored_corpus,
 )
 from hunches.screens.paths import PathInput, browse
-from hunches.screens.system import saved_stores
+from hunches.screens.system import model_line, prices_note, saved_stores
 
 EFFORTS = typing.get_args(ThinkingEffort)
 
@@ -36,6 +36,7 @@ class ProjectSettingsScreen(Screen):
     ProjectSettingsScreen .row Input, ProjectSettingsScreen .row Select { width: 1fr; }
     ProjectSettingsScreen #actions { height: 1; }
     ProjectSettingsScreen #actions Button { margin-right: 1; }
+    ProjectSettingsScreen #actions #error { width: 1fr; height: 1; }
     ProjectSettingsScreen .row Button { margin-left: 1; width: auto; min-width: 8; }
     """
 
@@ -113,16 +114,15 @@ class ProjectSettingsScreen(Screen):
                     yield Static("", id="classifier")
                     yield Button("Change", id="pick-classifier", compact=True)
             yield Static(
-                f"Prices from genai-prices as of {models.snapshot_date()}; "
-                "the header shows actual spend. Changes here affect only this project.",
+                prices_note(self.app, " Changes here affect only this project."),
+                id="prices",
                 classes="note",
             )
-        yield Static("", id="pricewarn", classes="warn")
-        yield Static("", id="error", classes="error")
         with Horizontal(id="actions"):
             yield Button("Save", id="save", variant="success", compact=True)
             yield Button("Cancel", id="cancel", compact=True)
-        yield Footer()
+            yield Static("", id="error", classes="error")
+        yield AppFooter()
 
     @property
     def embedding(self) -> str:
@@ -136,11 +136,30 @@ class ProjectSettingsScreen(Screen):
         self.show_backend()
         self.refresh_models()
 
+    def on_resize(self) -> None:
+        self.query_one("#prices", Static).update(
+            prices_note(self.app, " Changes here affect only this project.")
+        )
+
+    @property
+    def corpus_problem(self) -> str:
+        """The corpus error, which only matters for a local corpus."""
+        return self.problem if self.backend == "local" else ""
+
+    def refresh_save(self) -> None:
+        """Save is disabled while the local corpus has an error; the message sits beside it."""
+        problem = self.corpus_problem
+        self.query_one("#save", Button).disabled = bool(problem)
+        self.query_one("#error", Static).update(
+            escape(f"Corpus: {problem}") if problem else ""
+        )
+
     def show_backend(self) -> None:
         s3 = self.backend == "s3"
         self.query_one("#local").display = not s3
         self.query_one("#s3").display = s3
         self.show_embedding()
+        self.refresh_save()
 
     def show_embedding(self) -> None:
         if self.problem:
@@ -152,23 +171,11 @@ class ProjectSettingsScreen(Screen):
         self.query_one("#embedding", Static).update(f"embedding: {text}")
 
     def refresh_models(self) -> None:
-        unpriced = [
-            m
-            for m in (self.config.assistant_model, self.config.classifier_model)
-            if models.price_label(m) == models.NO_PRICE
-        ]
-        warning = self.query_one("#pricewarn", Static)
-        warning.update(
-            f"WARNING: no price for {escape(', '.join(unpriced))}: cost will show ?"
-        )
-        warning.display = bool(unpriced)
         for name in ("assistant", "classifier"):
             model = getattr(self.config, f"{name}_model")
             recommended = model in (r[name] for r in system.RECOMMENDED.values())
-            mark = "RECOMMENDED" if recommended else "[$warning]DIFFERS[/]"
             self.query_one(f"#{name}", Static).update(
-                f"{name}: {escape(model)}  [$text-muted]{models.price_label(model)}[/]"
-                f"  {mark}"
+                model_line(name, model, recommended)
             )
 
     def pick(self, name: str) -> None:
@@ -201,6 +208,7 @@ class ProjectSettingsScreen(Screen):
                 Path(event.value.strip()).expanduser()
             )
             self.show_embedding()
+            self.refresh_save()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button.id or ""
@@ -240,8 +248,8 @@ class ProjectSettingsScreen(Screen):
         self.run_worker(check, thread=True)
 
     def save(self) -> None:
-        if self.problem:
-            self.query_one("#error", Static).update(escape(f"Corpus: {self.problem}"))
+        if self.corpus_problem:
+            self.refresh_save()
             return
         value = lambda i: self.query_one(f"#{i}", Input).value.strip()
         if self.backend == "s3":

@@ -1,17 +1,28 @@
+import json
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from dotenv import load_dotenv
 from pydantic_ai import Agent
-from pydantic_ai.messages import TextPart, ToolReturnPart, UserPromptPart
-from rich.table import Table
-from rich.text import Text
+from pydantic_ai.messages import (
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
+    ModelRequest,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.markup import escape
+from textual.message import Message
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Input, Label, RichLog, Static
+from textual.widget import Widget
+from textual.widgets import Button, Footer, Input, Label, Static
 
 from hunches import cost, files, keys, system
 from hunches.theme import HUNCHES
@@ -23,27 +34,182 @@ class Placeholder(Screen):
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         yield Static(f"Stage {self.app.stage} is not implemented yet.")  # ty: ignore[unresolved-attribute]
-        yield Footer()
+        yield AppFooter()
 
 
 def panel(widget, title: str, subtitle: str = ""):
-    """Give a container the bordered, titled look from hunches.tcss."""
+    """Give a container the tinted panel look from hunches.tcss, with a one-row title line first.
+
+    Title and subtitle are markup (a subtitle can carry a badge). Change them with `retitle`.
+    """
     widget.add_class("panel")
-    widget.border_title = title
-    widget.border_subtitle = subtitle
+    widget.compose_add_child(PanelTitle(title, subtitle))
     return widget
 
 
-class StatusHeader(Static):
-    """Project, stage stepper and total cost. Every stage screen must yield one first in compose()."""
+class PanelTitle(Horizontal):
+    """Title left, subtitle right-aligned and muted. Also the first row of modals."""
+
+    def __init__(self, title: str, subtitle: str = "") -> None:
+        self.title_text = Static(title, classes="panel-title")
+        self.subtitle_text = Static(subtitle, classes="panel-subtitle")
+        super().__init__(self.title_text, self.subtitle_text)
+
+
+def modal_box(box, title: str):
+    """Give a modal's container the shared look (hunches.tcss) with a primary title on its first row."""
+    box.add_class("modal-box")
+    box.compose_add_child(PanelTitle(title))
+    return box
+
+
+def retitle(widget, title: str | None = None, subtitle: str | None = None) -> None:
+    """Change a `panel()`'s title and/or subtitle (markup); None leaves that one alone."""
+    row = widget.query(PanelTitle).first()
+    if title is not None:
+        row.title_text.update(title)
+    if subtitle is not None:
+        row.subtitle_text.update(subtitle)
+
+
+def say(widget: Static, text: str) -> None:
+    """Set a message line; an empty one is hidden so no blank strip sits above the footer."""
+    widget.update(text)
+    widget.display = bool(text)
+
+
+def key_button(label: str, key: str, **kwargs) -> Button:
+    """A button whose label carries its key, e.g. "Approve seeds  F2"."""
+    return Button(f"{label}  {key}", **kwargs)
+
+
+RAIL_WIDTH = 26
+RAIL_MIN = 100  # terminal columns from which the header becomes the left rail
+DESTINATIONS = [
+    ("Projects", "F4"),
+    ("Project settings", "F3"),
+    ("System settings", "F5"),
+]
+# which destination the open screen is, by its stage_name
+DESTINATION_OF = {
+    "Projects": "Projects",
+    "New project": "Projects",
+    "Settings": "Project settings",
+    "System settings": "System settings",
+}
+RAIL_ACTIONS = {"quit", "goto", "settings", "projects", "system_settings"}
+
+
+def wide(app) -> bool:
+    """True when the terminal is wide enough for the left rail (works on any App, e.g. test hosts)."""
+    return app.size.width >= RAIL_MIN
+
+
+def markup(style: str, text: str) -> str:
+    return f"[{style}]{text}[/]" if style else text
+
+
+class AppFooter(Footer):
+    """Footer that drops the keys the rail already shows and sits under the content column in rail mode."""
+
+    rail = False
+
+    def compose(self) -> ComposeResult:
+        self.rail = wide(self.app)
+        for widget in super().compose():
+            action = getattr(widget, "action", "").split("(")[0]  # "goto(1)"
+            if not (self.rail and action in RAIL_ACTIONS):
+                yield widget
 
     def on_mount(self) -> None:
-        self.refresh_cost()
+        self.fit()
+
+    def fit(self) -> None:
+        rail = wide(self.app)
+        # Footer docks at the full screen width, so beside the rail it needs an explicit width
+        self.styles.margin = (0, 0, 0, RAIL_WIDTH if rail else 0)
+        self.styles.width = self.app.size.width - RAIL_WIDTH if rail else None
+        if rail != self.rail:
+            self.refresh(recompose=True)
+
+
+class StatusHeader(Static):
+    """Project, stage stepper and total cost; the left rail from 100 columns. Every stage screen must yield one first in compose()."""
+
+    def on_mount(self) -> None:
+        self.fit()
         # polling picks up cost.record() calls from anywhere, including worker threads
         self.set_interval(0.25, self.refresh_cost)
 
     def on_resize(self) -> None:
         self.refresh_cost()
+
+    def fit(self) -> None:
+        self.set_class(wide(self.app), "-rail")
+        self.refresh_cost()
+
+    def refresh_rail(self, stage: int) -> None:
+        """Rail markup: stages and destinations at the top, cost at the bottom."""
+        dollars, unknown = cost.total()
+        self.set_class(bool(unknown), "-cost-unknown")
+        screen_name = getattr(self.screen, "stage_name", None)
+        here = DESTINATION_OF.get(screen_name or "")
+        current = 0 if screen_name else stage  # an overlay screen: no stage is current
+
+        def row(mark, mark_style, text, text_style, on=False, key=""):
+            bg = "on $panel" if on else ""
+            room = RAIL_WIDTH - 5 - (len(key) + 1 if key else 0)
+            if len(text) > room:
+                text = text[: room - 1] + "…"
+            tail = markup(f"$text-disabled {bg}", f" {key}") if key else ""
+            return "".join(
+                (
+                    markup(f"$primary {bg}", "▌" if on else " "),
+                    markup(bg, " "),
+                    markup(f"{mark_style} {bg}", mark),
+                    markup(bg, " "),
+                    markup(f"{text_style} {bg}", escape(text.ljust(room))),
+                    tail,
+                    markup(bg, " "),
+                )
+            )
+
+        def plain(text, style):
+            return "  " + markup(style, escape(text))
+
+        project = Path.cwd().name
+        if len(project) > RAIL_WIDTH - 3:
+            project = project[: RAIL_WIDTH - 4] + "…"
+        lines = [plain("hunches", "b $primary"), plain(project, "$text-muted"), ""]
+        for num, label, _ in STAGES:
+            if num == current:
+                lines.append(row("●", "$primary", label, "b #EEF1F5", on=True))
+            elif num < stage:
+                lines.append(row("✓", "$success", label, "$text-muted"))
+            else:
+                lines.append(row("·", "$text-disabled", label, "$text-disabled"))
+        lines.append("")
+        for label, key in DESTINATIONS:
+            if label == here:
+                lines.append(row("▸", "$primary", label, "b #EEF1F5", on=True, key=key))
+            else:
+                lines.append(row(" ", "$text-muted", label, "$text-muted", key=key))
+        bottom = [
+            plain("n/p stage · q quit", "$text-disabled"),
+            "",
+            plain("cost", "$text-muted"),
+        ]
+        if unknown:
+            models = [m for m, v in cost.breakdown().items() if v["dollars"] is None]
+            bottom += [
+                "  [b reverse $warning] cost ? [/]",
+                plain("no price for", "$warning"),
+            ]
+            bottom += [plain(m[: RAIL_WIDTH - 3], "$warning") for m in models[:3]]
+        else:
+            bottom.append(plain(f"${dollars:.4f}", "b #EEF1F5"))
+        gap = max(1, self.size.height - len(lines) - len(bottom))
+        self.update("\n".join(lines + [""] * gap + bottom))
 
     def refresh_cost(self) -> None:
         stage = getattr(self.app, "stage", 0)
@@ -53,6 +219,8 @@ class StatusHeader(Static):
                 self.screen, "stage_name", "Setup"
             ),  # non-stage screens name themselves
         )
+        if self.has_class("-rail"):
+            return self.refresh_rail(stage)
         project = Path.cwd().name
         if len(project) > 16:
             project = project[:15] + "…"
@@ -110,10 +278,9 @@ class ConfirmScreen(ModalScreen[bool]):
         self.question = question
 
     def compose(self) -> ComposeResult:
-        with Vertical() as box:
-            box.border_title = "Confirm"
+        with modal_box(Vertical(), "Confirm"):
             yield Label(self.question)
-            with Horizontal():
+            with Horizontal(classes="buttons"):
                 yield Button("Cancel", id="no")
                 yield Button("Approve", id="yes", variant="success")
 
@@ -135,19 +302,148 @@ def confirm_approve(screen: Screen, flag: str, question: str, then=None) -> None
     screen.app.push_screen(ConfirmScreen(question), done)
 
 
+TURN_KINDS = ("context", "update", "edit")  # ModelRequest.metadata["hunches"]
+BADGES = {
+    "edit": "[b reverse $primary] YOU EDITED [/]",
+    "update": "[b reverse $secondary] UPDATED [/]",
+}
+MAX_BODY_ROWS = 12
+
+
+class ChatLine(Horizontal):
+    """One text turn: a coloured gutter and the text wrapping beside it. Errors have no gutter."""
+
+    def __init__(self, kind: str, text: str = "", **kwargs) -> None:
+        self.kind = kind
+        self.text = text
+        gutter = {"user": "›", "assistant": "│"}.get(kind, "")
+        super().__init__(
+            Static(gutter, classes="gutter"),
+            Static(text, markup=False, classes="body"),
+            classes=f"turn chat-{kind}",
+            **kwargs,
+        )
+
+    def set(self, text: str) -> None:
+        self.text = text
+        self.query_one(".body", Static).update(text)
+        self.display = bool(text)
+
+
+def body_content(body: str, rows: int | None = None) -> Content:
+    """A message body as text: `# ` headings bold, long bodies cut to `rows` lines with a count."""
+    lines = body.split("\n")
+    shown = lines if rows is None else lines[:rows]
+    parts: list = []
+    for line in shown:
+        if parts:
+            parts.append("\n")
+        parts.append((line[2:], "bold") if line.startswith("# ") else line)
+    if len(shown) < len(lines):
+        parts.append(f"\n… {len(lines) - len(shown)} more lines")
+    return Content.assemble(*parts)
+
+
+class FoldLine(Vertical):
+    """A tool call (`↳ name  summary  ▸`) or a context/update/edit message (`◇ [badge] summary ▸`); click to open."""
+
+    def __init__(
+        self,
+        kind: str,
+        summary: str,
+        detail: str,
+        tool: str = "",
+        rows: int | None = None,
+    ) -> None:
+        super().__init__(classes=f"turn fold fold-{kind}")
+        self.kind = kind
+        self.tool = tool
+        self.summary = " ".join(
+            summary.split()
+        )  # one row; the CSS clips it with an ellipsis
+        self.rows = rows
+        self.expanded = False
+        self.detail = Static(body_content(detail, rows), classes="detail")
+        self.detail.display = False
+        self.summary_text = Static(self.summary, classes="summary", markup=False)
+        self.toggle_mark = Static("▸", classes="toggle")
+
+    @property
+    def text(self) -> str:
+        return f"{self.tool} {self.summary}" if self.tool else self.summary
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="head"):
+            yield Static("↳" if self.kind == "tool" else "◇", classes="gutter")
+            if self.tool:
+                yield Static(self.tool, classes="name", markup=False)
+            if self.kind in BADGES:
+                yield Static(BADGES[self.kind], classes="badge")
+            yield self.summary_text
+            yield self.toggle_mark
+        yield self.detail
+
+    def toggle(self) -> None:
+        self.expanded = not self.expanded
+        self.detail.display = self.expanded
+        self.toggle_mark.update("▾" if self.expanded else "▸")
+
+    def on_click(self) -> None:
+        self.toggle()
+
+    def set_result(self, summary: str, detail: str) -> None:
+        self.summary = " ".join(summary.split())
+        self.summary_text.update(self.summary)
+        self.detail.update(body_content(detail, self.rows))
+
+
+def tool_line(call: ToolCallPart, result: ToolReturnPart | None) -> FoldLine:
+    line = FoldLine("tool", "…", "", tool=call.tool_name)
+    line.set_result(*tool_texts(call, result))
+    return line
+
+
+def tool_texts(call: ToolCallPart, result: ToolReturnPart | None) -> tuple[str, str]:
+    """(summary, expanded block) of a tool call; no result yet is a running call."""
+    args = json.dumps(call.args_as_dict(), indent=2, ensure_ascii=False)
+    if result is None:
+        return "…", f"# Arguments\n{args}"
+    return str(result.content), f"# Arguments\n{args}\n\n# Result\n{result.content}"
+
+
 class ChatPanel(Vertical):
-    """RichLog + Input. Streams the agent's reply and persists history to chat/<stage>.json."""
+    """Scrolling turns (one widget each) + a one-row Input and send button; persists history to chat/<stage>.json.
 
-    DEFAULT_CSS = (
-        "ChatPanel RichLog { height: 1fr; } ChatPanel Static { height: auto; }"
-    )
+    The agent should see the current files on every run: register `@agent.instructions` on it, returning
+    the state read fresh (it is evaluated per run, and never persisted: `files.save_chat` clears it).
+    """
 
-    def __init__(self, stage: str, agent: Agent) -> None:
+    DEFAULT_CSS = """
+    ChatPanel #messages { height: 1fr; padding: 0 1 1 1; }
+    ChatPanel #empty { height: 1fr; content-align: center middle; text-align: center; }
+    ChatPanel .turn { height: auto; margin-top: 1; }
+    ChatPanel .turn.first, ChatPanel .fold-tool { margin-top: 0; }
+    ChatPanel #chat-row { height: 1; }
+    """
+
+    class Submitted(Message):
+        """The user sent `text` (also posted when the chat itself answers it)."""
+
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
+    class Changed(Message):
+        """A turn started or finished (`running` flipped)."""
+
+    def __init__(self, stage: str, agent: Agent, empty: str = "") -> None:
         super().__init__()
+        self.card_for: Callable[[ToolCallPart], Widget | None] | None = None
         self.stage = stage
         self.agent = agent
+        self.empty = empty
         self.history = files.load_chat(stage)
-        self.turns = 0
+        self.running = False
         model = agent.model
         panel(
             self,
@@ -156,65 +452,175 @@ class ChatPanel(Vertical):
         )
 
     def compose(self) -> ComposeResult:
-        yield RichLog(wrap=True, markup=False, id="log")
-        yield Static("", id="live")  # the reply being streamed
-        yield Input(placeholder="Message the assistant", id="chat-input")
+        with VerticalScroll(id="messages"):
+            yield Static(self.empty, id="empty")
+            yield ChatLine("assistant", id="live")  # the reply being streamed
+        with Horizontal(id="chat-row"):
+            yield Input(placeholder="Message the assistant", id="chat-input")
+            yield Button("↑", id="send", variant="primary", disabled=True)
 
-    def on_mount(self) -> None:
-        self.write_messages(self.history)  # restore a resumed conversation
+    async def on_mount(self) -> None:
+        self.query_one(
+            "#messages"
+        ).anchor()  # stay at the bottom unless the user scrolls up
+        self.query_one("#live").display = False
+        await self.write_messages(self.history)  # restore a resumed conversation
 
-    def say(self, gutter: str, color: str, text: str) -> None:
-        """One chat turn: a coloured gutter, the text wrapping beside it, a blank row before every turn but the first."""
-        if self.turns:
-            self.query_one("#log", RichLog).write("")
-        self.turns += 1
-        if not gutter:  # errors
-            self.query_one("#log", RichLog).write(Text(text, style=color))
-            return
-        grid = Table.grid()
-        grid.add_column(width=2)
-        grid.add_column(ratio=1)
-        grid.add_row(Text(gutter, style=color), Text(text))
-        self.query_one("#log", RichLog).write(grid, expand=True)
+    @property
+    def lines(self) -> list:
+        return [
+            w
+            for w in self.query_one("#messages").children
+            if "turn" in w.classes and w.id != "live"
+        ]
 
-    def write_messages(self, messages: list, users: bool = True) -> None:
-        theme = self.app.current_theme
+    async def add(self, line) -> None:
+        if not self.lines:
+            line.add_class("first")
+            self.query_one("#empty").display = False
+        await self.query_one("#messages").mount(line, before="#live")
+
+    async def write_messages(self, messages: list, users: bool = True) -> None:
+        """Mount a widget per turn. Restoring history and showing a live turn both come through here."""
+        results = {
+            part.tool_call_id: part
+            for m in messages
+            if isinstance(m, ModelRequest)
+            for part in m.parts
+            if isinstance(part, ToolReturnPart)
+        }
         for message in messages:
+            kind = (getattr(message, "metadata", None) or {}).get("hunches")
+            if isinstance(message, ModelRequest) and kind in TURN_KINDS:
+                text = "\n".join(
+                    str(p.content)
+                    for p in message.parts
+                    if isinstance(p, UserPromptPart)
+                )
+                summary = (message.metadata or {}).get("summary") or next(
+                    (ln for ln in text.split("\n") if ln and not ln.startswith("#")),
+                    kind,
+                )
+                await self.add(FoldLine(kind, summary, text, rows=MAX_BODY_ROWS))
+                continue
             for part in message.parts:
                 if isinstance(part, UserPromptPart) and users:
-                    self.say("› ", theme.primary, str(part.content))
+                    await self.add(ChatLine("user", str(part.content)))
                 elif isinstance(part, TextPart):
-                    self.say("│ ", theme.accent or "", part.content)
-                elif isinstance(part, ToolReturnPart):
-                    muted = theme.variables["text-muted"]
-                    self.say("↳ ", muted, f"{part.tool_name} · {part.content}")
+                    await self.add(ChatLine("assistant", part.content))
+                elif isinstance(part, ToolCallPart):
+                    await self.add(tool_line(part, results.get(part.tool_call_id)))
+                    card = self.card_for(part) if self.card_for else None
+                    if card:  # e.g. a proposal card under its tool line
+                        await self.add(card)
+        if not self.empty and not self.lines:
+            self.query_one("#empty").display = False
+
+    def sync_send(self) -> None:
+        self.query_one("#send", Button).disabled = (
+            self.running or not self.query_one("#chat-input", Input).value.strip()
+        )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self.sync_send()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
-        if not text:
-            return
-        event.input.value = ""
-        self.say("› ", self.app.current_theme.primary, text)
-        self.run_worker(self.reply(text), exclusive=True)
+        event.stop()  # the screen hears ChatPanel.Submitted instead
+        self.submit()
 
-    async def reply(self, text: str) -> None:
-        live = self.query_one("#live", Static)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "send":
+            event.stop()
+            self.submit()
+
+    def submit(self) -> None:
+        box = self.query_one("#chat-input", Input)
+        text = box.value.strip()
+        if text and not self.running:
+            box.value = ""
+            self.send(text)
+
+    def send(self, text: str) -> None:
+        """Send `text` as the user's turn (the typed message, or a canned one from a screen button)."""
+        if self.running:
+            return
+        self.post_message(self.Submitted(text))
+        self.run_worker(self.reply(text, show=True), exclusive=True)
+
+    async def reply(self, text: str, show: bool = False) -> None:
+        """One user turn. `show` mounts the user's line first (typed text; tests call reply() directly)."""
+        if show:
+            await self.add(ChatLine("user", text))
+        await self.run_turn(text)
+
+    async def send_context(
+        self, text: str, kind: Literal["context", "update"], summary: str
+    ) -> None:
+        """Tell the agent something with a hidden user prompt; it answers, the chat shows a collapsed line."""
+        await self.run_turn(text, tag={"hunches": kind, "summary": summary})
+
+    def record(self, summary: str, body: str) -> None:
+        """Remember a user edit for the agent's next turn. No model call."""
+        message = files.edit_message(summary, body)
+        self.history.append(message)
+        files.save_chat(self.stage, self.history)
+        self.run_worker(self.write_messages([message]))
+
+    async def run_turn(self, text: str, tag: dict | None = None) -> None:
+        box = self.query_one("#chat-input", Input)
+        had_focus = box.has_focus
+        self.running = True
+        box.disabled = True
+        self.sync_send()
+        self.post_message(self.Changed())
+        live = self.query_one("#live", ChatLine)
+        running: dict[str, FoldLine] = {}
+
+        async def on_events(_, events) -> None:
+            async for event in events:
+                if isinstance(event, FunctionToolCallEvent):
+                    line = tool_line(event.part, None)
+                    running[event.part.tool_call_id] = line
+                    await self.add(line)
+                elif isinstance(event, FunctionToolResultEvent) and isinstance(
+                    event.part, ToolReturnPart
+                ):
+                    call = running.get(event.part.tool_call_id)
+                    if call:
+                        call.set_result(str(event.part.content), "")
+
         try:
             async with self.agent.run_stream(
-                text, message_history=self.history
+                text, message_history=self.history, event_stream_handler=on_events
             ) as result:
                 reply = ""
                 async for delta in result.stream_text(delta=True):
                     reply += delta
-                    live.update(reply)
+                    live.set(reply)
                 usage, new = result.usage, result.new_messages()
-                self.history = result.all_messages()
+                # not all_messages(): it merges the consecutive edit lines before this turn and drops their metadata
+                self.history = [*self.history, *new]
+            if tag:
+                new[0].metadata = tag
         except Exception as e:  # noqa: BLE001  network/auth errors should not kill the app
-            live.update("")
-            self.say("", self.app.current_theme.error or "", f"Error: {e}")
+            live.set("")
+            for line in running.values():
+                await line.remove()
+            await self.add(ChatLine("error", f"Error: {e}"))
             return
-        live.update("")
-        self.write_messages(new, users=False)
+        finally:
+            self.running = False
+            box.disabled = False
+            self.sync_send()
+            self.post_message(self.Changed())
+            if had_focus:
+                box.focus()
+        live.set("")
+        for (
+            line
+        ) in running.values():  # redrawn from the messages, in order, with arguments
+            await line.remove()
+        await self.write_messages(new, users=False)
         files.save_chat(self.stage, self.history)
         model = self.agent.model
         name = model if isinstance(model, str) else getattr(model, "model_name", "?")
@@ -263,6 +669,21 @@ class HunchesApp(App):
 
     stage = 0  # 1-9 once running
     stage_shown = False
+
+    @property
+    def rail(self) -> bool:
+        """True when the terminal is wide enough for the left rail."""
+        return wide(self)
+
+    def on_resize(self) -> None:
+        self.call_later(
+            self.fit_rail
+        )  # App._on_resize stores the new size after this handler
+
+    def fit_rail(self) -> None:
+        for screen in self.screen_stack:
+            for widget in screen.query("StatusHeader, AppFooter"):
+                widget.fit()  # ty: ignore[unresolved-attribute]
 
     def on_mount(self) -> None:
         self.register_theme(HUNCHES)

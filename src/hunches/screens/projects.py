@@ -5,11 +5,12 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Input, Static
+from textual.widgets import Button, DataTable, Input, Static
 
 from hunches import files, system
-from hunches.app import StatusHeader
+from hunches.app import AppFooter, StatusHeader, key_button, modal_box
 from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.paths import PathPicker
 from hunches.screens.project_settings import ProjectSettingsScreen
@@ -39,9 +40,7 @@ class RemoveModal(ModalScreen[str | None]):
     DEFAULT_CSS = """
     RemoveModal > Vertical {
         width: 100%; max-width: 78; height: auto; max-height: 100%;
-        border: round $primary; background: $surface; padding: 0 1;
     }
-    RemoveModal Horizontal { height: auto; }
     """
 
     def __init__(self, name: str) -> None:
@@ -49,15 +48,14 @@ class RemoveModal(ModalScreen[str | None]):
         self.project_name = name
 
     def compose(self) -> ComposeResult:
-        with Vertical() as box:
-            box.border_title = f"Remove {self.project_name}"
+        with modal_box(Vertical(), f"Remove {escape(self.project_name)}"):
             yield Static(
                 "Remove from list keeps every file. Delete project files removes "
                 "only this project's .hunches/ folder: never the corpus, never S3. "
                 "hunches does not run git, so committed history is unaffected.",
                 classes="note",
             )
-            with Horizontal():
+            with Horizontal(classes="buttons"):
                 yield Button("Remove from list", id="remove", compact=True)
                 yield Button("Cancel", id="cancel", compact=True)
             yield Input(
@@ -78,6 +76,13 @@ class RemoveModal(ModalScreen[str | None]):
 
 class ProjectsScreen(Screen):
     stage_name = "Projects"
+    DEFAULT_CSS = """
+    ProjectsScreen .buttons { height: auto; padding: 1 2 0 2; }
+    ProjectsScreen .buttons Button { margin-right: 2; }
+    ProjectsScreen #empty-box { height: 1fr; align: center middle; }
+    ProjectsScreen #empty-box Static { width: auto; color: $text-muted; margin-bottom: 1; }
+    ProjectsScreen #empty-box Button { width: auto; }
+    """
     BINDINGS: ClassVar = [
         ("n", "new", "New"),
         ("e", "edit", "Edit"),
@@ -90,17 +95,46 @@ class ProjectsScreen(Screen):
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         yield Static("", id="banner", classes="banner -warning")
-        yield DataTable(cursor_type="row", zebra_stripes=True)
-        yield Static(
-            "No projects yet. Press n to create one.", id="empty", classes="note"
-        )
-        yield Footer()
+        yield DataTable(cursor_type="row", zebra_stripes=False)
+        with Horizontal(classes="buttons"):
+            yield key_button("New project", "n", id="p-new")
+            yield key_button("Edit", "e", id="p-edit")
+            yield key_button("Remove", "x", id="p-remove")
+            yield key_button("Locate", "l", id="p-locate")
+            yield key_button("Refresh", "r", id="p-refresh")
+        with Vertical(id="empty-box"):
+            yield Static("No projects yet.", id="empty")
+            yield Button("New project", id="empty-new", variant="primary")
+        yield AppFooter()
 
     def on_mount(self) -> None:
         self.refresh_projects()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self.app.open_project(str(event.row_key.value))  # ty: ignore[unresolved-attribute]
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        self.sync_buttons()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        action = {
+            "p-new": self.action_new,
+            "empty-new": self.action_new,
+            "p-edit": self.action_edit,
+            "p-remove": self.action_remove,
+            "p-locate": self.action_locate,
+            "p-refresh": self.action_refresh,
+        }.get(event.button.id or "")
+        if action:
+            action()
+
+    def sync_buttons(self) -> None:
+        """Edit/Remove need a project; Locate only a MISSING DIR / MISSING CORPUS one."""
+        path = self.current()
+        self.query_one("#p-edit", Button).disabled = path is None
+        self.query_one("#p-remove", Button).disabled = path is None
+        status = system.project_status(path)[0] if path else ""
+        self.query_one("#p-locate", Button).disabled = not status.startswith("MISSING")
 
     def current(self) -> str | None:
         """Path of the highlighted project."""
@@ -184,7 +218,7 @@ class ProjectsScreen(Screen):
         problems = 0
         listed = system.projects_by_recent()
         table.display = bool(listed)
-        self.query_one("#empty").display = not listed
+        self.query_one("#empty-box").display = not listed
         for project in listed:
             cells, status, _ = describe(project)
             problems += not status.startswith("OK")
@@ -192,3 +226,4 @@ class ProjectsScreen(Screen):
         banner = self.query_one("#banner", Static)
         banner.update(f"{problems} projects need attention")
         banner.display = bool(problems)
+        self.sync_buttons()

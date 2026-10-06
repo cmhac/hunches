@@ -1,10 +1,12 @@
 import pytest
+from conftest import panel_title
+from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
-from textual.widgets import DataTable, Input, RichLog
+from textual.widgets import Button, Input, Static
 
 from hunches import candidates, files
-from hunches.app import HunchesApp, StatusHeader
-from hunches.screens.brief import BriefScreen
+from hunches.app import ChatPanel, HunchesApp, StatusHeader
+from hunches.screens.brief import BriefScreen, SeedInput
 
 pytestmark = pytest.mark.usefixtures("system_ready")
 
@@ -21,7 +23,7 @@ async def stream(messages, info: AgentInfo):
         }
 
 
-def setup(tmp_path, monkeypatch):
+def setup(tmp_path, monkeypatch, seeds=None):
     monkeypatch.chdir(tmp_path)
     files.write_config(
         files.Config(
@@ -31,16 +33,38 @@ def setup(tmp_path, monkeypatch):
             embedding_model="m",
         )
     )
+    if seeds:
+        from hunches.screens.brief import write_seeds
+
+        write_seeds(seeds)
 
 
-async def test_chat_proposes_seeds_and_edits_persist(tmp_path, monkeypatch):
+def rows(screen) -> list[str]:
+    """Plain text of each seed row's phrase (the input's value on an editor row)."""
+    out = []
+    for row in screen.query("SeedRow"):
+        box = row.query(Input)
+        out.append(
+            box.first().value if box else str(row.query(".text").first().render())
+        )
+    return out
+
+
+def edits(n: int | None = None):
+    return [
+        m
+        for m in files.load_chat("brief")
+        if isinstance(m, ModelRequest) and (m.metadata or {}).get("hunches") == "edit"
+    ]
+
+
+async def test_chat_proposes_seeds_and_brief_md_is_written(tmp_path, monkeypatch):
     setup(tmp_path, monkeypatch)
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, BriefScreen)
-        table = screen.query_one("#seeds", DataTable)
         screen.agent.model = FunctionModel(stream_function=stream)
         box = screen.query_one("#chat-input", Input)
         box.focus()
@@ -51,41 +75,243 @@ async def test_chat_proposes_seeds_and_edits_persist(tmp_path, monkeypatch):
         await pilot.pause()
         assert files.read_text("brief.md") == "Find posts about job loss\n"
         assert candidates.read_seeds() == ["Mentions a layoff", "Describes burnout"]
-        assert table.row_count == 2
+        assert rows(screen) == ["Mentions a layoff", "Describes burnout"]
         assert files.load_chat("brief")
+        # the agent's own tool call is in history and is not repeated as an edit line
+        assert edits() == []
 
-        table.focus()
-        await pilot.press("d")  # delete first row
+
+async def test_edit_flow_save_and_discard(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch, ["alpha", "beta"])
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        assert candidates.read_seeds() == ["Describes burnout"]
-        await pilot.press("a")
-        await pilot.press(*"New, seed", "enter")
-        await pilot.pause()
-        assert candidates.read_seeds() == ["Describes burnout", "New, seed"]
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.query_one("#seed-list").focus()
+        await pilot.press("down")  # cursor on seed 2
         await pilot.press("e")
-        screen.query_one("#seed-input", Input).value = "Edited"
+        await pilot.pause()
+        box = screen.query_one(SeedInput)
+        assert box.value == "beta" and box.has_focus
+        assert str(screen.query_one("#editor-title").render()) == "Editing seed 2"
+        assert "was: beta" in str(screen.query_one("#was").render())
+        assert not screen.query_one("#unsaved").display
+        assert screen.query_one("#save", Button).disabled  # unchanged
+        assert not screen.query_one("#seed-buttons").display  # Approve etc. hidden
+        # other rows are dimmed
+        assert screen.query("SeedRow").first().has_class("-dim")
+
+        await pilot.press("x")
+        await pilot.pause()
+        assert screen.query_one("#unsaved").display
+        assert "UNSAVED" in str(screen.query_one("#unsaved").render())
+        assert not screen.query_one("#save", Button).disabled
+        assert candidates.read_seeds() == ["alpha", "beta"]  # nothing written yet
+
+        box.value = ""
+        await pilot.pause()
+        assert screen.query_one("#save", Button).disabled  # empty
+
+        # Esc discards: nothing written, nothing recorded
+        box.value = "betax"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert candidates.read_seeds() == ["alpha", "beta"]
+        assert rows(screen) == ["alpha", "beta"]
+        assert not screen.query(SeedInput)
+        assert screen.query_one("#seed-buttons").display
+        assert edits() == []
+
+        # edit again and save with Enter
+        await pilot.press("e")
+        await pilot.pause()
+        screen.query_one(SeedInput).value = "beta two"
+        await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-        assert candidates.read_seeds() == ["Edited", "New, seed"]
+        assert candidates.read_seeds() == ["alpha", "beta two"]
+        assert rows(screen) == ["alpha", "beta two"]
+        saved = edits()
+        assert len(saved) == 1
+        assert saved[0].metadata["summary"] == "Seed 2 edited"
+        text = str(saved[0].parts[0].content)
+        assert "was: beta" in text and "now: beta two" in text
+        assert "# Current seeds\n1. alpha\n2. beta two" in text
 
 
-async def test_approve_requires_seeds_then_sets_flag(tmp_path, monkeypatch):
+async def test_add_flow(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch, ["alpha"])
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.query_one("#seed-list").focus()
+        await pilot.press("a")
+        await pilot.pause()
+        assert rows(screen) == ["alpha", ""]
+        assert screen.query_one(SeedInput).has_focus
+        assert str(screen.query_one("#editor-title").render()) == "New seed"
+        assert "Add" in str(screen.query_one("#save", Button).label)
+        assert screen.query_one("#save", Button).disabled
+        await pilot.press("e", "w")  # typed into the input, not bindings
+        await pilot.pause()
+        assert not screen.query_one("#save", Button).disabled
+        assert candidates.read_seeds() == ["alpha"]
+
+        await pilot.press("escape")  # Discard removes the row
+        await pilot.pause()
+        assert rows(screen) == ["alpha"]
+        assert candidates.read_seeds() == ["alpha"]
+        assert edits() == []
+
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.press(*"New, seed", "enter")
+        await pilot.pause()
+        assert candidates.read_seeds() == ["alpha", "New, seed"]
+        assert rows(screen) == ["alpha", "New, seed"]
+        saved = edits()
+        assert len(saved) == 1
+        assert saved[0].metadata["summary"] == "Seed added"
+        text = str(saved[0].parts[0].content)
+        assert "+ 2  New, seed" in text
+        assert "# Current seeds\n1. alpha\n2. New, seed" in text
+
+
+async def test_delete_records_edit_with_no_model_call(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch, ["alpha", "beta", "gamma"])
+    calls = []
+
+    async def counting(messages, info):
+        calls.append(1)
+        yield "x"
+
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.agent.model = FunctionModel(stream_function=counting)
+        screen.query_one("#seed-list").focus()
+        await pilot.press("down", "d")
+        await pilot.pause()
+        assert candidates.read_seeds() == ["alpha", "gamma"]
+        assert rows(screen) == ["alpha", "gamma"]
+        saved = edits()
+        assert len(saved) == 1 and calls == []
+        assert saved[0].metadata["summary"] == "Seed 2 deleted"
+        text = str(saved[0].parts[0].content)
+        assert "- 2  beta" in text and "# Current seeds\n1. alpha\n2. gamma" in text
+        # Delete button works too
+        await pilot.click("#delete")
+        await pilot.pause()
+        assert len(candidates.read_seeds()) == 1
+
+
+async def test_buttons_follow_seeds_and_approve_confirm_text(tmp_path, monkeypatch):
     setup(tmp_path, monkeypatch)
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        assert not screen.query_one("#add", Button).disabled
+        for bid in ("#edit", "#delete", "#approve"):
+            assert screen.query_one(bid, Button).disabled
+        labels = [
+            str(screen.query_one(b, Button).label)
+            for b in ("#add", "#edit", "#delete", "#approve")
+        ]
+        assert labels == ["Add seed  a", "Edit  e", "Delete  d", "Approve seeds  F2"]
+        # the guard stays: F2 with no seeds does nothing, silently
         await pilot.press("f2")
         await pilot.pause()
         assert not files.read_state().seeds_approved
         assert type(app.screen).__name__ == "BriefScreen"
-        assert isinstance(app.screen, BriefScreen)
-        app.screen.add_seeds(["A seed"])
-        await pilot.press("f2")
+        assert not screen.query("#status")
+
+        screen.add_seeds(["A seed", "B seed"])
         await pilot.pause()
+        for bid in ("#edit", "#delete", "#approve"):
+            assert not screen.query_one(bid, Button).disabled
+        await pilot.click("#approve")
+        await pilot.pause()
+        question = str(app.screen.query_one("ConfirmScreen Label").render())
+        assert question == "Approve 2 seeds and start searching?"
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().seeds_approved
         assert app.stage == 2
+
+
+async def test_f2_while_editing_does_nothing(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch, ["alpha"])
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.query_one("#seed-list").focus()
+        await pilot.press("e")
+        await pilot.pause()
+        screen.action_approve()
+        await pilot.pause()
+        assert type(app.screen).__name__ == "BriefScreen"
+        assert not files.read_state().seeds_approved
+
+
+async def test_agent_append_mid_edit_keeps_draft_and_index(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch, ["alpha", "beta"])
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.query_one("#seed-list").focus()
+        await pilot.press("e")
+        await pilot.pause()
+        screen.query_one(SeedInput).value = "alpha draft"
+        await pilot.pause()
+        screen.add_seeds(["gamma"])  # what propose_seeds does
+        await pilot.pause()
+        assert candidates.read_seeds() == ["alpha", "beta", "gamma"]
+        box = screen.query_one(SeedInput)
+        assert box.value == "alpha draft" and box.seed_index == 0
+        assert rows(screen) == ["alpha draft", "beta", "gamma"]
+        assert box.has_focus
+        assert edits() == []  # appended silently
+        await pilot.press("enter")
+        await pilot.pause()
+        assert candidates.read_seeds() == ["alpha draft", "beta", "gamma"]
+
+
+async def test_dynamic_instructions_carry_current_seeds(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch, ["alpha", "beta"])
+    seen: list[str | None] = []
+
+    async def spy(messages, info: AgentInfo):
+        seen.append(info.instructions)
+        yield "ok"
+
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.agent.model = FunctionModel(stream_function=spy)
+        # a change made in the screen, not yet in a message the model has seen
+        screen.seeds.append("gamma")
+        box = screen.query_one("#chat-input", Input)
+        box.focus()
+        box.value = "hi"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        await app.workers.wait_for_complete()
+        assert len(seen) == 1 and seen[0]
+        assert "1. alpha\n2. beta\n3. gamma" in seen[0]
+        assert "propose_seeds" in seen[0]  # the static text is still there
 
 
 async def test_resume_restores_chat_and_seeds(tmp_path, monkeypatch):
@@ -105,39 +331,66 @@ async def test_resume_restores_chat_and_seeds(tmp_path, monkeypatch):
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        assert app.screen.query_one("#seeds", DataTable).row_count == 2
-        log = app.screen.query_one("#log", RichLog)
-        assert any("hello" in str(line.text) for line in log.lines)
+        assert rows(app.screen) == ["Mentions a layoff", "Describes burnout"]
+        panel = app.screen.query_one(ChatPanel)
+        assert [(line.kind, line.text) for line in panel.lines] == [
+            ("user", "hello"),
+            ("tool", "propose_seeds Added 2 seeds."),
+            ("assistant", "Done."),
+        ]
         assert app.screen.query_one(StatusHeader)
 
 
-async def test_redesigned_layout_titles_empty_state_and_warning(tmp_path, monkeypatch):
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (120, 36)])
+async def test_layout_titles_empty_states_and_buttons_fit(tmp_path, monkeypatch, size):
     setup(tmp_path, monkeypatch)
     app = HunchesApp()
-    async with app.run_test(size=(80, 24)) as pilot:
+    async with app.run_test(size=size) as pilot:
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, BriefScreen)
         pane = screen.query_one("#seeds-pane")
-        assert pane.border_title == "seeds.csv · 0"
-        assert screen.query_one("ChatPanel").border_title == "chat · brief"
-        empty = screen.query_one("#empty")
+        assert panel_title(pane) == ("Seeds", "0 seeds")
+        assert panel_title(screen.query_one("ChatPanel"))[0] == "chat · brief"
+        chat_empty = screen.query_one("ChatPanel #empty")
+        assert str(chat_empty.render()) == (
+            "Describe what concepts you want to search for and the assistant "
+            "will help you generate seed phrases"
+        )
+        empty = screen.query_one("#empty-seeds")
         assert empty.display
         assert "No seeds yet. Describe what to find in the chat" in str(empty.render())
-        assert not screen.query_one("#seeds").display
-        # two equal columns
-        assert screen.query_one("ChatPanel").size.width == pane.size.width
+        assert not screen.query_one("#seed-list").display
 
-        await pilot.press("f2")
+        screen.add_seeds(["A"])
         await pilot.pause()
-        status = screen.query_one("#status")
-        assert str(status.render()) == "Add at least one seed first."
-        assert status.has_class("warn")
+        assert panel_title(pane)[1] == "1 seed"
+        screen.add_seeds(["B"])
+        await pilot.pause()
+        assert panel_title(pane)[1] == "2 seeds"
+        assert not empty.display and screen.query_one("#seed-list").display
+        # every button sits inside the seeds panel
+        for bid in ("#add", "#edit", "#delete", "#approve"):
+            button = screen.query_one(bid, Button)
+            assert pane.region.contains_region(button.region), (bid, size)
+        screen.query_one("#seed-list").focus()
+        await pilot.pause()
+        assert pane.has_pseudo_class("focus-within")
 
-        screen.add_seeds(["A", "B"])
+        # editor box fits too
+        await pilot.press("e")
         await pilot.pause()
-        assert pane.border_title == "seeds.csv · 2"
-        assert not empty.display and screen.query_one("#seeds").display
-        screen.query_one("#seeds", DataTable).focus()
+        for bid in ("#save", "#discard"):
+            assert pane.region.contains_region(screen.query_one(bid).region), size
+        assert pane.region.contains_region(screen.query_one("#was").region)
+
+
+async def test_removed_pieces_are_gone(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch, ["alpha"])
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        assert pane.has_pseudo_class("focus-within")  # focus colours the panel border
+        screen = app.screen
+        assert not screen.query("#seed-input")
+        assert not screen.query("#status")
+        assert not any("seeds.csv" in str(s.render()) for s in screen.query(Static))

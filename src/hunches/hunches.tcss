@@ -7,48 +7,95 @@ StatusHeader {
     background: $panel; color: $foreground;
 }
 StatusHeader.-cost-unknown { background: $warning 20%; }
+/* From 100 columns the header is a left rail: it docks left and the content column sits beside it */
+StatusHeader.-rail { dock: left; width: 26; height: 100%; padding: 0; background: $surface; }
+StatusHeader.-rail.-cost-unknown { background: $surface; }
 
-/* Bordered regions. Titles name the file or thing shown: "seeds.csv · 14". */
-.panel {
-    border: round $border-blurred;
-    border-title-color: $text-muted;
-    border-title-style: bold;
-    border-subtitle-color: $text-muted;
-    padding: 0 1;
-}
-.panel:focus-within, .panel.-focused { border: round $border; border-title-color: $primary; }
+/* Panels: no border, tinted, a one-row title (PanelTitle) first. Focus is a left bar. */
+.panel { background: $surface; padding: 0 1; }
+.panel:focus-within, .panel.-focused { border-left: outer $primary; }
+/* A one-column gutter only between side-by-side panels, never after the last one */
+Horizontal > .panel { margin-right: 1; }
+Horizontal > .panel:last-child { margin-right: 0; }
+BrowseScreen.-narrow #main > .panel { margin-right: 0; }  /* stacked, not side by side */
+PanelTitle { height: 1; width: 1fr; }
+.panel-title { width: 1fr; height: 1; text-style: bold; color: #EEF1F5; text-wrap: nowrap; text-overflow: ellipsis; }
+.panel-subtitle { width: auto; height: 1; color: $text-muted; text-wrap: nowrap; }
+.panel:focus-within > PanelTitle > .panel-title, .panel.-focused > PanelTitle > .panel-title { color: $primary; }
 
 /* One-line messages under a panel. Always prefixed with a word, never colour alone. */
 .note    { height: auto; color: $text-muted; }
 .warn    { height: auto; color: $warning; }
 .error   { height: auto; color: $error; }
 .ok      { height: auto; color: $success; }
-.banner  { height: auto; padding: 0 1; text-style: bold; }
-.banner.-stale   { background: $error 25%; color: $error; }
+.banner  { height: auto; padding: 0 2; text-style: bold; border-left: outer $warning; }
+.banner.-stale   { background: $error 25%; color: $error; border-left: outer $error; }
 .banner.-warning { background: $warning 20%; color: $warning; }
+
+/* A "not ready" message fills the content area; the footer stays below. */
+.not-ready { width: 1fr; height: 1fr; content-align: center middle; text-align: center; color: $warning; }
 
 /* Badges: PASS FAIL STALE DIFFERS, reverse-video words */
 .badge         { width: auto; padding: 0 1; text-style: bold; }
 .badge.-pass   { background: $success; color: $background; }
 .badge.-fail   { background: $error; color: $background; }
 .badge.-stale  { background: $warning; color: $background; }
+.badge.-info   { background: $secondary; color: $background; }
 
-DataTable { background: $background; }
-DataTable > .datatable--header { background: $surface; color: $text-muted; text-style: bold; }
+Rule { color: $text-disabled; }
 
-ChatPanel RichLog { background: $background; padding: 0 1; }
-ChatPanel #live   { color: $accent; padding: 0 1; }
-ChatPanel Input   { border: tall $border-blurred; }
-ChatPanel Input:focus { border: tall $border; }
+DataTable { background: transparent; }
+DataTable > .datatable--header { background: transparent; color: $text-muted; text-style: none; }
+DataTable > .datatable--cursor { background: $panel; color: #EEF1F5; text-style: bold; }
+DataTable:focus > .datatable--cursor { background: $boost; }
+DataTable > .datatable--even-row, DataTable > .datatable--odd-row { background: transparent; }
+
+/* One-row inputs and selects: tinted strip, a left bar that turns primary on focus */
+Input { border: none; border-left: outer $panel; background: $panel; height: 1; padding: 0 1; }
+Input:focus { border: none; border-left: outer $primary; background: $boost; }
+Select > SelectCurrent { border: none; background: $panel; height: 1; }
+Select:focus > SelectCurrent { border: none; background: $boost; }
+
+/* Buttons: one row, filled, bold, no border. Disabled is a flat panel, not just dimmed. */
+Button { height: 1; min-width: 0; border: none; text-style: bold; background: $boost; color: #EEF1F5; }
+Button:hover:enabled { background-tint: $foreground 8%; }
+Button:focus { text-style: bold reverse; }
+Button.-primary { background: $primary; color: $background; }
+Button.-success { background: $success; color: $background; }
+Button.-error   { background: $error; color: $background; }
+Button:disabled, Button.-primary:disabled, Button.-success:disabled, Button.-error:disabled {
+    background: $panel; color: $text-disabled; text-style: bold; text-opacity: 1;
+}
+
+FooterKey .footer-key--key { background: $boost; color: #EEF1F5; text-style: bold; }
+
+ChatPanel #messages { background: $background; }
+ChatPanel #empty { color: $text-muted; padding: 0 2; }
+ChatLine .gutter { width: 2; }
+ChatLine .body { width: 1fr; }
+.chat-user .gutter { color: $primary; }
+.chat-user .body { color: #EEF1F5; }
+.chat-assistant .gutter { color: $accent; }
+.chat-error .body { color: $error; }
+FoldLine .head { height: 1; color: $text-muted; }
+FoldLine .head > Static { height: 1; width: auto; }
+FoldLine .gutter { width: 2; }
+FoldLine .name { color: $text; margin-right: 1; }
+FoldLine .badge { margin-right: 1; }
+FoldLine .summary { width: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }
+FoldLine .toggle { margin-left: 1; color: $text-disabled; }
+FoldLine .detail { margin-left: 2; padding: 0 1; background: $boost; color: $text-muted; height: auto; }
+ChatPanel #chat-input { width: 1fr; }
+ChatPanel #send { width: 3; margin-left: 1; }
 
 ModalScreen { background: $background 70%; align: center middle; }
-ConfirmScreen > Vertical {
-    width: 58; height: auto; max-height: 90%;
-    border: round $primary; background: $surface; padding: 1 2;
-}
-ConfirmScreen Horizontal { height: auto; align-horizontal: right; }
-
-PathPicker > Vertical { border: round $primary; background: $surface; }
+/* Modals (ConfirmScreen, RemoveModal, RecommendationModal, ModelPicker, PathPicker, ProposalScreen) */
+.modal-box { background: $surface; border: none; border-left: outer $primary; padding: 1 2; }
+.modal-box > PanelTitle > .panel-title { color: $primary; }
+.modal-box .buttons { height: auto; align-horizontal: right; }
+ConfirmScreen > Vertical { width: 58; height: auto; max-height: 90%; }
+ConfirmScreen Label { width: 100%; }
+ProposalScreen > .modal-box { padding: 0 1; }
 PathPicker DirTree { background: $surface; }
 
 Footer { background: $footer-background; }
@@ -67,3 +114,15 @@ SelectionList { border: none; padding: 0; background: $background; }
 
 ProgressBar { width: 1fr; }
 ProgressBar Bar { width: 1fr; }
+
+/* Markdown (the Taxonomy prompt view): primary h1, bold h2, faint bullets, no tint or side padding */
+Markdown { padding: 0; background: transparent; }
+MarkdownHeader { margin: 1 0 0 0; background: transparent; content-align: left top; }
+Markdown > MarkdownHeader:first-child { margin-top: 0; }
+MarkdownH1 { color: $primary; text-style: bold; }
+MarkdownH2 { color: #EEF1F5; text-style: bold; }
+MarkdownBullet { color: $text-disabled; }
+MarkdownBulletList { margin: 0; }
+
+/* Gold: the item sits on the page background, with the focus bar */
+GoldScreen #item { background: $background; }

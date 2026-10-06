@@ -6,13 +6,14 @@ from typing import ClassVar
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Input, Static
+from textual.widgets import Button, DataTable, Static
 
 from hunches import candidates, cost, files
-from hunches.app import StatusHeader, panel
+from hunches.app import AppFooter, StatusHeader, key_button, panel, say
 from hunches.classifier import classify_many
+from hunches.screens.progress import RunIndicator, eta_text
 
 SAMPLE = "threshold_sample.json"
 PER_BAND = 30
@@ -65,14 +66,23 @@ def rate_text(row: dict) -> str:
 
 
 class ThresholdScreen(Screen):
-    """Stage 7: off-topic rate per similarity band; the user picks the cutoff."""
+    """Stage 7: off-topic rate per similarity band; the user chooses a band's lower bound as the cutoff."""
 
-    BINDINGS: ClassVar = [("f2", "save", "Save cutoff")]
+    BINDINGS: ClassVar = [
+        ("enter", "noop", "Choose band"),
+        ("f2", "save", "Save cutoff"),
+        ("x", "stop", "Stop"),
+        ("s", "start", "Resume"),
+    ]
     AUTO_FOCUS = "#bands"
     DEFAULT_CSS = """
     ThresholdScreen #explain, ThresholdScreen #note { height: auto; }
     ThresholdScreen #bands-panel { height: auto; }
     ThresholdScreen #bands { height: auto; }
+    ThresholdScreen #pick { height: 3; align: center middle; }
+    ThresholdScreen #cutoff-line { width: auto; margin-right: 2; }
+    ThresholdScreen #cutoff-line.-chosen { text-style: bold; }
+    ThresholdScreen #cutoff-line.-none { color: $text-muted; }
     """
 
     def __init__(self) -> None:
@@ -83,6 +93,10 @@ class ThresholdScreen(Screen):
         self.progress: tuple[int, int] | None = None  # (sampled, total) while running
         self.ids: list[list[str]] = []
         self.predictions: dict[str, list[str] | None] = {}
+        self.running = self.stopped = False
+        self.worker = None
+        self.chosen: int | None = None  # index into candidates.BANDS
+        self.saved: float | None = None  # threshold.json value that is not a band edge
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
@@ -90,13 +104,13 @@ class ThresholdScreen(Screen):
             yield Static(
                 "Finish stage 3 (taxonomy and prompt) first.",
                 id="not-ready",
-                classes="warn",
+                classes="not-ready",
             )
-            yield Footer()
+            yield AppFooter()
             return
         yield Static(
             "Off-topic = predicted exactly {off_topic}. Small samples are noisy; mind n. "
-            "Enter on a row picks its lower bound.",
+            "Enter on a row chooses its lower bound as the cutoff.",
             id="explain",
             classes="note",
             markup=False,
@@ -106,9 +120,12 @@ class ThresholdScreen(Screen):
             f"off-topic rate by band · {files.read_config().classifier_model}",
         ):
             yield DataTable(id="bands", cursor_type="row")
-        yield Input(placeholder="cutoff, e.g. 0.65 (F2 saves)", id="cutoff")
+        with Horizontal(id="pick"):
+            yield Static("", id="cutoff-line", markup=False)
+            yield key_button("Save cutoff", "F2", id="save", variant="primary")
         yield Static("", id="note", markup=False)
-        yield Footer()
+        yield RunIndicator()
+        yield AppFooter()
 
     def on_mount(self) -> None:
         if not self.ready:
@@ -118,17 +135,25 @@ class ThresholdScreen(Screen):
         for name in ("Candidates", "Sampled", "Off-topic rate"):
             table.add_column(Text(name, justify="right"))
         table.add_column(Text("Cumulative ≥ lower", justify="right"), width=20)
+        indicator = self.query_one(RunIndicator)
+        indicator.set_title("Sampling each similarity band")
         self.ids = sample_bands(self.cands)
         saved = json.loads(files.read_text(SAMPLE) or "{}")
         self.predictions = saved.get("predictions", {})
+        previous = json.loads(files.read_text("threshold.json") or "{}")
+        if "threshold" in previous:
+            if previous["threshold"] in candidates.BANDS:
+                self.chosen = candidates.BANDS.index(previous["threshold"])
+            else:
+                self.saved = previous["threshold"]
         self.show()
-        if any(x not in self.predictions for band in self.ids for x in band):
-            self.run_worker(self.run_sample(), exclusive=True)
+        self.action_start()
 
     def show(self) -> None:
         table = self.query_one("#bands", DataTable)
+        row = table.cursor_row
         table.clear()
-        for r in band_rows(self.cands, self.ids, self.predictions):
+        for i, r in enumerate(band_rows(self.cands, self.ids, self.predictions)):
             label = (
                 f"{r['lower']:.3f}+"
                 if r["lower"] == candidates.BANDS[-1]
@@ -136,35 +161,72 @@ class ThresholdScreen(Screen):
             )
             right = lambda v: Text(v, justify="right")
             table.add_row(
-                label,
+                ("● " if i == self.chosen else "  ") + label,
                 right(f"{r['candidates']:,}"),
                 right(f"{r['sampled']:,}"),
                 right(rate_text(r)),
                 right(f"{r['cumulative']:,}"),
             )
-        self.query_one("#bands-panel").border_subtitle = (
-            f"sampling {self.progress[0]}/{self.progress[1]}" if self.progress else ""
-        )
+        table.move_cursor(row=row)
+        busy = self.running or self.stopped
+        self.query_one("#bands-panel").display = not busy
+        self.query_one("#pick").display = not busy
+        self.query_one(RunIndicator).display = busy
+        if self.chosen is not None:
+            line = f"Cutoff {candidates.BANDS[self.chosen]:.3f}"
+            mode = "-chosen"
+        elif self.saved is not None:
+            line, mode = f"Saved cutoff {self.saved}", "-none"
+        else:
+            line, mode = "No cutoff chosen", "-none"
+        cutoff = self.query_one("#cutoff-line", Static)
+        cutoff.update(line)
+        cutoff.set_classes(mode)
+        self.query_one("#save", Button).disabled = self.chosen is None
         note = self.query_one("#note", Static)
-        note.update(self.note)
-        note.set_classes(
-            "note"
-            if self.note.startswith("Sampled")
-            else "error"
-            if "failed:" in self.note
-            else "warn"
-        )
+        say(note, self.note)
+        note.set_classes("error" if "failed:" in self.note else "note")
 
-    async def run_sample(self) -> None:
+    def action_start(self) -> None:
+        todo = [x for band in self.ids for x in band if x not in self.predictions]
+        if not self.ready or self.running or not todo:
+            return
+        self.running, self.stopped = True, False
+        self.note = ""
+        self.worker = self.run_worker(self.run_sample(todo), exclusive=True)
+
+    def action_stop(self) -> None:
+        if self.worker is not None and self.running:
+            self.worker.cancel()
+
+    def action_noop(self) -> None:
+        """Enter is handled by the table; the binding only labels it in the footer."""
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save":
+            self.action_save()
+        elif "Stop" in str(event.button.label):
+            self.action_stop()
+        else:
+            self.action_start()
+
+    async def run_sample(self, todo: list[str]) -> None:
         """Classify the sampled items that have no stored prediction; persist as they finish."""
+        indicator = self.query_one(RunIndicator)
         taxonomy = files.read_taxonomy()
         prompt = files.read_text("prompt.md") or ""
         by_id = {c["id"]: c["text"] for c in self.cands}
-        todo = [x for band in self.ids for x in band if x not in self.predictions]
         before = cost.total()[0]
         start = time.monotonic()
         total = sum(len(band) for band in self.ids)
         self.progress = (total - len(todo), total)
+        live = 0
+        finished = False
+        indicator.set_button("stop")
+        indicator.set_progress(
+            self.progress[0], total, detail=f"{PER_BAND} items per band"
+        )
+        self.show()
         try:
             async for i, p in classify_many(
                 [by_id[x] for x in todo],
@@ -172,6 +234,7 @@ class ThresholdScreen(Screen):
                 taxonomy,
                 files.read_config().classifier_model,
             ):
+                live += not p.cached
                 if (
                     p.labels is not None
                 ):  # failures stay unclassified and are retried next time
@@ -181,33 +244,42 @@ class ThresholdScreen(Screen):
                         json.dumps({"ids": self.ids, "predictions": self.predictions}),
                     )
                     self.progress = (len(self.predictions), total)
-                self.show()
+                    indicator.set_progress(
+                        len(self.predictions),
+                        total,
+                        eta_text(
+                            len(self.predictions),
+                            total,
+                            live,
+                            time.monotonic() - start,
+                        ),
+                        f"{PER_BAND} items per band",
+                    )
+            finished = True
+            after, unknown = cost.total()
+            spent = "?" if unknown else f"${after - before:.4f}"
+            self.note = f"Sampled {len(todo)} items in {time.monotonic() - start:.1f}s, cost {spent}."
         except Exception as e:  # noqa: BLE001  auth/network errors must not kill the app
+            finished = (
+                True  # failed, not stopped: the panel shows with finished rows kept
+            )
             self.note = f"Sampling failed: {e}"
+        finally:
+            self.running = False
+            self.stopped = not finished
             self.progress = None
-            self.show()
-            return
-        after, unknown = cost.total()
-        spent = "?" if unknown else f"${after - before:.4f}"
-        self.note = f"Sampled {len(todo)} items in {time.monotonic() - start:.1f}s, cost {spent}."
-        self.progress = None
-        self.show()
+            if self.is_attached:  # a stage switch can remove the screen mid-run
+                indicator.set_button("resume" if self.stopped else None)
+                self.show()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        self.query_one("#cutoff", Input).value = str(candidates.BANDS[event.cursor_row])
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.action_save()
+        self.chosen = event.cursor_row
+        self.show()
 
     def action_save(self) -> None:
-        if not self.ready:
+        if not self.ready or self.chosen is None:
             return
-        try:
-            cutoff = float(self.query_one("#cutoff", Input).value)
-        except ValueError:
-            self.note = "Enter a number or pick a band with Enter."
-            self.show()
-            return
+        cutoff = candidates.BANDS[self.chosen]
         # the key is `threshold`, as files.first_incomplete_stage expects (the spec calls it cutoff)
         files.write_text(
             "threshold.json",

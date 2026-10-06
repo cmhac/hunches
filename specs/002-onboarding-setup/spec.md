@@ -1,5 +1,7 @@
 # 002 — System setup, projects and onboarding
 
+> 003 (TUI redesign) changes parts of this spec: see "Behaviour that changes in 001 and 002" in `../003-tui-redesign/spec.md`. The text below is kept as written.
+
 Status: draft for implementation. Builds on `../001-initial-version/spec.md`, which is implemented (stages 1–9, `app.py`, `files.py`, …). Source: the author's notes (kept verbatim at the bottom), refined in review with the author. Read 001 first; where this spec changes 001 behaviour it says so under "Changes to 001".
 
 ## Principles

@@ -4,31 +4,27 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.markup import escape
 from textual.screen import Screen
-from textual.widgets import Footer, ProgressBar, Static
+from textual.widgets import Button, Static
 
 from hunches import cost, files
-from hunches.app import StatusHeader, panel
+from hunches.app import AppFooter, StatusHeader
 from hunches.classifier import classify_many
 from hunches.screens.final import RESULT, prompt_hash
+from hunches.screens.progress import RunIndicator, eta_text, seconds_text
+
+
+def above_threshold() -> list[dict]:
+    cutoff = json.loads(files.read_text("threshold.json") or "{}")["threshold"]
+    return [
+        c for c in files.read_jsonl("candidates.jsonl") if c["max_similarity"] >= cutoff
+    ]
 
 
 def pending() -> list[dict]:
     """Candidates at or above the threshold with no successful row in results.jsonl yet."""
-    cutoff = json.loads(files.read_text("threshold.json") or "{}")["threshold"]
     done = {r["id"] for r in files.read_jsonl("results.jsonl") if "error" not in r}
-    return [
-        c
-        for c in files.read_jsonl("candidates.jsonl")
-        if c["max_similarity"] >= cutoff and c["id"] not in done
-    ]
-
-
-def seconds_text(seconds: float) -> str:
-    minutes, secs = divmod(round(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{secs:02d}s"
+    return [c for c in above_threshold() if c["id"] not in done]
 
 
 def estimate(n: int, model: str) -> str:
@@ -49,14 +45,30 @@ def estimate(n: int, model: str) -> str:
     return f"{n} items to classify; time {time_text}; cost {cost_text}"
 
 
+BLOCKED = (
+    "Cannot start: prompt.md differs from the tested prompt (or was never tested). "
+    "Run the dev set in the Tuning loop with this prompt first."
+)
+TITLES = {
+    "idle": "Ready to classify",
+    "running": "Classifying candidates",
+    "complete": "Complete",
+    "stopped": "Stopped",
+    "failed": "Run failed",
+}
+BUTTON = {"idle": "start", "running": "stop", "stopped": "resume", "failed": "resume"}
+
+
 class RunScreen(Screen):
     """Stage 8: classify every candidate at or above the threshold; resumable."""
 
     BINDINGS: ClassVar = [("s", "start", "Start/resume"), ("x", "stop", "Stop")]
     DEFAULT_CSS = """
-    RunScreen Static { height: auto; }
-    RunScreen #estimate-panel { height: auto; }
-    RunScreen #run-panel { height: 1fr; }
+    RunScreen RunIndicator { height: 1fr; }
+    RunScreen #blocked { height: 1fr; align: center middle; }
+    RunScreen #blocked > * { width: auto; max-width: 60; margin-bottom: 1; }
+    RunScreen #blocked-text { text-align: center; }
+    RunScreen #go-tuning { margin-bottom: 0; }
     """
 
     def __init__(self) -> None:
@@ -68,77 +80,105 @@ class RunScreen(Screen):
         self.model = files.read_config().classifier_model if self.ready else ""
         self.running = False
         self.started = False
-        self.warned = False
-        self.errors: list[str] = []
+        self.failure = ""
+        self.worker = None
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         if not self.ready:
-            yield Static("Finish stages 3 and 7 first.", id="not-ready", classes="warn")
-            yield Footer()
+            yield Static(
+                "Finish stages 3 and 7 first.", id="not-ready", classes="not-ready"
+            )
+            yield AppFooter()
             return
-        with panel(Vertical(id="estimate-panel"), "estimate"):
-            yield Static("", id="estimate", markup=False)
-        yield Static("", id="warn", classes="banner -warning", markup=False)
-        with panel(Vertical(id="run-panel", classes="-focused"), "run · results.jsonl"):
-            yield ProgressBar(total=1, id="progress")
-            yield Static("", id="live", markup=False)
-            yield Static("", id="errors")
-        yield Footer()
+        yield RunIndicator()
+        with Vertical(id="blocked"):
+            yield Static(
+                BLOCKED, id="blocked-text", classes="banner -stale", markup=False
+            )
+            yield Button("Go to Tuning loop", id="go-tuning", variant="primary")
+        yield AppFooter()
 
     def on_mount(self) -> None:
         if self.ready:
-            self.query_one("#warn").display = False
-            self.show_estimate()
+            self.show()
 
-    def show_estimate(self) -> None:
+    def blocked(self) -> bool:
+        """True unless test_result.json records the current prompt and classifier model."""
+        tested = json.loads(files.read_text(RESULT) or "{}").get("prompt_hash")
+        return tested != prompt_hash()
+
+    def state(self, todo: list[dict]) -> str:
+        if self.running:
+            return "running"
+        if self.failure:
+            return "failed"
+        if not todo:
+            return "complete"
+        resumable = self.started or files.read_jsonl("results.jsonl")
+        return "stopped" if resumable else "idle"
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action not in ("start", "stop"):
+            return True
+        if not self.ready or self.blocked():
+            return False
+        if action == "stop":
+            return self.running
+        return not self.running and bool(pending())
+
+    def show(self) -> None:
+        blocked = self.blocked()
+        indicator = self.query_one(RunIndicator)
+        indicator.display = not blocked
+        self.query_one("#blocked").display = blocked
         todo = pending()
-        text = (
-            estimate(len(todo), self.model)
-            if todo
-            else "Nothing to classify; every candidate at or above the threshold is done."
-        )
-        self.query_one("#estimate", Static).update(text)
-        self.query_one("#errors", Static).update(
-            "\n[b $warning]Failed (retried next run):[/]\n"
-            + "\n".join(f"[$text-muted]{escape(e)}[/]" for e in self.errors[-10:])
-            if self.errors
-            else ""
-        )
-        self.query_one("#run-panel").border_subtitle = (
-            "running"
-            if self.running
-            else "complete"
-            if not todo
-            else "stopped · resumable"
-            if self.started or files.read_jsonl("results.jsonl")
-            else "not started"
-        )
+        total = len(above_threshold())
+        state = self.state(todo)
+        failed = sum("error" in r for r in files.read_jsonl("results.jsonl"))
+        indicator.set_title(TITLES[state])
+        indicator.set_progress(total - len(todo), total)
+        indicator.set_button(None if blocked else BUTTON.get(state))
+        if state == "idle":
+            indicator.set_status(estimate(len(todo), self.model))
+        elif state == "failed":
+            indicator.set_status(self.failure, "error")
+        elif state == "complete":
+            indicator.set_status(
+                "Nothing to classify; every candidate at or above the threshold is done."
+            )
+        elif state == "stopped" and failed:
+            indicator.set_status(
+                f"{failed} items failed and are retried on the next run", "warn"
+            )
+        else:
+            indicator.set_status("")
+        self.refresh_bindings()
 
     def action_start(self) -> None:
-        if not self.ready or self.running:
-            return
-        tested = json.loads(files.read_text(RESULT) or "{}").get("prompt_hash")
-        if tested != prompt_hash() and not self.warned:
-            self.warned = True
-            self.query_one("#warn").display = True
-            self.query_one("#warn", Static).update(
-                "WARNING: prompt.md or classifier model differs from the tested one (or was never tested). "
-                "Press s again to start anyway."
-            )
+        if not self.ready or self.running or self.blocked() or not pending():
             return
         self.running = self.started = True
-        self.query_one("#warn").display = False
-        self.query_one("#run-panel").border_subtitle = "running"
-        self.run_worker(self.run_all(), exclusive=True)
+        self.failure = ""
+        self.show()
+        self.worker = self.run_worker(self.run_all(), exclusive=True)
 
     def action_stop(self) -> None:
         # cancelling only interrupts an await, never the synchronous one-line append below
-        self.workers.cancel_all()
+        if self.worker is not None and self.running:
+            self.worker.cancel()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "go-tuning":
+            self.app.goto_stage(5)  # ty: ignore[unresolved-attribute]
+        elif "Stop" in str(event.button.label):
+            self.action_stop()
+        else:
+            self.action_start()
 
     async def run_all(self) -> None:
-        live = self.query_one("#live", Static)
-        live.set_classes("")
+        indicator = self.query_one(RunIndicator)
         # failed rows from an earlier run are dropped; the items are retried now
         old = files.read_jsonl("results.jsonl")
         if any("error" in r for r in old):
@@ -146,12 +186,11 @@ class RunScreen(Screen):
         todo = pending()
         taxonomy = files.read_taxonomy()
         prompt = files.read_text("prompt.md") or ""
-        bar = self.query_one("#progress", ProgressBar)
-        bar.update(total=max(len(todo), 1), progress=0)
-        before = cost.total()[0]
+        total = len(above_threshold())
+        base = total - len(todo)
         start = time.monotonic()
-        done = 0
-        self.errors = []
+        done = live = 0
+        indicator.set_progress(base, total)
         try:
             async for i, p in classify_many(
                 [c["text"] for c in todo], prompt, taxonomy, self.model
@@ -165,21 +204,14 @@ class RunScreen(Screen):
                 }
                 if p.labels is None:
                     row["error"] = p.error or "unknown error"
-                    self.errors.append(f"{c['id']}: {row['error']}")
                 files.append_jsonl("results.jsonl", row)
                 done += 1
-                bar.update(progress=done)
-                elapsed = time.monotonic() - start
-                dollars, unknown = cost.total()
-                spent = "?" if unknown else f"${dollars - before:.4f}"
-                eta = seconds_text(elapsed / done * (len(todo) - done))
-                live.update(
-                    f"{done}/{len(todo)} | cost {spent} | "
-                    f"{done / elapsed:.2f} items/s | ETA {eta}"
-                )
+                live += not p.cached
+                eta = eta_text(done, len(todo), live, time.monotonic() - start)
+                indicator.set_progress(base + done, total, eta)
         except Exception as e:  # noqa: BLE001  auth/network errors must not kill the app
-            live.update(f"Run failed: {e}")
-            live.set_classes("error")
+            self.failure = f"Run failed: {e}"
         finally:
             self.running = False
-            self.show_estimate()
+            if self.is_attached:  # a stage switch can remove the screen mid-run
+                self.show()

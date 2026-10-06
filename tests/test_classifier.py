@@ -2,9 +2,10 @@ import pytest
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RequestUsage
 
 from hunches import cost
-from hunches.classifier import classify, classify_many
+from hunches.classifier import classify, classify_many, system_prompt
 from hunches.files import Label, Taxonomy
 
 
@@ -17,6 +18,10 @@ def taxonomy(mode="multi"):
     return Taxonomy(mode=mode, labels=[Label(name="a"), Label(name="b")])
 
 
+def out(labels, reasoning="because"):
+    return {"reasoning": reasoning, "labels": labels}
+
+
 def scripted(*outputs):
     """FunctionModel that answers each request with the next scripted label list."""
     calls = []
@@ -25,7 +30,7 @@ def scripted(*outputs):
         calls.append(messages)
         tool = info.output_tools[0]
         return ModelResponse(
-            parts=[ToolCallPart(tool.name, {"response": outputs[len(calls) - 1]})]
+            parts=[ToolCallPart(tool.name, out(outputs[len(calls) - 1]))]
         )
 
     return FunctionModel(fn), calls
@@ -60,7 +65,7 @@ async def test_unknown_label_is_retried():
 async def test_gives_up_with_recorded_error_not_crash():
     model = FunctionModel(
         lambda m, info: ModelResponse(
-            parts=[ToolCallPart(info.output_tools[0].name, {"response": []})]
+            parts=[ToolCallPart(info.output_tools[0].name, out([]))]
         )
     )
     p = await classify("text", "prompt", taxonomy(), model)
@@ -93,7 +98,7 @@ async def test_classifier_model_change_misses_cache():
 
         def fn(messages, info: AgentInfo):
             calls.append(1)
-            part = ToolCallPart(info.output_tools[0].name, {"response": [label]})
+            part = ToolCallPart(info.output_tools[0].name, out([label]))
             return ModelResponse(parts=[part])
 
         return FunctionModel(fn, model_name=name), calls
@@ -107,7 +112,7 @@ async def test_classifier_model_change_misses_cache():
 
 
 async def test_classify_many_yields_all_and_records_one_timing():
-    model = TestModel(custom_output_args=["a"])
+    model = TestModel(custom_output_args=out(["a"]))
     texts = ["t0", "t1", "t2", "t3"]
     got = {
         i: p
@@ -123,3 +128,49 @@ async def test_classify_many_yields_all_and_records_one_timing():
     again = [i async for i, _ in classify_many(texts, "prompt", taxonomy(), model)]
     assert sorted(again) == [0, 1, 2, 3]
     assert len(cost._read()["timings"]) == rows
+
+
+async def test_reasoning_returned_live_and_on_cache_hit():
+    calls = []
+
+    def fn(messages, info: AgentInfo):
+        calls.append(1)
+        part = ToolCallPart(info.output_tools[0].name, out(["a"], "quotes the word a"))
+        return ModelResponse(parts=[part])
+
+    model = FunctionModel(fn)
+    first = await classify("text", "prompt", taxonomy(), model)
+    second = await classify("text", "prompt", taxonomy(), model)
+    assert first.reasoning == second.reasoning == "quotes the word a"
+    assert second.cached and not first.cached
+    assert len(calls) == 1
+
+
+async def test_old_shape_cache_entry_is_a_miss_and_replaced():
+    tax = taxonomy()
+    model, calls = scripted(["a"])
+    key = cost.cache_key(model.model_name, system_prompt("prompt", tax), "text")
+    usage = RequestUsage(input_tokens=1, output_tokens=1)
+    cost.cache_put(key, ["b"], usage)
+    p = await classify("text", "prompt", tax, model)
+    assert p.labels == ["a"] and not p.cached and len(calls) == 1
+    hit = cost.cache_get(key)
+    assert hit is not None
+    assert hit["output"] == {"labels": ["a"], "reasoning": "because"}
+
+
+async def test_failed_call_has_no_reasoning():
+    model = FunctionModel(
+        lambda m, info: ModelResponse(
+            parts=[ToolCallPart(info.output_tools[0].name, out([]))]
+        )
+    )
+    p = await classify("text", "prompt", taxonomy(), model)
+    assert p.error and p.reasoning is None
+
+
+def test_system_prompt_asks_for_reasoning_first():
+    assert (
+        "First give a short reasoning (one to three sentences) that names the "
+        "evidence in the text, then the labels."
+    ) in system_prompt("prompt", taxonomy())

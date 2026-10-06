@@ -1,0 +1,28 @@
+<!-- @dsCard group="Components" viewport="700x390" name="Data" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>html,body{margin:0;background:var(--ink-0);color:var(--fg);font-family:var(--font-mono);font-size:var(--font-size);line-height:var(--row)}a{color:var(--primary)}a:hover{color:var(--primary-lighten)}#root{padding:16px}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../assets/hds-loader.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+loadHDS('../../').then((H) => {
+  const { Terminal, StatusHeader, Footer, Panel, Modal, DataTable, Bar, ProgressBar, Sparkline, Badge, LabelTag, Diff, ChatPanel, Input, Button, Select, TextArea, LabelOption, Notice, Toast } = H;
+  const Grid = ({ cols = 80, rows = 10, children }) => <Terminal cols={cols} rows={rows} chrome={false}>{children}</Terminal>;
+  const cols = [{ label: 'Band', width: '12ch' }, { label: 'Candidates', width: '12ch', align: 'right' }, { label: 'At or above', width: '13ch', align: 'right' }, { label: '', width: '1fr' }];
+  const d = [['0.60–0.625', 1204], ['0.625–0.65', 912], ['0.65–0.675', 640], ['0.675–0.70', 388]];
+  const Card = () => (
+    <Grid rows={17}>
+      <DataTable columns={cols} cursor={1} rows={d.map(([b, n]) => [b, n.toLocaleString(), '', <Bar value={n} max={1204} width={24} />])} />
+      <div style={{ height: 'var(--row)' }}></div>
+      <div style={{ padding: '0 1ch', display: 'flex', gap: '2ch' }}><Badge tone="pass">PASS</Badge><Badge tone="fail">FAIL</Badge><Badge tone="stale">STALE</Badge><Badge tone="info">DIFFERS</Badge><LabelTag name="layoff_story" color="var(--label-1)" /><LabelTag name="off_topic" /></div>
+      <div style={{ padding: '0 1ch', display: 'flex', gap: '2ch' }}><ProgressBar value={1841} total={3812} width={34} eta="0:08:02" /><span>trend <Sparkline values={[0.71, 0.78, 0.8, 0.86, 0.91]} min={0.6} max={1} /> 0.910</span></div>
+      <div style={{ height: 'var(--row)' }}></div>
+      <Diff text={'--- current\n+++ proposed\n@@ -4,2 +4,3 @@\n Return exactly one label.\n-A layoff story is any mention of job loss.\n+A layoff story is a first-person account of losing a job.\n+News reports about layoffs are off_topic.'} />
+    </Grid>
+  );
+  ReactDOM.createRoot(document.getElementById('root')).render(<Card />);
+});
+</script></body></html>

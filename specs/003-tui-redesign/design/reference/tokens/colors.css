@@ -1,0 +1,78 @@
+:root {
+  /* Ink: cool near-black neutrals (backgrounds) */
+  --ink-0: #090C10;
+  --ink-1: #0E1218;
+  --ink-2: #141A23;
+  --ink-3: #1B2230;
+  --ink-4: #252E3E;
+  --ink-5: #344056;
+  /* Fog: text neutrals */
+  --fog-1: #EEF1F5;
+  --fog-2: #CDD4DE;
+  --fog-3: #8C96A6;
+  --fog-4: #5C6676;
+  /* Blue: primary */
+  --blue-1: #B8D4FF;
+  --blue-2: #6EA8FE;
+  --blue-3: #4C86E0;
+  --blue-4: #1D2F4D;
+  /* Sand: secondary */
+  --sand-2: #D2BE94;
+  --sand-4: #3A3222;
+  /* Teal: accent (the agent's voice) */
+  --teal-2: #5CC8B4;
+  --teal-4: #17332F;
+  /* Status */
+  --green-2: #7CCB83;
+  --green-4: #1C3322;
+  --amber-2: #EAB54D;
+  --amber-4: #3A2E15;
+  --red-2: #F2557A;
+  --red-4: #3E1826;
+  /* Taxonomy labels, assigned in taxonomy.yaml order. off_topic is always --label-off. */
+  --label-1: #5CC8B4;
+  --label-2: #E592B8;
+  --label-3: #A8D46F;
+  --label-4: #D9A77E;
+  --label-5: #E8D27C;
+  --label-6: #F0B37E;
+  --label-7: #8FD3E8;
+  --label-8: #9DB4C7;
+  --label-off: #6B7585;
+
+  /* Semantic aliases (names follow Textual's theme variables) */
+  --bg: var(--ink-1);
+  --surface: var(--ink-2);
+  --panel: var(--ink-3);
+  --boost: var(--ink-4);
+  --scrim: rgba(9, 12, 16, 0.72);
+  --fg: var(--fog-2);
+  --fg-strong: var(--fog-1);
+  --fg-muted: var(--fog-3);
+  --fg-faint: var(--fog-4);
+  --primary: var(--blue-2);
+  --primary-lighten: var(--blue-1);
+  --primary-darken: var(--blue-3);
+  --primary-muted: var(--blue-4);
+  --secondary: var(--sand-2);
+  --secondary-muted: var(--sand-4);
+  --accent: var(--teal-2);
+  --accent-muted: var(--teal-4);
+  --success: var(--green-2);
+  --success-muted: var(--green-4);
+  --warning: var(--amber-2);
+  --warning-muted: var(--amber-4);
+  --error: var(--red-2);
+  --error-muted: var(--red-4);
+  --border: var(--blue-2);
+  --border-blurred: var(--ink-5);
+  --cursor-bg: var(--blue-2);
+  --cursor-fg: var(--ink-1);
+  --cursor-blurred-bg: var(--ink-4);
+  --hover-bg: var(--ink-4);
+  --header-bg: var(--ink-3);
+  --footer-bg: var(--ink-2);
+  --footer-key: var(--blue-2);
+  --footer-desc: var(--fog-3);
+  --selection-bg: #1D2F4D;
+}

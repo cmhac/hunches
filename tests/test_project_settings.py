@@ -143,23 +143,31 @@ async def test_cancelling_the_confirmation_leaves_the_file_unchanged(
     assert (project / ".hunches" / "config.toml").read_bytes() == before
 
 
-async def test_a_bad_corpus_is_listed_live_and_blocks_save(tmp_path, monkeypatch):
+async def test_a_bad_corpus_is_listed_live_and_disables_save(tmp_path, monkeypatch):
     project = project_in(tmp_path, monkeypatch, **settings_config())
     bad = make_corpus(tmp_path / "bad")
     (bad / "items.jsonl").unlink()
+    good = make_corpus(tmp_path / "good")
     before = (project / ".hunches" / "config.toml").read_bytes()
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        save = app.screen.query_one("#save", Button)
+        assert not save.disabled
         app.screen.query_one("#corpus", Input).value = str(bad)
         await pilot.pause()
         assert "ERROR: missing items.jsonl" in text_of(app.screen)
-        app.screen.query_one("#save", Button).press()
-        await pilot.pause()
-        assert isinstance(app.screen, ProjectSettingsScreen)  # no confirmation
+        assert save.disabled
         assert "Corpus: missing items.jsonl" in str(
             app.screen.query_one("#error", Static).render()
         )
+        app.screen.save()  # the guard stays behind the disabled button
+        await pilot.pause()
+        assert isinstance(app.screen, ProjectSettingsScreen)  # no confirmation
+        app.screen.query_one("#corpus", Input).value = str(good)
+        await pilot.pause()
+        assert not save.disabled
+        assert str(app.screen.query_one("#error", Static).render()) == ""
     assert (project / ".hunches" / "config.toml").read_bytes() == before
 
 
@@ -232,11 +240,14 @@ async def test_models_are_marked_recommended_or_differs(tmp_path, monkeypatch):
         await pilot.pause()
         assistant = str(app.screen.query_one("#assistant", Static).render())
         classifier = str(app.screen.query_one("#classifier", Static).render())
-        assert "RECOMMENDED" in assistant and "DIFFERS" not in assistant
-        assert "DIFFERS" in classifier and "RECOMMENDED" not in classifier
+        assert assistant.rstrip().endswith("RECOMMENDED")
+        assert "DIFFERS" not in assistant
+        assert "DIFFERS FROM RECOMMENDED" in classifier
         await pick(app, pilot, "#pick-classifier", CLASSIFIER)  # live update
-        assert "RECOMMENDED" in str(
-            app.screen.query_one("#classifier", Static).render()
+        assert (
+            str(app.screen.query_one("#classifier", Static).render())
+            .rstrip()
+            .endswith("RECOMMENDED")
         )
 
 
@@ -421,7 +432,7 @@ async def test_fits_80x24_with_save_cancel_and_error_always_visible(
         assert not isinstance(app.screen, ProjectSettingsScreen)
 
 
-async def test_footnote_and_unpriced_model_warning(tmp_path, monkeypatch):
+async def test_footnote_and_unpriced_model_row(tmp_path, monkeypatch):
     project_in(
         tmp_path,
         monkeypatch,
@@ -432,7 +443,21 @@ async def test_footnote_and_unpriced_model_warning(tmp_path, monkeypatch):
         await pilot.pause()
         shown = text_of(app.screen)
         assert "Prices from genai-prices as of 20" in shown
-        assert "WARNING: no price for openai:made-up-model: cost will show ?" in shown
+        assert "the header shows actual spend" in shown
+        assert not app.screen.query("#pricewarn")
+        first, second = str(
+            app.screen.query_one("#classifier", Static).render()
+        ).splitlines()
+        assert "openai:made-up-model" in first and "no price" not in first
+        assert second.strip() == "no price: cost will show ?"
+
+
+async def test_footnote_says_sidebar_in_rail_mode(tmp_path, monkeypatch):
+    project_in(tmp_path, monkeypatch, **settings_config())
+    app = Host()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        assert "the sidebar shows actual spend" in text_of(app.screen)
 
 
 async def test_e_on_projects_opens_the_project_then_its_settings(tmp_path, monkeypatch):

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import panel_title
 from pydantic_ai import Agent, Embedder
 from pydantic_ai.embeddings import EmbeddingResult, TestEmbeddingModel
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
@@ -15,13 +16,13 @@ from pydantic_ai.usage import RequestUsage
 from textual.widgets import DataTable, Input
 
 from hunches import classifier, cost, files, system
-from hunches.app import HunchesApp
+from hunches.app import ConfirmScreen, HunchesApp
 from hunches.screens.brief import BriefScreen
 from hunches.screens.gold import GoldScreen
 from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.projects import ProjectsScreen
 from hunches.screens.search import SearchScreen
-from hunches.screens.taxonomy import TaxonomyScreen
+from hunches.screens.taxonomy import TaxonomyScreen, VersionsScreen
 
 # 120 items: 40 at 0.61 (band 0), 40 at 0.70, 30 at 0.80, 10 at 0.30 (below the 0.60 floor).
 # The seed "alpha" embeds to [1, 0], so cosine similarity is the first coordinate.
@@ -66,20 +67,40 @@ async def taxonomy_stream(messages, info: AgentInfo):
         yield "Done."
 
 
+CALLS: list[
+    str
+] = []  # one entry per classifier model call: proves "no model call" while labelling
+
+
 def classify_fn(messages, info: AgentInfo):
     """Even item numbers are "a", odd ones off_topic; the same rule the test uses as gold."""
+    CALLS.append("classify")
     request = messages[0]
     assert isinstance(request, ModelRequest)
     text = str(next(p.content for p in request.parts if p.part_kind == "user-prompt"))
     answer = ["a"] if int(text.split()[-1]) % 2 == 0 else ["off_topic"]
     return ModelResponse(
-        parts=[ToolCallPart(info.output_tools[0].name, {"response": answer})]
+        parts=[
+            ToolCallPart(
+                info.output_tools[0].name, {"reasoning": "r", "labels": answer}
+            )
+        ]
     )
+
+
+def write_corpus(corpus: Path, sims: list[float]) -> None:
+    corpus.mkdir(exist_ok=True)
+    vectors = [[s, math.sqrt(1 - s * s)] for s in sims]
+    np.save(corpus / "vectors.npy", np.array(vectors, np.float32))
+    items = [{"id": f"i{n}", "text": f"item {n}"} for n in range(len(sims))]
+    (corpus / "items.jsonl").write_text("".join(json.dumps(r) + "\n" for r in items))
+    (corpus / "meta.json").write_text(json.dumps({"embedding_model": "m"}))
 
 
 @pytest.fixture(autouse=True)
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    CALLS.clear()
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")  # never used: models are stubbed
     system.write_system(
         system.System(
@@ -89,13 +110,18 @@ def project(tmp_path, monkeypatch):
             recommendation_seen=system.RECOMMENDED_REVISION,
         )
     )
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    vectors = [[s, math.sqrt(1 - s * s)] for s in SIMS]
-    np.save(corpus / "vectors.npy", np.array(vectors, np.float32))
-    items = [{"id": f"i{n}", "text": f"item {n}"} for n in range(len(SIMS))]
-    (corpus / "items.jsonl").write_text("".join(json.dumps(r) + "\n" for r in items))
-    (corpus / "meta.json").write_text(json.dumps({"embedding_model": "m"}))
+    write_corpus(tmp_path / "corpus", SIMS)
+    # the taxonomy screen opens with a context turn: it must not reach a real model either
+    original = TaxonomyScreen.__init__
+
+    async def ready(messages, info: AgentInfo):
+        yield "Ready."
+
+    def init(self):
+        original(self)
+        self.agent.model = FunctionModel(stream_function=ready)
+
+    monkeypatch.setattr(TaxonomyScreen, "__init__", init)
     # every classifier call, in every stage, goes to the FunctionModel
     monkeypatch.setattr(
         classifier, "Agent", lambda model, **kw: Agent(FunctionModel(classify_fn), **kw)
@@ -113,8 +139,12 @@ async def chat(app, pilot, stream, message):
     await pilot.pause()
 
 
-async def approve(pilot, key="f2"):
-    await pilot.press(key)
+async def approve(pilot, button=None):
+    """Approve through the F2 key, or by clicking `button` (a screen's Approve button)."""
+    if button:
+        await pilot.click(button)
+    else:
+        await pilot.press("f2")
     await pilot.pause()
     await pilot.click("#yes")
     await pilot.pause()
@@ -149,7 +179,7 @@ async def test_all_nine_stages_with_resume():
         assert app.stage == 1 and isinstance(app.screen, BriefScreen)
         await chat(app, pilot, brief_stream, "Find even items")
         assert files.read_text("brief.md") == "Find even items\n"
-        await approve(pilot)
+        await approve(pilot, "#approve")
         assert app.stage == 2
         assert files.read_text("seeds.csv") == "seed\nalpha\n"
 
@@ -162,12 +192,8 @@ async def test_all_nine_stages_with_resume():
         await pilot.press("r")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        total = app.screen.query_one("#bands", DataTable).get_row_at(7)
-        assert [str(c) for c in total] == [
-            "Total",
-            "110",
-            "",
-        ]  # the 10 low items are below the floor
+        # the 10 low items are below the floor
+        assert panel_title(app.screen.query_one("#bands-panel"))[1] == "110 candidates"
 
     # resume at 3; stage 3: taxonomy and prompt
     app = HunchesApp()
@@ -191,8 +217,12 @@ async def test_all_nine_stages_with_resume():
         assert app.stage == 4
         assert app.screen.index == 20  # type: ignore[unresolved-attribute]  # first unlabelled item
         await label_all(app, pilot, 30)
+        assert CALLS == []  # labelling never calls the classifier
         await approve(pilot)
         assert app.stage == 5
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert len(CALLS) == 50  # the first Tuning run classifies the whole dev set
 
     # resume at 5; stage 5: tuning (everything agrees, so the target is met)
     app = HunchesApp()
@@ -231,8 +261,9 @@ async def test_all_nine_stages_with_resume():
         assert app.stage == 7
         await app.workers.wait_for_complete()
         await pilot.pause()
-        app.screen.query_one("#cutoff", Input).value = str(CUTOFF)
-        app.screen.action_save()  # type: ignore[unresolved-attribute]
+        app.screen.query_one("#bands", DataTable).focus()
+        await pilot.press("down", "down", "enter")  # band 2 = 0.650
+        await pilot.press("f2")
         await pilot.pause()
         assert app.stage == 8
     data = json.loads(files.read_text("threshold.json") or "")
@@ -243,7 +274,7 @@ async def test_all_nine_stages_with_resume():
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         assert app.stage == 8
-        await pilot.press("s")
+        await pilot.click("#run-button")  # Start
         await pilot.pause()
         await app.workers.wait_for_complete()
         await pilot.pause()
@@ -310,3 +341,109 @@ async def test_first_run_new_project_then_open_another_from_projects(
         await pilot.pause()
         assert app.stage == 1 and isinstance(app.screen, BriefScreen)
         assert os.getcwd() == str(other)
+
+
+async def reach_stage_4(app, pilot):
+    """New project, brief, seeds, search, taxonomy and prompt, in one session: ends on the dev gold screen."""
+    await pilot.pause()
+    await pilot.press("n")
+    await pilot.pause()
+    app.screen.query_one("#corpus", Input).value = "corpus"
+    await pilot.pause()
+    await pilot.click("#create")
+    await pilot.pause()
+    await chat(app, pilot, brief_stream, "Find even items")
+    await approve(pilot, "#approve")
+    app.screen.embedder = StubEmbedder()
+    await pilot.click("#run")  # the first search asks nothing
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    await pilot.press("n")
+    await pilot.pause()
+    assert isinstance(app.screen, TaxonomyScreen)
+    await chat(app, pilot, taxonomy_stream, "one label, single")
+    await approve(pilot, "#approve")
+    assert app.stage == 4 and isinstance(app.screen, GoldScreen)
+
+
+async def test_pool_short_blocks_labelling_until_seeds_are_added():
+    write_corpus(
+        Path("corpus"), [0.7] * 30 + [0.3] * 10
+    )  # 30 candidates, the dev set needs 50
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await reach_stage_4(app, pilot)
+        screen = app.screen
+        assert isinstance(screen, GoldScreen) and screen.pool_short
+        assert (
+            screen.pool_short["found"] == 30 and not screen.query_one("#main").display
+        )
+        await pilot.press("1", "enter")
+        await pilot.pause()
+        assert all(not r.labels for r in files.read_gold())  # nothing can be labelled
+        assert CALLS == []
+        await pilot.click("#add-seeds")  # the way out: more seeds
+        await pilot.pause()
+        assert app.stage == 1 and isinstance(app.screen, BriefScreen)
+
+
+async def test_taxonomy_version_round_trip():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await reach_stage_4(app, pilot)
+        await label_all(app, pilot, 12)
+        dev = {r.id for r in files.read_gold()}
+        assert sum(bool(r.labels) for r in files.read_gold()) == 12
+
+        # change the label names after gold rows exist: confirm, and the labelling restarts
+        await pilot.press("p")
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, TaxonomyScreen)
+        await pilot.click("#edit-labels", offset=(2, 0))
+        await pilot.pause()
+        screen.query(".label-name").first(Input).value = "z"
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.click("#yes")
+        await pilot.pause()
+        assert [v["version"] for v in files.list_versions()] == [1]
+        assert [lb.name for lb in files.read_taxonomy().labels] == ["z"]
+        gold = files.read_gold()
+        assert {r.id for r in gold} == dev and all(not r.labels for r in gold)
+        archived = files.root() / "versions" / "1"
+        assert "name: a" in (archived / "taxonomy.yaml").read_text()
+        assert (
+            sum(
+                bool(json.loads(x)["labels"])
+                for x in (archived / "gold.jsonl").read_text().splitlines()
+            )
+            == 12
+        )
+
+        # relabel the same items under the new labels
+        await approve(pilot)
+        assert app.stage == 4 and isinstance(app.screen, GoldScreen)
+        await label_all(app, pilot, 50)
+        assert all(r.labels for r in files.read_gold())
+        assert CALLS == []
+
+        # restore the earlier version: the current state is archived first
+        await pilot.press("p")
+        await pilot.pause()
+        await pilot.click("#versions", offset=(2, 0))
+        await pilot.pause()
+        assert isinstance(app.screen, VersionsScreen)
+        await pilot.click("#restore-1")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.click("#yes")
+        await pilot.pause()
+        assert [lb.name for lb in files.read_taxonomy().labels] == ["a"]
+        assert [v["version"] for v in files.list_versions()] == [1, 2]
+        assert (
+            "name: z" in (files.root() / "versions" / "2" / "taxonomy.yaml").read_text()
+        )
+        assert sum(bool(r.labels) for r in files.read_gold()) == 12

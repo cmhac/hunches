@@ -1,13 +1,16 @@
+import asyncio
 import json
 
 import pytest
+from conftest import panel_title
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import Button, DataTable, Static
 
 from hunches import files
 from hunches.app import HunchesApp
 from hunches.screens import threshold
+from hunches.screens.progress import RunIndicator
 from hunches.screens.threshold import ThresholdScreen
 
 pytestmark = pytest.mark.usefixtures("system_ready")
@@ -20,8 +23,20 @@ def classifier(messages, info: AgentInfo):
     text = str(next(p.content for p in request.parts if p.part_kind == "user-prompt"))
     answer = ["off_topic"] if int(text.split()[-1]) % 2 == 0 else ["a"]
     return ModelResponse(
-        parts=[ToolCallPart(info.output_tools[0].name, {"response": answer})]
+        parts=[
+            ToolCallPart(
+                info.output_tools[0].name, {"reasoning": "r", "labels": answer}
+            )
+        ]
     )
+
+
+async def wait_for(pilot, test):
+    for _ in range(300):
+        if test():
+            return
+        await pilot.pause(0.02)
+    raise AssertionError("timed out")
 
 
 # band 0 (0.60): 40 items, band 1 (0.625): 0 items, band 6 (0.75+): 10 items
@@ -86,53 +101,156 @@ def test_rate_calculation_and_empty_band():
     assert threshold.rate_text(rows[1]) == "-" and rows[1]["candidates"] == 0
 
 
-async def test_screen_classifies_and_saves_threshold(monkeypatch):
+def stub_classifier(monkeypatch, counter=None):
     real = threshold.classify_many
-    monkeypatch.setattr(
-        threshold,
-        "classify_many",
-        lambda texts, prompt, taxonomy, model: real(
-            texts, prompt, taxonomy, FunctionModel(classifier)
-        ),
-    )
+
+    def fake(texts, prompt, taxonomy, model):
+        if counter is not None:
+            counter.append(len(texts))
+        return real(texts, prompt, taxonomy, FunctionModel(classifier))
+
+    monkeypatch.setattr(threshold, "classify_many", fake)
+
+
+async def settle(app, pilot):
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def test_screen_classifies_and_saves_chosen_band(monkeypatch):
+    stub_classifier(monkeypatch)
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         assert app.stage == 7 and isinstance(app.screen, ThresholdScreen)
-        await app.workers.wait_for_complete()
-        await pilot.pause()
+        await settle(app, pilot)
         table = app.screen.query_one("#bands", DataTable)
-        assert [str(c) for c in table.get_row_at(0)[:3]] == ["0.600", "40", "30"]
+        assert [str(c) for c in table.get_row_at(0)[:3]] == ["  0.600", "40", "30"]
         assert str(table.get_row_at(1)[3]) == "-"
-        app.screen.query_one("#cutoff", Input).value = "0.7"
-        app.screen.action_save()
+        save = app.screen.query_one("#save", Button)
+        line = app.screen.query_one("#cutoff-line", Static)
+        assert save.disabled and str(line.render()) == "No cutoff chosen"
+        app.screen.action_save()  # nothing chosen: silent no-op
+        await pilot.pause()
+        assert files.read_text("threshold.json") is None and app.stage == 7
+        table.focus()
+        await pilot.press("down", "down", "enter")  # band 2 = 0.650
+        await pilot.pause()
+        assert str(table.get_row_at(2)[0]) == "● 0.650"
+        assert str(table.get_row_at(0)[0]) == "  0.600"
+        assert str(line.render()) == "Cutoff 0.650" and not save.disabled
+        await pilot.press("down", "enter")  # choosing another moves the mark
+        await pilot.pause()
+        assert str(table.get_row_at(2)[0]) == "  0.650"
+        assert str(table.get_row_at(3)[0]) == "● 0.675"
+        await pilot.press("up", "enter")
+        await pilot.pause()
+        await pilot.press("f2")
         await pilot.pause()
     data = json.loads(files.read_text("threshold.json") or "")
-    assert data["threshold"] == 0.7 and data["n_candidates"] == 10
+    # items at 0.80 are the only ones at or above 0.650
+    assert data["threshold"] == 0.65 and data["n_candidates"] == 10
     assert len(data["bands"]) == 7
     assert files.read_state().threshold_chosen
     assert files.first_incomplete_stage() == 8
 
 
-async def test_redesigned_panel_notes_and_not_ready(monkeypatch):
+async def test_preselect_on_edge_and_saved_off_edge(monkeypatch):
+    stub_classifier(monkeypatch)
+    files.write_text("threshold.json", json.dumps({"threshold": 0.7}))
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await settle(app, pilot)
+        table = app.screen.query_one("#bands", DataTable)
+        assert str(table.get_row_at(4)[0]) == "● 0.700"
+        assert str(app.screen.query_one("#cutoff-line", Static).render()) == (
+            "Cutoff 0.700"
+        )
+        assert not app.screen.query_one("#save", Button).disabled
+    files.write_text("threshold.json", json.dumps({"threshold": 0.652}))
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await settle(app, pilot)
+        table = app.screen.query_one("#bands", DataTable)
+        assert all(not str(table.get_row_at(i)[0]).startswith("●") for i in range(7))
+        line = app.screen.query_one("#cutoff-line", Static)
+        assert str(line.render()) == "Saved cutoff 0.652"
+        assert app.screen.query_one("#save", Button).disabled
+
+
+async def test_sampling_shows_indicator_stop_and_resume(monkeypatch):
+    calls = []
     real = threshold.classify_many
-    monkeypatch.setattr(
-        threshold,
-        "classify_many",
-        lambda texts, prompt, taxonomy, model: real(
-            texts, prompt, taxonomy, FunctionModel(classifier)
-        ),
-    )
+    gate = asyncio.Event()
+
+    async def slow(texts, prompt, taxonomy, model):
+        calls.append(len(texts))
+        n = 0
+        async for i, p in real(texts, prompt, taxonomy, FunctionModel(classifier)):
+            yield i, p
+            n += 1
+            if n == 5 and len(calls) == 1:
+                await gate.wait()  # parked until the user stops
+
+    monkeypatch.setattr(threshold, "classify_many", slow)
     app = HunchesApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, ThresholdScreen)
-        await app.workers.wait_for_complete()
+        await wait_for(pilot, lambda: len(screen.predictions) >= 5)
+        ind = screen.query_one(RunIndicator)
+        assert ind.display and not screen.query_one("#bands-panel").display
+        assert str(ind.query_one("#run-title", Static).content) == (
+            "Sampling each similarity band"
+        )
+        counts = str(ind.query_one("#run-counts", Static).content)
+        assert counts.startswith("5 of 40") and counts.endswith("30 items per band")
+        assert str(ind.query_one("#run-button", Button).label) == "Stop  x"
+        await pilot.press("x")
+        await wait_for(pilot, lambda: screen.stopped)
+        saved = json.loads(files.read_text(threshold.SAMPLE) or "")
+        assert len(saved["predictions"]) == 5  # finished items kept
+        assert ind.display and not screen.query_one("#bands-panel").display
+        assert str(ind.query_one("#run-button", Button).label) == "Resume  s"
+        await pilot.press("s")
+        await wait_for(pilot, lambda: not screen.running and not screen.stopped)
+        assert calls == [40, 35]  # only the remainder is classified
+        assert not ind.display and screen.query_one("#bands-panel").display
+        assert len(screen.predictions) == 40
+
+
+async def test_failure_shows_panel_and_note(monkeypatch):
+    async def boom(texts, prompt, taxonomy, model):
+        raise RuntimeError("429")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(threshold, "classify_many", boom)
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        await settle(app, pilot)
+        screen = app.screen
+        assert screen.query_one("#bands-panel").display
+        assert not screen.query_one(RunIndicator).display
+        note = screen.query_one("#note", Static)
+        assert str(note.render()) == "Sampling failed: 429"
+        assert note.has_class("error")
+
+
+async def test_redesigned_panel_notes_and_not_ready(monkeypatch):
+    stub_classifier(monkeypatch)
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, ThresholdScreen)
+        await settle(app, pilot)
         panel = screen.query_one("#bands-panel")
-        assert panel.border_title == "off-topic rate by band · test"
-        assert panel.border_subtitle == ""  # not sampling any more
+        assert panel_title(panel)[0] == "off-topic rate by band · test"
+        assert panel_title(panel)[1] == ""
         table = screen.query_one("#bands", DataTable)
         assert [str(c.label) for c in table.columns.values()] == [
             "Band",
@@ -142,7 +260,7 @@ async def test_redesigned_panel_notes_and_not_ready(monkeypatch):
             "Cumulative ≥ lower",
         ]
         assert [str(c) for c in table.get_row_at(6)] == [
-            "0.750+",
+            "  0.750+",
             "10",
             "10",
             "50% (n=10)",
@@ -151,25 +269,12 @@ async def test_redesigned_panel_notes_and_not_ready(monkeypatch):
         note = screen.query_one("#note", Static)
         assert str(note.render()).startswith("Sampled 40 items in ")
         assert note.has_class("note")
-        screen.progress = (112, 210)
-        screen.show()
-        assert panel.border_subtitle == "sampling 112/210"
-        assert "Small samples are noisy" in str(screen.query_one("#explain").render())
-
-        screen.query_one("#cutoff", Input).value = "abc"
-        screen.action_save()
-        assert str(note.render()) == "Enter a number or pick a band with Enter."
-        assert note.has_class("warn")
-        screen.note = "Sampling failed: x"
-        screen.show()
-        assert note.has_class("error")
-
-        table.focus()
-        await pilot.press("enter")  # picks the band's lower bound
-        await pilot.pause()
-        assert screen.query_one("#cutoff", Input).value == "0.6"
+        explain = str(screen.query_one("#explain").render())
+        assert explain.endswith("Enter on a row chooses its lower bound as the cutoff.")
+        assert not screen.query("#cutoff")
 
 
+@pytest.mark.usefixtures("stub_taxonomy_assistant")
 async def test_not_ready_notice():
     (files.root() / "taxonomy.yaml").unlink()
     app = HunchesApp()
@@ -179,4 +284,4 @@ async def test_not_ready_notice():
         await pilot.pause()
         notice = app.screen.query_one("#not-ready")
         assert str(notice.render()) == "Finish stage 3 (taxonomy and prompt) first."
-        assert notice.has_class("warn")
+        assert notice.has_class("not-ready")

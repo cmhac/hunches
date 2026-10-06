@@ -1,0 +1,10 @@
+:root {
+  --font-mono: "Source Code Pro", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* One cell = 1ch wide x --row tall. Everything sits on this grid. */
+  --font-size: 14px;
+  --row: 20px;
+  --weight-regular: 400;
+  --weight-bold: 700;
+  /* Textual text-style equivalents */
+  --dim-opacity: 0.62;
+}

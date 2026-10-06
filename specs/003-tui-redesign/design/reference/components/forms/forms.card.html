@@ -1,0 +1,35 @@
+<!-- @dsCard group="Components" viewport="700x440" name="Forms" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>html,body{margin:0;background:var(--ink-0);color:var(--fg);font-family:var(--font-mono);font-size:var(--font-size);line-height:var(--row)}a{color:var(--primary)}a:hover{color:var(--primary-lighten)}#root{padding:16px}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../assets/hds-loader.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+loadHDS('../../').then((H) => {
+  const { Terminal, StatusHeader, Footer, Panel, Modal, DataTable, Bar, ProgressBar, Sparkline, Badge, LabelTag, Diff, ChatPanel, Input, Button, Select, TextArea, LabelOption, Notice, Toast } = H;
+  const Grid = ({ cols = 80, rows = 10, children }) => <Terminal cols={cols} rows={rows} chrome={false}>{children}</Terminal>;
+  const Card = () => (
+    <Grid rows={20}>
+      <div style={{ display: 'flex' }}>
+        <div style={{ flex: 1 }}><Input placeholder="a: add, e: edit, then Enter" /></div>
+        <div style={{ flex: 1 }}><Input value="The author describes being laid off" focused /></div>
+      </div>
+      <div style={{ display: 'flex', gap: '2ch', padding: '0 1ch' }}><Button>Cancel</Button><Button variant="success" focused>Approve</Button><Button variant="error">Reject</Button><Button variant="primary" disabled>Save</Button></div>
+      <div style={{ padding: '0 1ch' }}><Button compact>Run search (r)</Button></div>
+      <div style={{ display: 'flex' }}>
+        <div style={{ flex: 1 }}><Select value="s3" focused options={[{ label: 'Local (numpy)', value: 'local' }, { label: 'S3 Vectors', value: 's3' }]} /></div>
+        <div style={{ flex: 1, padding: '0 1ch' }}>
+          <LabelOption k="1" name="layoff_story" description="Author lost their job" color="var(--label-1)" checked />
+          <LabelOption k="2" name="layoff_fear" description="Worried about it" color="var(--label-2)" />
+          <LabelOption k="0" name="off_topic" description="None of the above" />
+        </div>
+      </div>
+      <div style={{ display: 'flex', flex: 1 }}><TextArea title="taxonomy.yaml" language="yaml" focused cursorLine={3} text={'mode: single\nlabels:\n  - name: layoff_story\n    description: Author lost their job'} /></div>
+    </Grid>
+  );
+  ReactDOM.createRoot(document.getElementById('root')).render(<Card />);
+});
+</script></body></html>
