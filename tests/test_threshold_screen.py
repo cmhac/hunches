@@ -175,6 +175,7 @@ async def test_redesigned_panel_notes_and_not_ready(monkeypatch):
         assert screen.query_one("#cutoff", Input).value == "0.6"
 
 
+@pytest.mark.usefixtures("stub_taxonomy_assistant")
 async def test_not_ready_notice():
     (files.root() / "taxonomy.yaml").unlink()
     app = HunchesApp()

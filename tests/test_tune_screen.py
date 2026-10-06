@@ -43,7 +43,7 @@ def project(tmp_path, monkeypatch):
     files.write_config(
         files.Config(
             assistant_model="anthropic:claude-sonnet-5-5",
-            classifier_model="anthropic:claude-haiku-4-5",
+            classifier_model="none:unset",  # fails at once on mount
             corpus_dir="c",
             embedding_model="m",
         )

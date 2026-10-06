@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from conftest import panel_title
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
@@ -28,7 +29,7 @@ def make_project(tmp_path, monkeypatch, first_run=False, **state):
     files.write_config(
         files.Config(
             assistant_model="anthropic:claude-sonnet-5-5",
-            classifier_model="anthropic:claude-haiku-4-5",
+            classifier_model="test",
             corpus_dir="c",
             embedding_model="m",
         )
@@ -161,6 +162,7 @@ async def test_matching_recommendation_is_bumped_silently(tmp_path, monkeypatch)
     assert seen is not None and seen.recommendation_seen == system.RECOMMENDED_REVISION
 
 
+@pytest.mark.usefixtures("stub_taxonomy_assistant")
 async def test_starts_at_first_incomplete_stage(tmp_path, monkeypatch):
     make_project(tmp_path, monkeypatch)
     app = HunchesApp()
@@ -247,6 +249,7 @@ async def test_quit(tmp_path, monkeypatch):
     assert app.return_code == 0
 
 
+@pytest.mark.usefixtures("stub_taxonomy_assistant")
 async def test_header_stepper_and_stage_name(tmp_path, monkeypatch):
     make_project(tmp_path, monkeypatch, seeds_approved=True)
     files.write_text(

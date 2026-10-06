@@ -18,7 +18,7 @@ def project(mode="single", n=60, gold=()):
     files.write_config(
         files.Config(
             assistant_model="anthropic:claude-sonnet-5-5",
-            classifier_model="anthropic:claude-haiku-4-5",
+            classifier_model="test",
             corpus_dir="c",
             embedding_model="m",
         )
@@ -262,7 +262,7 @@ async def test_not_ready_notice():
     files.write_config(
         files.Config(
             assistant_model="anthropic:claude-sonnet-5-5",
-            classifier_model="anthropic:claude-haiku-4-5",
+            classifier_model="test",
             corpus_dir="c",
             embedding_model="m",
         )
