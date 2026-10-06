@@ -1,12 +1,17 @@
+import asyncio
+
 import pytest
 from conftest import panel_title
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from textual.widgets import DataTable, Static, TextArea
+from textual.containers import VerticalScroll
+from textual.widgets import Button, DataTable, Select, Static, TextArea
 
 from hunches import files
 from hunches.app import HunchesApp
-from hunches.screens.tune import TuneScreen
+from hunches.screens import tune
+from hunches.screens.progress import RunIndicator
+from hunches.screens.tune import PromptEditScreen, TuneScreen
 
 calls: list[str] = []
 
@@ -188,7 +193,7 @@ async def test_redesigned_panels_summary_and_tables():
         await settle(app, pilot)
         panel = screen.query_one("#metrics-panel")
         assert panel_title(panel)[0] == "dev set"
-        assert panel_title(panel)[1] == "target accuracy ≥ 0.90 · m metric · +/- score"
+        assert panel_title(panel)[1] == "target accuracy ≥ 0.90"
         # the metric equal to the target (exact-match) is left out
         summary = " ".join(metrics_text(screen).split())
         assert summary.startswith(
@@ -204,13 +209,15 @@ async def test_redesigned_panels_summary_and_tables():
             "4",
         ]
         assert panel_title(screen.query_one("#dis-panel"))[0] == "disagreements · 4"
-        assert panel_title(screen.query_one("#text-panel"))[0] == "text"
+        assert (
+            panel_title(screen.query_one("#text-panel"))[0]
+            == "text · classifier reasoning"
+        )
         dis = screen.query_one("#dis", DataTable)
         assert [str(c) for c in dis.get_row_at(0)] == ["item 1", "■ b", "■ a"]
         assert "item 1" in str(screen.query_one("#detail", Static).render())
         note = screen.query_one("#note")
-        assert str(note.render()).startswith("Dev run finished, cost")
-        assert note.has_class("note")
+        assert str(note.render()) == "" and not note.display
         # another target metric: its own value leads and exact-match comes back
         await pilot.press("m")
         summary = " ".join(metrics_text(screen).split())
@@ -237,10 +244,10 @@ async def test_failed_item_detail_and_note_tones():
         for note, tone in [
             ("Dev run failed: x", "error"),
             ("Proposal failed: x", "error"),
-            ("Asking the assistant...", "warn"),
+            ("Proposing a prompt edit...", "note"),
             ("No disagreements to learn from.", "warn"),
         ]:
-            screen.run_note, screen.note = "", note
+            screen.note = note
             screen.show()
             assert screen.query_one("#note").has_class(tone), note
 
@@ -312,3 +319,266 @@ async def test_disagreement_columns_fit_without_horizontal_scroll():
         assert (
             dis.virtual_size.width <= dis.size.width
         )  # Gold and Predicted are visible
+
+
+async def start(app, pilot):
+    await pilot.pause()
+    app.goto_stage(5)
+    await pilot.pause()
+    screen = app.screen
+    assert isinstance(screen, TuneScreen)
+    screen.model = FunctionModel(classifier)
+    return screen
+
+
+async def wait_for(pilot, condition):
+    for _ in range(200):
+        await pilot.pause()
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+async def test_controls_mirror_actions_and_enabled_states():
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await start(app, pilot)
+        screen.agent.model = FunctionModel(proposer)
+        await settle(app, pilot)  # the mount run failed: no result yet
+        assert screen.metrics is None
+        for id_ in ("propose", "edit-prompt", "done"):
+            assert screen.query_one(f"#{id_}", Button).disabled, id_
+        labels = {
+            b.id: str(b.label) for b in screen.query("#controls Button").results(Button)
+        }
+        assert labels == {
+            "score-down": "−",
+            "score-up": "+",
+            "propose": "Propose edit  e",
+            "edit-prompt": "Edit prompt  o",
+            "done": "Done  F2",
+        }
+        assert str(screen.query_one("#score", Static).render()) == "0.90"
+
+        screen.rerun()
+        await settle(app, pilot)
+        assert not screen.query_one("#propose", Button).disabled
+        assert not screen.query_one("#edit-prompt", Button).disabled
+        done = screen.query_one("#done", Button)
+        assert not done.disabled and done.variant == "default"  # 0.5 < 0.9
+
+        await pilot.click("#score-down")
+        await pilot.pause()
+        assert files.read_config().target_score == 0.89
+        assert str(screen.query_one("#score", Static).render()) == "0.89"
+        await pilot.click("#score-up")
+        await pilot.pause()
+        await pilot.click("#score-up")
+        await pilot.pause()
+        assert files.read_config().target_score == 0.91
+        screen.config.target_score = 1.0
+        screen.show()
+        await pilot.pause()
+        await pilot.click("#score-up")
+        await pilot.pause()
+        assert files.read_config().target_score == 1.0
+        screen.config.target_score = 0.0
+        screen.show()
+        await pilot.pause()
+        await pilot.click("#score-down")
+        await pilot.pause()
+        assert files.read_config().target_score == 0.0
+
+        screen.config.target_score = 0.5  # accuracy 0.5 meets it
+        screen.show()
+        assert screen.query_one("#done", Button).variant == "success"
+
+        screen.query_one("#target", Select).value = "macro_f1"
+        await pilot.pause()
+        assert files.read_config().target_metric == "macro_f1"
+        await pilot.press("m")
+        assert files.read_config().target_metric == "micro_f1"
+        assert screen.query_one("#target", Select).value == "micro_f1"
+
+        await pilot.click("#propose")
+        await settle(app, pilot)
+        assert isinstance(app.screen, tune.ProposalScreen)
+
+
+async def test_propose_disabled_without_disagreements():
+    files.write_gold(
+        [
+            files.GoldRow(id=str(i), text=f"item {i}", labels=["a"], split="dev")
+            for i in range(8)
+        ]
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await start(app, pilot)
+        screen.rerun()
+        await settle(app, pilot)
+        assert screen.metrics is not None and not screen.metrics.disagreements
+        assert screen.query_one("#propose", Button).disabled
+        assert not screen.query_one("#done", Button).disabled
+
+
+async def test_edit_prompt_saves_and_reruns_only_when_changed():
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)
+        await pilot.press("o")  # no result yet: nothing opens
+        await pilot.pause()
+        assert app.screen is screen
+        screen.rerun()
+        await settle(app, pilot)
+        assert len(calls) == 8
+
+        await pilot.press("o")
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, PromptEditScreen)
+        assert modal.query_one("#prompt", TextArea).text == "Classify."
+        save = modal.query_one("#save", Button)
+        assert str(save.label) == "Save and re-run  F2" and save.disabled
+        assert str(modal.query_one("#cancel", Button).label) == "Cancel  Esc"
+        assert modal.query_one("#prompt", TextArea).show_line_numbers
+        modal.query_one("#prompt", TextArea).text = "Classify. BETTER"
+        await pilot.pause()
+        assert not save.disabled
+        modal.query_one("#prompt", TextArea).text = "Classify."
+        await pilot.pause()
+        assert save.disabled  # back to the file's text
+        await pilot.press("escape")
+        await settle(app, pilot)
+        assert app.screen is screen
+        assert files.read_text("prompt.md") == "Classify." and len(calls) == 8
+
+        await pilot.click("#edit-prompt")
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, PromptEditScreen)
+        modal.query_one("#prompt", TextArea).text = "Classify. BETTER"
+        await pilot.pause()
+        await pilot.click("#save")
+        await settle(app, pilot)
+        assert files.read_text("prompt.md") == "Classify. BETTER"
+        assert screen.prompt == "Classify. BETTER"
+        assert len(calls) == 16  # the dev set classified again
+        assert screen.query_one("#dis", DataTable).row_count == 0
+        assert screen.history == [0.5, 1.0]
+
+
+async def test_edit_prompt_cancel_button_writes_nothing():
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await start(app, pilot)
+        screen.rerun()
+        await settle(app, pilot)
+        await pilot.press("o")
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, PromptEditScreen)
+        modal.query_one("#prompt", TextArea).text = "other"
+        await pilot.pause()
+        await pilot.click("#cancel")
+        await settle(app, pilot)
+        assert files.read_text("prompt.md") == "Classify." and len(calls) == 8
+
+
+async def test_run_indicator_hides_panels_stop_resume(monkeypatch):
+    real = tune.classify_many
+    gate = asyncio.Event()
+    batches = []
+
+    async def slow(texts, prompt, taxonomy, model):
+        batches.append(len(texts))
+        n = 0
+        async for i, p in real(texts, prompt, taxonomy, FunctionModel(classifier)):
+            yield i, p
+            n += 1
+            if n == 4 and len(batches) == 1:
+                await gate.wait()
+
+    monkeypatch.setattr(tune, "classify_many", slow)
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        screen = app.screen
+        assert isinstance(screen, TuneScreen)
+        await wait_for(pilot, lambda: len(calls) >= 4)
+        ind = screen.query_one(RunIndicator)
+        assert ind.display and screen.running
+        for id_ in ("metrics-panel", "body", "controls"):
+            assert not screen.query_one(f"#{id_}").display, id_
+        assert str(ind.query_one("#run-title", Static).content) == "Running the dev set"
+        counts = str(ind.query_one("#run-counts", Static).content)
+        assert counts.startswith("4 of 8") and "left" in counts
+        assert counts.endswith("classifier none:unset")
+        assert str(ind.query_one("#run-button", Button).label) == "Stop  x"
+        await pilot.press("x")
+        await wait_for(pilot, lambda: screen.stopped)
+        assert ind.display and not screen.query_one("#body").display
+        assert str(ind.query_one("#run-button", Button).label) == "Resume  s"
+        await pilot.click("#run-button")
+        await wait_for(pilot, lambda: not screen.running and not screen.stopped)
+        assert batches == [8, 8]
+        assert not ind.display
+        for id_ in ("metrics-panel", "body", "controls"):
+            assert screen.query_one(f"#{id_}").display, id_
+        assert screen.metrics is not None
+
+
+async def test_failed_run_shows_panels_and_note():
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        await settle(app, pilot)
+        screen = app.screen
+        assert screen.query_one("#body").display
+        assert not screen.query_one(RunIndicator).display
+        note = screen.query_one("#note", Static)
+        assert note.display and str(note.render()).startswith("Dev run failed:")
+        assert note.has_class("error")
+
+
+async def test_reasoning_in_detail_panel_and_hidden_for_failed_item():
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await start(app, pilot)
+        screen.rerun()
+        await settle(app, pilot)
+        assert screen.reasoning[1] == "r"
+        assert isinstance(screen.query_one("#detail-scroll"), VerticalScroll)
+        head = screen.query_one("#reasoning-head", Static)
+        assert head.display and str(head.render()) == "classifier reasoning"
+        assert str(screen.query_one("#reasoning", Static).render()) == "r"
+        assert "item 1" in str(screen.query_one("#detail", Static).render())
+        screen.errors = {1: "boom"}
+        screen.show()
+        assert not head.display and not screen.query_one("#reasoning").display
+        assert "Model failed: boom" in str(screen.query_one("#detail", Static).render())
+        screen.errors, screen.reasoning = {}, {}  # an old result: no reasoning
+        screen.show()
+        assert not head.display
+
+
+@pytest.mark.parametrize(("width", "stacked"), [(119, False), (120, True)])
+async def test_layout_side_by_side_under_120_stacked_from_120(width, stacked):
+    app = HunchesApp()
+    async with app.run_test(size=(width, 40)) as pilot:
+        screen = await start(app, pilot)
+        screen.rerun()
+        await settle(app, pilot)
+        await pilot.pause()
+        dis, text = screen.query_one("#dis-panel"), screen.query_one("#text-panel")
+        assert screen.query_one("#body").has_class("-stacked") is stacked
+        if stacked:
+            assert text.region.y >= dis.region.y + dis.region.height
+            assert dis.region.height > text.region.height  # 5:4
+        else:
+            assert text.region.y == dis.region.y
+            assert text.region.x >= dis.region.x + dis.region.width
