@@ -243,8 +243,9 @@ async def test_all_nine_stages_with_resume():
         assert app.stage == 7
         await app.workers.wait_for_complete()
         await pilot.pause()
-        app.screen.query_one("#cutoff", Input).value = str(CUTOFF)
-        app.screen.action_save()  # type: ignore[unresolved-attribute]
+        app.screen.query_one("#bands", DataTable).focus()
+        await pilot.press("down", "down", "enter")  # band 2 = 0.650
+        await pilot.press("f2")
         await pilot.pause()
         assert app.stage == 8
     data = json.loads(files.read_text("threshold.json") or "")
