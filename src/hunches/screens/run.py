@@ -12,6 +12,7 @@ from hunches import cost, files
 from hunches.app import AppFooter, StatusHeader, panel, retitle
 from hunches.classifier import classify_many
 from hunches.screens.final import RESULT, prompt_hash
+from hunches.screens.progress import seconds_text
 
 
 def pending() -> list[dict]:
@@ -23,12 +24,6 @@ def pending() -> list[dict]:
         for c in files.read_jsonl("candidates.jsonl")
         if c["max_similarity"] >= cutoff and c["id"] not in done
     ]
-
-
-def seconds_text(seconds: float) -> str:
-    minutes, secs = divmod(round(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{secs:02d}s"
 
 
 def estimate(n: int, model: str) -> str:

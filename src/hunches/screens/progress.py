@@ -1,6 +1,9 @@
 from rich.text import Text
+from textual.app import ComposeResult
 from textual.color import Color
+from textual.containers import Vertical
 from textual.widget import Widget
+from textual.widgets import Button, Static
 
 _USED = {"primary", "success", "background", "foreground", "boost"}
 
@@ -56,3 +59,82 @@ class LabelBar(Widget):
         text.stylize(f"bold {colors['background']} on {bar}", 0, fill)
         text.stylize(f"{colors['foreground']} on {colors['boost']}", fill, width)
         return text
+
+
+def seconds_text(seconds: float) -> str:
+    minutes, secs = divmod(round(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
+def eta_text(done: int, total: int, live_done: int, elapsed: float) -> str | None:
+    """Time left, from the rate of non-cached completions; None until there are 3 of them."""
+    if live_done < 3:
+        return None
+    return seconds_text((total - done) * elapsed / live_done)
+
+
+BUTTONS = {
+    "stop": ("Stop", "x", "error"),
+    "resume": ("Resume", "s", "primary"),
+    "start": ("Start", "s", "primary"),
+}
+
+
+class RunIndicator(Vertical):
+    """Centred run block: title, bar, "N of M · about X left", optional status line and button.
+
+    The button is `#run-button`; its label tells the screen which action it stands for
+    (Stop calls the screen's stop action, Start/Resume its start action).
+    """
+
+    DEFAULT_CSS = """
+    RunIndicator { height: 1fr; align: center middle; }
+    RunIndicator > * { width: auto; margin-bottom: 1; }
+    RunIndicator > LabelBar { width: 36; }
+    RunIndicator #run-title { text-style: bold; }
+    RunIndicator #run-counts { color: $text-muted; }
+    RunIndicator #run-button { width: auto; margin-bottom: 0; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="run-title")
+        yield LabelBar(0, 0, "")
+        yield Static("", id="run-counts")
+        status = Static("", id="run-status")
+        status.display = False
+        yield status
+        button = Button("Stop  x", id="run-button")
+        button.display = False
+        yield button
+
+    def set_title(self, title: str) -> None:
+        self.query_one("#run-title", Static).update(title)
+
+    def set_progress(
+        self, done: int, total: int, eta: str | None = None, detail: str = ""
+    ) -> None:
+        pct = 100 * done // total if total else 0
+        self.query_one(LabelBar).update_bar(total, done, f"{pct}%")
+        counts = f"{done} of {total}"
+        if eta:
+            counts += f" \u00b7 about {eta} left"
+        if detail:
+            counts += f" \u00b7 {detail}"
+        self.query_one("#run-counts", Static).update(counts)
+
+    def set_status(self, text: str, kind: str = "note") -> None:
+        status = self.query_one("#run-status", Static)
+        status.update(text)
+        status.set_classes(kind)
+        status.display = bool(text)
+
+    def set_button(self, kind: str | None) -> None:
+        button = self.query_one("#run-button", Button)
+        button.display = kind is not None
+        if kind is not None:
+            label, key, variant = BUTTONS[kind]
+            button.label = f"{label}  {key}"
+            button.variant = variant
