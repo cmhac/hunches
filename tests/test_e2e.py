@@ -101,6 +101,17 @@ def project(tmp_path, monkeypatch):
     items = [{"id": f"i{n}", "text": f"item {n}"} for n in range(len(SIMS))]
     (corpus / "items.jsonl").write_text("".join(json.dumps(r) + "\n" for r in items))
     (corpus / "meta.json").write_text(json.dumps({"embedding_model": "m"}))
+    # the taxonomy screen opens with a context turn: it must not reach a real model either
+    original = TaxonomyScreen.__init__
+
+    async def ready(messages, info: AgentInfo):
+        yield "Ready."
+
+    def init(self):
+        original(self)
+        self.agent.model = FunctionModel(stream_function=ready)
+
+    monkeypatch.setattr(TaxonomyScreen, "__init__", init)
     # every classifier call, in every stage, goes to the FunctionModel
     monkeypatch.setattr(
         classifier, "Agent", lambda model, **kw: Agent(FunctionModel(classify_fn), **kw)

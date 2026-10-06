@@ -113,3 +113,12 @@ SelectionList { border: none; padding: 0; background: $background; }
 
 ProgressBar { width: 1fr; }
 ProgressBar Bar { width: 1fr; }
+
+/* Markdown (the Taxonomy prompt view): primary h1, bold h2, faint bullets, no tint or side padding */
+Markdown { padding: 0; background: transparent; }
+MarkdownHeader { margin: 1 0 0 0; background: transparent; content-align: left top; }
+Markdown > MarkdownHeader:first-child { margin-top: 0; }
+MarkdownH1 { color: $primary; text-style: bold; }
+MarkdownH2 { color: #EEF1F5; text-style: bold; }
+MarkdownBullet { color: $text-disabled; }
+MarkdownBulletList { margin: 0; }
