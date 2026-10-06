@@ -1,15 +1,18 @@
+import asyncio
 import json
 
 import pytest
 from conftest import panel_title
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from textual.widgets import DataTable, Static
+from textual.widgets import Button, DataTable, Static
 
 from hunches import files
 from hunches.app import HunchesApp
+from hunches.screens import final
 from hunches.screens.final import FinalScreen
 from hunches.screens.gold import GoldScreen
+from hunches.screens.progress import RunIndicator
 
 pytestmark = pytest.mark.usefixtures("system_ready")
 
@@ -209,7 +212,9 @@ async def test_redesigned_panels_banner_and_tables():
         dis = screen.query_one("#dis", DataTable)
         assert [str(c) for c in dis.get_row_at(0)] == ["item 50", "■ b", "■ a"]
         assert panel_title(screen.query_one("#dis-panel"))[0] == "disagreements · 1"
-        assert panel_title(screen.query_one("#text-panel"))[0] == "text"
+        assert panel_title(screen.query_one("#text-panel"))[0] == (
+            "text · classifier reasoning"
+        )
 
         files.write_text("prompt.md", "Classify differently.")
         screen.show()
@@ -225,3 +230,254 @@ async def test_redesigned_panels_banner_and_tables():
         screen.note = "Test run failed: x"
         screen.show()
         assert note.has_class("error")
+
+
+def write_result(reasoning=None, **extra):
+    """A result for the prompt as it is now: one disagreement on "item 50"."""
+    d = {"text": "item 50", "gold": ["b"], "predicted": ["a"]}
+    if reasoning is not None:
+        d["reasoning"] = reasoning
+    m = {
+        "n": 10,
+        "exact_match": 0.9,
+        "macro_f1": 0.5,
+        "micro_f1": 0.9,
+        "per_label": {
+            k: {
+                "precision": 0.5,
+                "recall": 0.5,
+                "f1": 0.5,
+                "tp": 1,
+                "fp": 1,
+                "fn": 1,
+                "gold_count": 2,
+                "predicted_count": 2,
+            }
+            for k in ("a", "b")
+        },
+        "disagreements": [0],
+    }
+    files.write_text(
+        "test_result.json",
+        json.dumps(
+            {
+                "prompt_hash": final.prompt_hash(),
+                "timestamp": "2026-10-02T20:41:07+00:00",
+                "metrics": m,
+                "disagreements": [d],
+                **extra,
+            }
+        ),
+    )
+
+
+async def wait_for(pilot, cond):
+    for _ in range(200):
+        await pilot.pause(0.02)
+        if cond():
+            return
+    raise AssertionError("condition not reached")
+
+
+async def test_accept_disabled_unless_fresh_result(monkeypatch):
+    gate = asyncio.Event()
+
+    async def slow(texts, prompt, taxonomy, model):
+        await gate.wait()
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(final, "classify_many", slow)
+    files.write_gold(gold_rows(n_test=10))
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.goto_stage(6)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FinalScreen)
+        accept = screen.query_one("#accept", Button)
+        assert screen.running and accept.disabled  # first run in progress
+        assert str(accept.label) == "Accept  F2"
+        assert str(screen.query_one("#rerun", Button).label) == "Re-run  r"
+        assert str(screen.query_one("#tune", Button).label) == "Back to tuning  t"
+        gate.set()
+        await wait_for(pilot, lambda: not screen.running)
+        assert not accept.disabled  # empty run: result exists and is fresh
+        files.write_text("prompt.md", "Changed.")
+        screen.show()
+        assert accept.disabled  # stale
+        screen.result = None
+        screen.show()
+        assert accept.disabled  # missing
+
+
+async def test_buttons_trigger_the_actions(monkeypatch):
+    files.write_gold(gold_rows(n_test=10))
+    write_result()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.goto_stage(6)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FinalScreen)
+        assert not screen.query_one("#accept", Button).disabled
+        await pilot.click("#accept")
+        await pilot.pause()
+        assert files.read_state().test_done and app.stage == 7
+        app.goto_stage(6)
+        await pilot.pause()
+        await pilot.click("#tune")
+        await pilot.pause()
+        assert app.stage == 5
+        app.goto_stage(6)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FinalScreen)
+        screen.model = FunctionModel(classifier)
+        await pilot.click("#rerun")
+        await pilot.pause()
+        assert screen.running or screen.worker is not None
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert str(screen.query_one("#note", Static).render()).startswith(
+            "Test run finished"
+        )
+
+
+async def test_old_result_has_no_reasoning_new_one_shows_it():
+    files.write_gold(gold_rows(n_test=10))
+    write_result()  # old format: no "reasoning" key
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(6)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FinalScreen)
+        assert not screen.stale()
+        assert str(screen.query_one("#detail", Static).render()) == "item 50"
+        assert not screen.query_one("#reasoning-head").display
+        assert not screen.query_one("#reasoning").display
+    write_result(reasoning="Looks like b.")
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(6)
+        await pilot.pause()
+        screen = app.screen
+        assert screen.query_one("#reasoning-head").display
+        assert str(screen.query_one("#reasoning-head", Static).render()) == (
+            "classifier reasoning"
+        )
+        assert str(screen.query_one("#reasoning", Static).render()) == "Looks like b."
+    write_result(reasoning="ignored")
+    data = json.loads(files.read_text("test_result.json") or "")
+    data["disagreements"][0]["predicted"] = "failed"
+    files.write_text("test_result.json", json.dumps(data))
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.goto_stage(6)
+        await pilot.pause()
+        assert not app.screen.query_one("#reasoning-head").display
+
+
+async def test_run_saves_reasoning_and_layout_follows_width(monkeypatch):
+    real = final.classify_many
+
+    def stub(texts, prompt, taxonomy, model):
+        return real(texts, prompt, taxonomy, FunctionModel(classifier))
+
+    monkeypatch.setattr(final, "classify_many", stub)
+    files.write_gold(gold_rows(n_test=10))
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.goto_stage(6)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FinalScreen)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not screen.query_one("#body").has_class("-stacked")
+    rows = gold_rows(n_test=10)
+    rows[50].labels = ["b"]
+    files.write_gold(rows)
+    (files.root() / "test_result.json").unlink()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        app.goto_stage(6)
+        await pilot.pause()
+        screen = app.screen
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert screen.query_one("#body").has_class("-stacked")
+        saved = json.loads(files.read_text("test_result.json") or "")
+        assert [d["reasoning"] for d in saved["disagreements"]] == ["r"]
+        assert str(screen.query_one("#reasoning", Static).render()) == "r"
+
+
+async def test_run_indicator_stop_resume_and_failure(monkeypatch):
+    real = final.classify_many
+    gate = asyncio.Event()
+    calls = []
+
+    async def slow(texts, prompt, taxonomy, model):
+        calls.append(len(texts))
+        n = 0
+        async for i, p in real(texts, prompt, taxonomy, FunctionModel(classifier)):
+            yield i, p
+            n += 1
+            if n == 4 and len(calls) == 1:
+                await gate.wait()
+
+    monkeypatch.setattr(final, "classify_many", slow)
+    files.write_gold(gold_rows(n_test=10))
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, FinalScreen)
+        ind = screen.query_one(RunIndicator)
+        await wait_for(
+            pilot,
+            lambda: str(ind.query_one("#run-counts", Static).content)[:4] == "4 of",
+        )
+        assert ind.display
+        assert not screen.query_one("#metrics-panel").display
+        assert not screen.query_one("#body").display
+        assert str(ind.query_one("#run-title", Static).content) == (
+            "Running the held-out test set"
+        )
+        assert str(ind.query_one("#run-counts", Static).content).endswith(
+            "classifier test"
+        )
+        assert str(ind.query_one("#run-button", Button).label) == "Stop  x"
+        await pilot.press("x")
+        await wait_for(pilot, lambda: screen.stopped)
+        assert ind.display and not screen.query_one("#body").display
+        assert str(ind.query_one("#run-button", Button).label) == "Resume  s"
+        assert screen.query_one("#accept", Button).disabled
+        await pilot.press("s")
+        await wait_for(pilot, lambda: not screen.running and not screen.stopped)
+        assert calls == [10, 10]
+        assert not ind.display and screen.query_one("#metrics-panel").display
+        assert str(screen.query_one("#note", Static).render()).startswith(
+            "Test run finished"
+        )
+
+        # a re-run after a result names the reason, and a failure brings the panels back
+        async def boom(texts, prompt, taxonomy, model):
+            raise RuntimeError("401")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(final, "classify_many", boom)
+        screen.action_rerun()
+        await wait_for(pilot, lambda: not screen.running)
+        note = screen.query_one("#note", Static)
+        assert str(note.render()) == "Test run failed: 401"
+        assert note.has_class("error")
+        assert not ind.display and screen.query_one("#body").display
