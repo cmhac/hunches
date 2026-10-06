@@ -44,7 +44,12 @@ backend (local corpus or S3 Vectors), corpus and embedding model; the assistant 
 from the system defaults into the project, and later system changes never alter an existing project. **Project
 settings** edits them afterwards.
 
-## Keys
+## Layout and keys
+
+From 100 columns the left side is a rail with the stage list, project, models and cost; below that it is a one-row
+header. Panels have a title row; the focused panel has a bar on its left. Every action has a button that shows its
+key, and the footer lists the keys of the current screen (it leaves out the ones the rail already shows).
+Everything works at 80x24.
 
 | Key | Action |
 |-----|--------|
@@ -54,6 +59,11 @@ settings** edits them afterwards.
 | `f5` | System settings |
 | `n` / `p` | Next / previous stage (not on Projects, where `n` is New) |
 | `q` | Quit |
+| `ctrl+s` | Save the label or prompt being edited (Taxonomy) |
+| `e` | Edit (labels, a seed, or propose a prompt change on Tuning) |
+| `o` | Edit the prompt by hand (Tuning) |
+| `c` | Switch between Chat and Results on a narrow Tuning screen |
+| `x` / `s` | Stop / start or resume a classifier run (Tuning, Test, Threshold, Full run) |
 
 The F-keys work from every screen, even with a text field focused, but not on top of a dialog.
 
@@ -88,12 +98,30 @@ refuses to search otherwise. It only embeds your seed phrases.
 1. **Brief and seeds.** Describe what you want to find; the assistant asks questions and proposes seed phrases that you edit in a table and approve.
 2. **Search.** Seeds are embedded and searched; every item with cosine similarity of at least 0.60 becomes a candidate (score = best seed). Counts per similarity band are shown.
 3. **Taxonomy and prompt.** The assistant interviews you (one label or several per item) and writes `taxonomy.yaml` and `prompt.md`. `off_topic` is built in and always exclusive.
-4. **Gold dev set.** You label 50 random candidates; the classifier model classifies as you go and per-label counts update live.
-5. **Tuning.** Metrics (accuracy, per-label P/R/F1, macro/micro-F1) and a list of disagreements. The assistant proposes prompt edits you accept or change until the target metric reaches the target score.
+4. **Gold dev set.** You label 50 random candidates by key. Labelling does not call the classifier (so it costs nothing and the classifier cache is not warmed): the first Tuning run classifies the whole dev set. Every row must be labelled to finish. If the corpus yields fewer than 50 candidates for a split, labelling is blocked with an error; add seeds or change the project's settings.
+5. **Tuning.** The dev set is classified (progress, then results). Metrics (accuracy, per-label P/R/F1, macro/micro-F1) and the disagreements, each with the classifier's reasoning. Chat with the assistant, who can look at the disagreements and propose a prompt you accept, edit or reject, or edit the prompt yourself (`o`), until the target metric reaches the target score.
 6. **Gold test set.** 50 more labelled candidates, classified once to report held-out metrics. Changing the prompt or the classifier model marks the result stale.
-7. **Threshold.** About 30 items per similarity band are classified so you can see the off-topic rate per band and pick a cutoff.
-8. **Full run.** Candidates at or above the cutoff are classified with the classifier model, written to `results.jsonl` as they finish, with time and cost estimates first. Stop and resume freely.
+7. **Threshold.** About 30 items per similarity band are classified so you can see the off-topic rate per band. The cutoff is a band edge: select a band row (Enter) and Save (F2); the band's lower bound becomes the cutoff.
+8. **Full run.** Candidates at or above the cutoff are classified with the classifier model, written to `results.jsonl` as they finish, with time and cost estimates first. Stop and resume freely. A prompt that has not been tested (stage 6) with the current prompt and classifier model blocks the run.
 9. **Browse.** Search and filter `results.jsonl` (first 1000 matches are shown).
+
+## Classifier reasoning and the cache
+
+The classifier now returns a short reasoning before its labels, shown next to disagreements. The call cache key
+changed with it, and cache entries are `{"labels", "reasoning"}` (an old list-shaped entry is a miss). **The first
+run after upgrading is therefore billed again**, even for items classified before. Cost estimates show `?` rather
+than `$0` when a model's price is unknown.
+
+## Taxonomy versions
+
+Editing label descriptions or the prompt never needs a new version. Changing the set of label names, or the mode
+(one label or several), while gold rows are already labelled would invalidate them, so Taxonomy asks first and then
+starts a new version: the current taxonomy, prompt, gold labels, state and derived results are copied whole to
+`.hunches/versions/<n>/`, and the gold items stay the same with their labels cleared, to be labelled again under the
+new labels (approve the taxonomy again to relabel). Nothing under `versions/` is ever deleted. The **Versions**
+button on the Labels panel lists them; **Restore** makes one live again, after archiving the current state as a
+new version first, so a restore can itself be undone. If the assistant's `write_taxonomy` would start a version, it
+asks you to confirm.
 
 ## What to commit
 
@@ -103,7 +131,7 @@ too large, gitignore it. Keep `.env` out of git.
 
 ## Cost tracking
 
-The header always shows total spend. Costs come from `genai-prices` and are summed per model in `cost.json`
+The header (the rail from 100 columns) always shows total spend. Costs come from `genai-prices` and are summed per model in `cost.json`
 and survive restarts. Cached calls cost nothing. If a model's price is unknown the cost is shown as `?`
 with a warning, never as `$0`.
 

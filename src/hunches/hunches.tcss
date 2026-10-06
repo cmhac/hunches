@@ -94,6 +94,7 @@ ModalScreen { background: $background 70%; align: center middle; }
 .modal-box > PanelTitle > .panel-title { color: $primary; }
 .modal-box .buttons { height: auto; align-horizontal: right; }
 ConfirmScreen > Vertical { width: 58; height: auto; max-height: 90%; }
+ConfirmScreen Label { width: 100%; }
 ProposalScreen > .modal-box { padding: 0 1; }
 PathPicker DirTree { background: $surface; }
 

@@ -1,5 +1,7 @@
 # 001 — Initial version
 
+> 003 (TUI redesign) changes parts of this spec: see "Behaviour that changes in 001 and 002" in `../003-tui-redesign/spec.md`. The text below is kept as written.
+
 Status: draft for implementation. Source: Notion "Hunches tool" idea page, plus design review with the author.
 
 ## Principles

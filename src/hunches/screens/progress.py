@@ -92,7 +92,7 @@ class RunIndicator(Vertical):
 
     DEFAULT_CSS = """
     RunIndicator { height: 1fr; align: center middle; }
-    RunIndicator > * { width: auto; margin-bottom: 1; }
+    RunIndicator > * { width: auto; max-width: 100%; margin-bottom: 1; }
     RunIndicator > LabelBar { width: 36; }
     RunIndicator #run-title { text-style: bold; }
     RunIndicator #run-counts { color: $text-muted; }
