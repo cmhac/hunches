@@ -6,10 +6,11 @@ from conftest import panel_title
 from pydantic_ai import Embedder
 from pydantic_ai.embeddings import EmbeddingResult, TestEmbeddingModel
 from pydantic_ai.usage import RequestUsage
-from textual.widgets import Button, DataTable, Label, Static
+from textual.widgets import Button, Label, Select, Static
 
-from hunches import files, search
-from hunches.app import HunchesApp
+from hunches import candidates, files, search
+from hunches.app import ConfirmScreen, HunchesApp
+from hunches.screens.progress import LabelBar
 from hunches.screens.search import SearchScreen
 
 
@@ -49,6 +50,7 @@ def project(tmp_path, monkeypatch):
         )
     )
     files.write_text("seeds.csv", "seed\nalpha\n")
+    files.write_state(files.State(seeds_approved=True))
 
 
 async def open_search(pilot, app):
@@ -65,30 +67,58 @@ async def run(pilot, app, screen):
     await pilot.pause()
 
 
-def rows(screen):
-    table = screen.query_one("#bands", DataTable)
-    return [[str(c) for c in table.get_row_at(i)] for i in range(table.row_count)]
+def band_rows(screen):
+    """[(band name, count text)] from the bands Static: first and last word of each line."""
+    lines = str(screen.query_one("#bands", Static).content).splitlines()
+    return [(line.split()[0], line.split()[-1]) for line in lines]
 
 
-async def test_band_table_matches_counts():
+def label(screen):
+    return str(screen.query_one("#run", Button).label)
+
+
+def status(screen):
+    return str(screen.query_one("#status", Label).render())
+
+
+def write_candidates(n, seed="alpha", sim=0.7):
+    files.write_jsonl(
+        "candidates.jsonl",
+        [
+            {"id": str(i), "text": "t", "max_similarity": sim, "best_seed": seed}
+            for i in range(n)
+        ],
+    )
+
+
+async def test_band_bars_match_counts():
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await open_search(pilot, app)
         screen.embedder = StubEmbedder({"alpha": [1, 0]})
         await run(pilot, app, screen)
         # similarities 1.0 (0.75+), 0.8 (0.75+), 0.7 (0.7-0.725), 0.62 (0.6-0.625)
-        assert rows(screen) == [
-            ["0.6-0.625", "1", "4"],
-            ["0.625-0.65", "0", "3"],
-            ["0.65-0.675", "0", "3"],
-            ["0.675-0.7", "0", "3"],
-            ["0.7-0.725", "1", "3"],
-            ["0.725-0.75", "0", "2"],
-            ["0.75+", "2", "2"],
-            ["Total", "4", ""],
+        assert band_rows(screen) == [
+            ("0.6-0.625", "1"),
+            ("0.625-0.65", "0"),
+            ("0.65-0.675", "0"),
+            ("0.675-0.7", "0"),
+            ("0.7-0.725", "1"),
+            ("0.725-0.75", "0"),
+            ("0.75+", "2"),
         ]
-        assert "4  alpha" in str(screen.query_one("#seeds", Static).render())
-        assert not str(screen.query_one("#warning", Label).render())
+        text = str(screen.query_one("#bands", Static).content)
+        assert "At or above" not in text and "Total" not in text
+        # the largest band (count 2) has the longest bar; empty bands have none
+        bars = [line.count("█") for line in text.splitlines()]
+        assert bars[6] == max(bars) > bars[0] == bars[4] > 0 == bars[1]
+        assert panel_title(screen.query_one("#bands-panel")) == (
+            "Candidates by similarity",
+            "4 candidates",
+        )
+        top = str(screen.query_one("#seeds", Static).content).split()
+        assert (top[0], top[1], top[-1]) == ("1", "4", "alpha")
+        assert not screen.query_one("#warning").display
 
 
 async def test_capped_warning_with_stubbed_s3(monkeypatch):
@@ -114,8 +144,18 @@ async def test_capped_warning_with_stubbed_s3(monkeypatch):
         screen = await open_search(pilot, app)
         screen.embedder = StubEmbedder({"alpha": [1, 0]})
         await run(pilot, app, screen)
-        assert "topK cap of 2" in str(screen.query_one("#warning", Label).render())
-        assert rows(screen)[-1][:2] == ["Total", "2"]
+        assert str(screen.query_one("#warning", Label).render()) == (
+            "WARNING: S3 returned its cap of 2 hits for at least one seed; "
+            "only the 2 highest-scoring hits are kept."
+        )
+        assert panel_title(screen.query_one("#bands-panel"))[1] == "2 candidates"
+
+
+def test_cap_warning_formats_thousands():
+    assert SearchScreen.cap_warning(10_000) == (
+        "WARNING: S3 returned its cap of 10,000 hits for at least one seed; "
+        "only the 10,000 highest-scoring hits are kept."
+    )
 
 
 async def test_embedding_model_mismatch_is_shown():
@@ -134,58 +174,140 @@ async def test_embedding_model_mismatch_is_shown():
         await run(pilot, app, screen)
         error = str(screen.query_one("#error", Label).render())
         assert "mismatch" in error and "embedding_model" in error
+        assert screen.query_one("#error").has_class("error")
+        assert "\nFix:" in error
+        assert screen.query_one("#results").has_class("-inactive")  # failed: dimmed
         assert app.is_running
 
 
-async def test_panels_notice_classes_and_empty_state():
+async def test_never_run_state():
     app = HunchesApp()
     async with app.run_test(size=(80, 24)) as pilot:
         screen = await open_search(pilot, app)
-        for id_ in ("#done", "#warning", "#error"):
-            assert not screen.query_one(id_).display  # empty messages take no row
+        assert label(screen) == "Run search  r"
+        button = screen.query_one("#run", Button)
+        assert button.variant == "primary" and not button.disabled
+        assert button.size.height == 1
+        assert not status(screen)
+        assert screen.query_one("#results").has_class("-inactive")
+        assert not screen.query_one("#progress").display
+        assert not screen.query_one("#pool").display
         assert panel_title(screen.query_one("#bands-panel"))[0] == (
-            "candidates.jsonl · by similarity band"
+            "Candidates by similarity"
         )
-        assert (
-            panel_title(screen.query_one("#seeds-panel"))[0] == "best seed (items won)"
-        )
+        assert panel_title(screen.query_one("#seeds-panel"))[0] == "Top seeds"
         assert "Run the search to see which seeds find the most items." in str(
-            screen.query_one("#seeds", Static).render()
+            screen.query_one("#seeds", Static).content
         )
-        status = screen.query_one("#status")
-        assert str(status.render()) == "Seeds are not approved yet."
-        assert status.has_class("warn")
-        assert screen.query_one("#run", Button).size.height == 1  # compact
+        for id_ in ("#warning", "#error"):
+            assert not screen.query_one(id_).display
+        assert not app.screen.query("#done")
 
-        screen.embedder = StubEmbedder({"alpha": [1, 0]})
-        screen.action_run()  # synchronous: the worker has not run yet
+
+async def test_not_approved_disables_button_and_ignores_r():
+    files.write_state(files.State())
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = await open_search(pilot, app)
         assert screen.query_one("#run", Button).disabled
-        assert str(screen.query_one("#status").render()) == "Searching..."
+        assert status(screen) == "Seeds are not approved yet."
+        assert screen.query_one("#status").has_class("warn")
+        assert screen.query_one("#results").has_class("-inactive")
+        await pilot.press("r")
+        await pilot.pause()
+        assert not screen.searching
+        assert isinstance(app.screen, SearchScreen)
+
+
+async def test_running_shows_progress_bar_and_disables_button():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await open_search(pilot, app)
+        embedder = StubEmbedder({"alpha": [1, 0]})
+        seen = []
+        original = screen.on_progress
+
+        def spy(done, total, seed):
+            original(done, total, seed)
+            bar = screen.query_one("#progress", LabelBar)
+            seen.append((bar.total, bar.value, bar.label, label(screen)))
+
+        screen.on_progress = spy
+        screen.embedder = embedder
+        files.write_text("seeds.csv", "seed\nalpha\n")
+        screen.action_run()  # synchronous: the worker has not run yet
+        button = screen.query_one("#run", Button)
+        assert button.disabled and label(screen) == "Searching…"
+        bar = screen.query_one("#progress", LabelBar)
+        assert bar.display and (bar.total, bar.value, bar.label) == (1, 0, "0/1")
+        assert bar.align == "left"
+        assert not status(screen)
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert not screen.query_one("#run", Button).disabled
-        done = screen.query_one("#done")
-        assert str(done.render()).startswith("Done. 4 candidates written")
-        assert done.has_class("ok") and done.display
-        assert not str(screen.query_one("#status").render())
+        assert seen == [(1, 1, "1/1  alpha", "Searching…")]
+        assert not bar.display
+        assert not button.disabled and label(screen) == "Rerun search  r"
+        assert not screen.query_one("#results").has_class("-inactive")
 
 
-async def test_mismatch_error_has_error_class():
-    files.write_config(
-        files.Config(
-            assistant_model="anthropic:claude-sonnet-5-5",
-            classifier_model="anthropic:claude-haiku-4-5",
-            corpus_dir="corpus",
-            embedding_model="other-model",
-        )
-    )
+async def test_rerun_with_unchanged_seeds_asks_first():
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
         screen = await open_search(pilot, app)
         screen.embedder = StubEmbedder({"alpha": [1, 0]})
         await run(pilot, app, screen)
-        assert screen.query_one("#error").has_class("error")
-        assert "\nFix:" in str(screen.query_one("#error").render())
+        assert label(screen) == "Rerun search  r"
+        assert not status(screen)
+        before = files.read_text("candidates.meta.json")
+        await pilot.press("r")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        assert app.screen.question == (
+            "You've already run the searches, and haven't changed the seed "
+            "candidates. Depending on the size of the corpus, this can take a long "
+            "time. Are you sure you want to rerun searches?"
+        )
+        await pilot.click("#no")  # cancel: nothing runs
+        await pilot.pause()
+        assert not screen.searching
+        assert files.read_text("candidates.meta.json") == before
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.press("enter")  # confirm
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert files.read_text("candidates.meta.json") != before
+        assert isinstance(app.screen, SearchScreen)
+
+
+async def test_changed_seeds_run_without_confirmation():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.embedder = StubEmbedder({"alpha": [1, 0], "beta": [0, 1]})
+        await run(pilot, app, screen)
+        files.write_text("seeds.csv", "seed\nalpha\nbeta\n")
+        screen.refresh_state()
+        assert label(screen) == "Run search  r"
+        assert status(screen) == "Seeds changed, rerun needed"
+        assert screen.query_one("#status").has_class("warn")
+        await pilot.press("r")
+        await pilot.pause()
+        assert isinstance(app.screen, SearchScreen)  # no ConfirmScreen
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert label(screen) == "Rerun search  r"
+        assert not status(screen)
+
+
+async def test_old_project_without_meta_counts_as_unchanged():
+    write_candidates(3)
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = await open_search(pilot, app)
+        assert label(screen) == "Rerun search  r"
+        assert not status(screen)
+        assert not screen.query_one("#results").has_class("-inactive")
 
 
 async def test_counts_use_thousands_separators():
@@ -198,5 +320,67 @@ async def test_counts_use_thousands_separators():
                 for i in range(1204)
             ]
         )
-        assert rows(screen)[-1] == ["Total", "1,204", ""]
-        assert rows(screen)[4][1:] == ["1,204", "1,204"]
+        assert band_rows(screen)[4] == ("0.7-0.725", "1,204")
+        assert panel_title(screen.query_one("#bands-panel"))[1] == "1,204 candidates"
+        assert "1,204" in str(screen.query_one("#seeds", Static).content)
+
+
+async def test_top_seeds_threshold_select():
+    rows = [
+        {"id": str(i), "text": "t", "max_similarity": s, "best_seed": b}
+        for i, (s, b) in enumerate(
+            [(0.61, "A"), (0.62, "A"), (0.63, "A"), (0.7, "B"), (0.8, "B")]
+        )
+    ]
+    files.write_jsonl("candidates.jsonl", rows)
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_search(pilot, app)
+        select = screen.query_one("#threshold", Select)
+        assert select.value == candidates.FLOOR
+        assert [v for _, v in select._options] == candidates.BANDS
+        assert [str(p) for p, _ in select._options] == [
+            f"{b:g}" for b in candidates.BANDS
+        ]
+        lines = str(screen.query_one("#seeds", Static).content).splitlines()
+        assert [(ln.split()[0], ln.split()[1], ln.split()[-1]) for ln in lines] == [
+            ("1", "3", "A"),
+            ("2", "2", "B"),
+        ]
+        select.value = 0.7
+        await pilot.pause()
+        lines = str(screen.query_one("#seeds", Static).content).splitlines()
+        assert [(ln.split()[0], ln.split()[1], ln.split()[-1]) for ln in lines] == [
+            ("1", "2", "B")
+        ]
+        assert (
+            "similarity at or above" in panel_title(screen.query_one("#seeds-panel"))[1]
+        )
+
+
+async def test_pool_warning_banner():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await open_search(pilot, app)
+        pool = screen.query_one("#pool")
+        assert not pool.display  # no results
+        write_candidates(99)
+        screen.refresh_state()
+        assert pool.display and pool.has_class("banner") and pool.has_class("-stale")
+        assert str(pool.render()) == (
+            "Only 99 candidates found. Labelling needs at least 100: 50 dev and 50 test."
+        )
+        write_candidates(100)
+        screen.refresh_state()
+        assert not pool.display
+        write_candidates(3)
+        screen.refresh_state()
+        assert pool.display
+        # hidden while a search is running
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        screen.start()
+        assert not pool.display
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        # the stub corpus yields 4 candidates: shown again with that number
+        assert pool.display and "Only 4 candidates found." in str(pool.render())

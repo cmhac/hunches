@@ -100,3 +100,51 @@ def test_band_of(sim, band):
 def test_band_counts():
     rows = [{"max_similarity": s} for s in (0.60, 0.61, 0.625, 0.75, 0.9)]
     assert candidates.band_counts(rows) == [2, 1, 0, 0, 0, 0, 2]
+
+
+def test_seeds_digest_is_sha256_of_json_list():
+    import hashlib
+
+    assert (
+        candidates.seeds_digest(["a", "b"]) == hashlib.sha256(b'["a", "b"]').hexdigest()
+    )
+    assert candidates.seeds_digest(["a", "b"]) != candidates.seeds_digest(["b", "a"])
+
+
+async def test_build_writes_meta_and_progress_per_seed():
+    calls = []
+    embedder = StubEmbedder({"alpha": [1, 0], "beta": [0, 1]})
+    await candidates.build_candidates(
+        embedder, progress=lambda done, total, seed: calls.append((done, total, seed))
+    )
+    assert calls == [(1, 2, "alpha"), (2, 2, "beta")]
+    meta = json.loads(files.read_text("candidates.meta.json") or "")
+    assert meta["seeds_digest"] == candidates.seeds_digest(["alpha", "beta"])
+    assert meta["floor"] == 0.6
+    assert meta["written_at"].endswith("+00:00")
+
+
+async def test_seeds_changed_cases():
+    embedder = StubEmbedder({"alpha": [1, 0], "beta": [0, 1], "gamma": [1, 0]})
+    assert candidates.seeds_changed() is False  # nothing built, no meta
+    await candidates.build_candidates(embedder)
+    assert candidates.seeds_changed() is False  # unchanged
+    files.write_text("seeds.csv", "seed\nbeta\n\nalpha\n")
+    assert candidates.seeds_changed() is True  # reordered counts as changed
+    files.write_text("seeds.csv", "seed\nalpha\n\nbeta\n")
+    assert candidates.seeds_changed() is False  # back to the original
+    files.write_text("seeds.csv", "seed\nalpha\n\ngamma\n")
+    assert candidates.seeds_changed() is True  # edited
+    (files.root() / "candidates.meta.json").unlink()
+    assert candidates.seeds_changed() is False  # old project: meta missing = unchanged
+
+
+def test_top_seeds_at_two_thresholds():
+    rows = [
+        {"max_similarity": s, "best_seed": b}
+        for s, b in [(0.61, "A"), (0.62, "A"), (0.63, "A"), (0.7, "B"), (0.8, "B")]
+    ]
+    assert candidates.top_seeds(rows, 0.6) == [("A", 3), ("B", 2)]
+    assert candidates.top_seeds(rows, 0.7) == [("B", 2)]  # A drops out, ranking changes
+    assert candidates.top_seeds(rows, 0.65)[0] == ("B", 2)
+    assert len(candidates.top_seeds(rows * 1, 0.6, n=1)) == 1

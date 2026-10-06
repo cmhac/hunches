@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import panel_title
 from pydantic_ai import Agent, Embedder
 from pydantic_ai.embeddings import EmbeddingResult, TestEmbeddingModel
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
@@ -166,12 +167,8 @@ async def test_all_nine_stages_with_resume():
         await pilot.press("r")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        total = app.screen.query_one("#bands", DataTable).get_row_at(7)
-        assert [str(c) for c in total] == [
-            "Total",
-            "110",
-            "",
-        ]  # the 10 low items are below the floor
+        # the 10 low items are below the floor
+        assert panel_title(app.screen.query_one("#bands-panel"))[1] == "110 candidates"
 
     # resume at 3; stage 3: taxonomy and prompt
     app = HunchesApp()
