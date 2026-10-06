@@ -122,3 +122,6 @@ MarkdownH1 { color: $primary; text-style: bold; }
 MarkdownH2 { color: #EEF1F5; text-style: bold; }
 MarkdownBullet { color: $text-disabled; }
 MarkdownBulletList { margin: 0; }
+
+/* Gold: the item sits on the page background, with the focus bar */
+GoldScreen #item { background: $background; }
