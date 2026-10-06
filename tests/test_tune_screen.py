@@ -367,9 +367,9 @@ async def test_controls_mirror_actions_and_enabled_states():
         assert files.read_config().target_score == 0.89
         assert str(screen.query_one("#score", Static).render()) == "0.89"
         await pilot.click("#score-up")
-        await pilot.pause()
+        await pilot.pause(0.3)  # a Button ignores clicks while -active (0.2 s)
         await pilot.click("#score-up")
-        await pilot.pause()
+        await pilot.pause(0.3)
         assert files.read_config().target_score == 0.91
         screen.config.target_score = 1.0
         screen.show()

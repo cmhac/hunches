@@ -380,7 +380,7 @@ async def test_button_starts_and_stops(monkeypatch):
         await pilot.pause()
         screen = app.screen
         await pilot.click("#run-button")
-        await pilot.pause(0.2)
+        await pilot.pause(0.3)  # a Button ignores clicks while -active (0.2 s)
         assert block(screen)[0] == "Classifying candidates"
         await pilot.click("#run-button")
         await app.workers.wait_for_complete()
