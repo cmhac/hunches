@@ -3,16 +3,17 @@ import hashlib
 import json
 
 import pytest
-from conftest import panel_title
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RunUsage
-from textual.widgets import Static
+from textual.widgets import Button, Static
+from textual.widgets._footer import FooterKey
 
 from hunches import cost, files
 from hunches.app import HunchesApp
 from hunches.classifier import Prediction
 from hunches.screens import run
+from hunches.screens.progress import RunIndicator
 from hunches.screens.run import RunScreen
 
 pytestmark = pytest.mark.usefixtures("system_ready")
@@ -193,9 +194,12 @@ async def test_error_rows_listed_then_retried(monkeypatch):
         await pilot.press("s")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert "2: bad" in str(app.screen.query_one("#errors", Static).render())
     assert files.first_incomplete_stage() == 8
     assert [c["id"] for c in run.pending()] == ["2"]
+    # the failure stays in results.jsonl as an error row, exactly as before
+    assert [r["error"] for r in files.read_jsonl("results.jsonl") if "error" in r] == [
+        "bad"
+    ]
 
     use_function_model(monkeypatch)
     app = HunchesApp()
@@ -209,66 +213,117 @@ async def test_error_rows_listed_then_retried(monkeypatch):
     assert not any("error" in r for r in rows)
 
 
-async def test_prompt_change_warns_before_starting(monkeypatch):
+def footer_keys(app) -> set[str]:
+    return {k.key for k in app.screen.query(FooterKey)}
+
+
+def block(screen) -> tuple[str, str, str, str]:
+    """(title, counts, status, button label or '') as the user sees them."""
+    ind = screen.query_one(RunIndicator)
+    status = ind.query_one("#run-status", Static)
+    button = ind.query_one("#run-button", Button)
+    return (
+        str(ind.query_one("#run-title", Static).render()),
+        str(ind.query_one("#run-counts", Static).render()),
+        str(status.render()) if status.display else "",
+        str(button.label) if button.display else "",
+    )
+
+
+async def test_untested_prompt_is_a_hard_block(monkeypatch):
     use_function_model(monkeypatch)
     files.write_text("prompt.md", "Changed.")
     app = HunchesApp()
-    async with app.run_test(size=(120, 40)) as pilot:
+    async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, RunScreen)
+        assert not screen.query_one(RunIndicator).display
+        banner = screen.query_one("#blocked-text", Static)
+        assert str(banner.render()) == (
+            "Cannot start: prompt.md differs from the tested prompt (or was never tested). "
+            "Run the dev set in the Tuning loop with this prompt first."
+        )
+        assert banner.has_class("banner", "-stale")
+        assert not screen.query("#warn")
+        assert footer_keys(app).isdisjoint({"s", "x"})
         await pilot.press("s")
+        screen.action_start()  # called directly: the guard stays in the method
         await pilot.pause()
-        assert "differs" in str(app.screen.query_one("#warn", Static).render())
+        assert screen.worker is None and not screen.running
         assert files.read_jsonl("results.jsonl") == []
-        await pilot.press("s")
-        await app.workers.wait_for_complete()
+        assert not (files.root() / "results.jsonl").exists()
+        await pilot.click("#go-tuning")
         await pilot.pause()
-    assert len(files.read_jsonl("results.jsonl")) == 6
+        assert app.stage == 5
 
 
-async def test_redesigned_panels_subtitles_and_banner(monkeypatch):
+async def test_never_tested_prompt_is_blocked():
+    (files.root() / "test_result.json").unlink()
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, RunScreen)
+        assert screen.query_one("#blocked").display
+        screen.action_start()
+        await pilot.pause()
+        assert screen.worker is None
+
+
+async def test_state_table(monkeypatch):
     async def stalls(texts, prompt, taxonomy, model):
         for i in range(2):
             yield i, Prediction(["a"])
         await asyncio.sleep(3600)
 
     app = HunchesApp()
-    async with app.run_test(size=(80, 24)) as pilot:
+    async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, RunScreen)
-        run_panel = screen.query_one("#run-panel")
-        assert panel_title(screen.query_one("#estimate-panel"))[0] == "estimate"
-        assert panel_title(run_panel)[0] == "run · results.jsonl"
-        assert panel_title(run_panel)[1] == "not started"
-        assert run_panel.has_class("-focused")
-        assert not screen.query_one("#warn").display
-
-        monkeypatch.setattr(run, "classify_many", stalls)
-        files.write_text("prompt.md", "Changed.")
-        await pilot.press("s")
-        warn = screen.query_one("#warn", Static)
-        assert warn.display and warn.has_class("banner", "-warning")
-        assert str(warn.render()).startswith(
-            "WARNING: prompt.md or classifier model differs"
+        # not started
+        assert block(screen) == (
+            "Ready to classify",
+            "0 of 6",
+            (
+                "6 items to classify; time no timing samples yet, so no time estimate; "
+                "cost no sample usage yet, so no cost estimate"
+            ),
+            "Start  s",
         )
+        assert not screen.query_one("#blocked").display
+        assert {"s"} <= footer_keys(app) and "x" not in footer_keys(app)
+        # running
+        monkeypatch.setattr(run, "classify_many", stalls)
         await pilot.press("s")
         await pilot.pause(0.2)
-        assert panel_title(run_panel)[1] == "running"
-        live = str(screen.query_one("#live", Static).render())
-        assert live.startswith("2/6 | cost ")
+        assert block(screen) == ("Classifying candidates", "2 of 6", "", "Stop  x")
+        assert "x" in footer_keys(app) and "s" not in footer_keys(app)
         await pilot.press("x")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert panel_title(run_panel)[1] == "stopped · resumable"
-
+        # stopped, no failures
+        assert block(screen) == ("Stopped", "2 of 6", "", "Resume  s")
+        assert "s" in footer_keys(app)
+        # complete
         use_function_model(monkeypatch)
         await pilot.press("s")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert panel_title(run_panel)[1] == "complete"
+        assert block(screen) == (
+            "Complete",
+            "6 of 6",
+            "Nothing to classify; every candidate at or above the threshold is done.",
+            "",
+        )
+        assert footer_keys(app).isdisjoint({"s", "x"})
+        screen.action_start()
+        await pilot.pause()
+        assert screen.worker is not None and not screen.running
 
 
-async def test_failures_list_and_run_failed_error_class(monkeypatch):
+async def test_stopped_with_failures_and_run_failed(monkeypatch):
     async def fails_item_2(texts, prompt, taxonomy, model):
         for i, t in enumerate(texts):
             yield (
@@ -284,17 +339,19 @@ async def test_failures_list_and_run_failed_error_class(monkeypatch):
         await pilot.press("s")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        errors = screen.query_one("#errors", Static)
-        assert str(errors.render()).splitlines() == [
-            "",
-            "Failed (retried next run):",
-            "2: bad",
-        ]
+        assert block(screen) == (
+            "Stopped",
+            "5 of 6",
+            "1 items failed and are retried on the next run",
+            "Resume  s",
+        )
+        assert screen.query_one("#run-status").has_class("warn")
 
     async def boom(texts, prompt, taxonomy, model):
         raise RuntimeError("no key")
         yield  # pragma: no cover
 
+    files.write_jsonl("results.jsonl", [])
     monkeypatch.setattr(run, "classify_many", boom)
     app = HunchesApp()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -303,9 +360,32 @@ async def test_failures_list_and_run_failed_error_class(monkeypatch):
         await pilot.press("s")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        live = screen.query_one("#live", Static)
-        assert str(live.render()) == "Run failed: no key"
-        assert live.has_class("error")
+        assert block(screen) == (
+            "Run failed",
+            "0 of 6",
+            "Run failed: no key",
+            "Resume  s",
+        )
+        assert screen.query_one("#run-status").has_class("error")
+
+
+async def test_button_starts_and_stops(monkeypatch):
+    async def stalls(texts, prompt, taxonomy, model):
+        yield 0, Prediction(["a"])
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(run, "classify_many", stalls)
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        await pilot.click("#run-button")
+        await pilot.pause(0.2)
+        assert block(screen)[0] == "Classifying candidates"
+        await pilot.click("#run-button")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert block(screen) == ("Stopped", "1 of 6", "", "Resume  s")
 
 
 async def test_not_ready_notice():
