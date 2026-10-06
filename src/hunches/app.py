@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -20,6 +21,7 @@ from textual.content import Content
 from textual.markup import escape
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
+from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, Label, Static
 
 from hunches import cost, files, keys, system
@@ -431,8 +433,12 @@ class ChatPanel(Vertical):
             super().__init__()
             self.text = text
 
+    class Changed(Message):
+        """A turn started or finished (`running` flipped)."""
+
     def __init__(self, stage: str, agent: Agent, empty: str = "") -> None:
         super().__init__()
+        self.card_for: Callable[[ToolCallPart], Widget | None] | None = None
         self.stage = stage
         self.agent = agent
         self.empty = empty
@@ -504,6 +510,9 @@ class ChatPanel(Vertical):
                     await self.add(ChatLine("assistant", part.content))
                 elif isinstance(part, ToolCallPart):
                     await self.add(tool_line(part, results.get(part.tool_call_id)))
+                    card = self.card_for(part) if self.card_for else None
+                    if card:  # e.g. a proposal card under its tool line
+                        await self.add(card)
         if not self.empty and not self.lines:
             self.query_one("#empty").display = False
 
@@ -527,9 +536,14 @@ class ChatPanel(Vertical):
     def submit(self) -> None:
         box = self.query_one("#chat-input", Input)
         text = box.value.strip()
-        if not text or self.running:
+        if text and not self.running:
+            box.value = ""
+            self.send(text)
+
+    def send(self, text: str) -> None:
+        """Send `text` as the user's turn (the typed message, or a canned one from a screen button)."""
+        if self.running:
             return
-        box.value = ""
         self.post_message(self.Submitted(text))
         self.run_worker(self.reply(text, show=True), exclusive=True)
 
@@ -558,6 +572,7 @@ class ChatPanel(Vertical):
         self.running = True
         box.disabled = True
         self.sync_send()
+        self.post_message(self.Changed())
         live = self.query_one("#live", ChatLine)
         running: dict[str, FoldLine] = {}
 
@@ -583,7 +598,8 @@ class ChatPanel(Vertical):
                     reply += delta
                     live.set(reply)
                 usage, new = result.usage, result.new_messages()
-                self.history = result.all_messages()
+                # not all_messages(): it merges the consecutive edit lines before this turn and drops their metadata
+                self.history = [*self.history, *new]
             if tag:
                 new[0].metadata = tag
         except Exception as e:  # noqa: BLE001  network/auth errors should not kill the app
@@ -596,6 +612,7 @@ class ChatPanel(Vertical):
             self.running = False
             box.disabled = False
             self.sync_send()
+            self.post_message(self.Changed())
             if had_focus:
                 box.focus()
         live.set("")

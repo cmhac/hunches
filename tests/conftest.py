@@ -74,6 +74,21 @@ def stub_taxonomy_assistant(monkeypatch):
     monkeypatch.setattr(TaxonomyScreen, "sync_context", no_context_turn)
 
 
+@pytest.fixture(autouse=True)
+def quiet_tune_assistant(request, monkeypatch):
+    """A finished dev run on the tuning screen messages the assistant; only tests that ask for the
+    `assistant` fixture (tests/test_tune_screen.py, which stubs the model) want that."""
+    if "assistant" in request.fixturenames:
+        return
+    import hunches.app  # noqa: F401  (import order: screens import the app)
+    from hunches.screens.tune import TuneScreen
+
+    async def no_context_turn(self):
+        pass
+
+    monkeypatch.setattr(TuneScreen, "sync_context", no_context_turn)
+
+
 @pytest.fixture
 def no_keyring():
     """The `fail` backend keyring picks on headless systems: every call raises NoKeyringError."""
