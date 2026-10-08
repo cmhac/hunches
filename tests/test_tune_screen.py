@@ -1090,3 +1090,22 @@ async def test_chat_and_tabs_are_hidden_during_a_run_and_come_back(
         await quiesce(app, pilot)
         assert screen.query_one("#tabs").display
         assert screen.query_one(ChatPanel).display  # the tab the user was on
+
+
+async def test_accepted_prompt_is_saved_through_history():
+    from hunches import history
+
+    files.write_state(files.State(seeds_approved=True, taxonomy_approved=True))
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, TuneScreen)
+        screen.model = FunctionModel(classifier)  # ty: ignore[invalid-assignment]
+        screen.accepted("Classify. BETTER!")
+        await settle(app, pilot)
+        last = history.entries("prompt")[-1]
+        assert last["source"] == "user"
+        assert history.text(last["after"]) == "Classify. BETTER!"

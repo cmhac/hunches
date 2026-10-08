@@ -394,3 +394,41 @@ async def test_removed_pieces_are_gone(tmp_path, monkeypatch):
         assert not screen.query("#seed-input")
         assert not screen.query("#status")
         assert not any("seeds.csv" in str(s.render()) for s in screen.query(Static))
+
+
+async def test_seed_edits_are_saved_through_history(tmp_path, monkeypatch):
+    from hunches import history
+
+    setup(tmp_path, monkeypatch, ["alpha"])
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.query_one("#seed-list").focus()
+        await pilot.press("a")
+        await pilot.pause()
+        screen.query_one(SeedInput).value = "beta"
+        await pilot.press("enter")
+        await pilot.pause()
+        last = history.entries("seeds")[-1]
+        assert (last["source"], last["summary"]) == ("user", "Seed added")
+        assert history.text(last["after"]) == "seed\nalpha\nbeta\n"
+        assert history.can_undo("seeds")
+
+
+async def test_proposed_seeds_are_one_assistant_group(tmp_path, monkeypatch):
+    from hunches import history
+
+    setup(tmp_path, monkeypatch, ["alpha"])
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.add_seeds(["gamma", "delta"], source="assistant", group="turn-1")
+        last = history.entries("seeds")[-1]
+        assert (last["source"], last["group"]) == ("assistant", "turn-1")
+        assert candidates.read_seeds() == ["alpha", "gamma", "delta"]
+        assert history.undo("seeds") is not None
+        assert candidates.read_seeds() == ["alpha"]

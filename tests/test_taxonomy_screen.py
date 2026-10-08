@@ -1170,3 +1170,66 @@ async def test_agent_edit_rule_still_wins_over_the_confirm(
         await agent_write(pilot, screen, None)
         assert calls.returns[-1].startswith("Not written: the user is editing")
         assert files.list_versions() == []
+
+
+def logged(artifact):
+    from hunches import history
+
+    return [(e["source"], e["summary"]) for e in history.entries(artifact)]
+
+
+async def test_user_edits_and_agent_writes_are_saved_through_history(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        screen = await start(pilot.app, pilot)
+        await edit_labels(pilot, screen)
+        screen.query(".label-desc").last(Input).value = "worried they will"
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert ("user", "Labels: fear description") in logged("taxonomy")
+        calls.tool = ("write_taxonomy", GOOD)
+        await send(pilot, screen, "write it")
+        assert logged("taxonomy")[-1][0] == "assistant"
+        calls.tool = ("write_prompt", {"prompt": "Classify the item."})
+        await send(pilot, screen, "write it")
+        assert logged("prompt")[-1][0] == "assistant"
+        screen.query_one("#edit-prompt", Button).focus()
+        await pilot.press("e")
+        await pilot.pause()
+        screen.query_one("#prompt-text", TextArea).text = "Classify the item.\nMore."
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert logged("prompt")[-1] == ("user", "Prompt: 1 line changed")
+
+
+async def test_new_version_and_restore_are_logged(tmp_path, monkeypatch, calls):
+    from hunches import history
+
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        app = pilot.app
+        screen = await start(app, pilot)
+        await rename_fear(pilot, screen)
+        await pilot.click("#yes")
+        await pilot.pause()
+        edit = history.entries("taxonomy")[-1]
+        assert (edit["source"], edit["snapshot"]) == ("user", 1)
+        assert history.entries()[-1]["kind"] == "version"
+        await pilot.click("#versions")
+        await pilot.pause()
+        await pilot.click("#restore-1")
+        await pilot.pause()
+        await pilot.click("#yes")
+        await pilot.pause()
+        assert logged("taxonomy")[-1] == ("restore", "Restored taxonomy version 1")
+        assert (
+            history.entries("taxonomy")[-1]["after"]
+            == history.entries("taxonomy")[0]["after"]
+        )

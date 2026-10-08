@@ -23,7 +23,7 @@ from textual.markup import escape
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, Markdown, Select, Static, TextArea
 
-from hunches import candidates, files, metrics
+from hunches import candidates, files, history, metrics
 from hunches.app import (
     AppFooter,
     ChatPanel,
@@ -471,7 +471,7 @@ class TaxonomyScreen(Screen):
             """Write prompt.md, the classifier prompt."""
             if self.edit == "prompt":
                 return "Not written: the user is editing the prompt. Ask them to save or discard first."
-            files.write_text("prompt.md", prompt)
+            history.save("prompt", prompt, "assistant", "Prompt written by assistant")
             self.prompt = prompt
             self.updated.add("prompt")
             self.show_prompt()
@@ -763,7 +763,11 @@ class TaxonomyScreen(Screen):
         if self.needs_version(
             new
         ):  # the callers have asked the user (version_question)
-            archived = files.start_new_version(new)
+            archived = history.start_new_version(
+                new,
+                f"Taxonomy version {len(files.list_versions()) + 2} started",
+                "user" if by_user else "assistant",
+            )
             self.taxonomy = new
             if by_user:
                 summary = f"Taxonomy version {archived + 1} started"
@@ -783,7 +787,21 @@ class TaxonomyScreen(Screen):
                 f"Version {archived} archived. Approve to relabel the dev set.",
             )
             return
-        files.write_taxonomy(new)
+        mode = old and old.mode != new.mode
+        change = labels_change(old, new)
+        summary = (
+            f"Mode: {MODE_WORDS[old.mode]} → {MODE_WORDS[new.mode]}"
+            if mode
+            else change[0]
+            if change
+            else "Taxonomy written"
+        )
+        history.save(
+            "taxonomy",
+            files.taxonomy_yaml(new),
+            "user" if by_user else "assistant",
+            summary,
+        )
         self.taxonomy = new
         if by_user:
             self.record_taxonomy(old, new)
@@ -858,7 +876,7 @@ class TaxonomyScreen(Screen):
         )
 
     def restore(self, n: int, made: int) -> None:
-        files.restore_version(n)
+        history.restore_version(n, f"Restored taxonomy version {n}")
         self.taxonomy = None
         try:
             self.taxonomy = files.read_taxonomy()
@@ -912,7 +930,7 @@ class TaxonomyScreen(Screen):
             return
         new = self.query_one("#prompt-text", TextArea).text
         summary, diff = prompt_change(self.prompt, new)
-        files.write_text("prompt.md", new)
+        history.save("prompt", new, "user", summary)
         self.prompt = new
         self.query_one(ChatPanel).record(summary, f"{diff}\n\n# Current prompt\n{new}")
         self.end_edit("#edit-prompt")

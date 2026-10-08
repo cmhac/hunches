@@ -18,7 +18,7 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Select, Static, TextArea
 
-from hunches import files, metrics
+from hunches import files, history, metrics
 from hunches.app import (
     AppFooter,
     ChatPanel,
@@ -828,7 +828,7 @@ class TuneScreen(Screen):
         for entry in self.proposals:
             if entry["status"] == "pending":  # its diff no longer applies
                 self.set_status(entry, "superseded")
-        files.write_text("prompt.md", new)
+        history.save("prompt", new, "user", "Prompt: accepted")
         self.prompt = new
         self.rerun()
 

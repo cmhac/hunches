@@ -24,7 +24,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from hunches import cost, files, keys, system
+from hunches import cost, files, history, keys, system
 from hunches.theme import HUNCHES
 
 
@@ -737,12 +737,18 @@ class HunchesApp(App):
             self.notify(f"Cannot open {path.name}: {e}", severity="error")
             return
         self.workers.cancel_all()
+        history.sync()
         self.stage = 0
         while len(self.screen_stack) > 1:
             self.pop_screen()
         system.touch_project(path)
         self.stage_shown = False
         self.goto_stage(files.first_incomplete_stage())
+
+    def on_app_focus(self) -> None:
+        """An editor or git may have changed the three files while the terminal was in the background."""
+        if self.stage:
+            history.sync()
 
     def action_settings(self) -> None:
         """Project settings of the open project (not on top of a modal or itself)."""

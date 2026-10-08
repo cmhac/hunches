@@ -472,3 +472,24 @@ def test_main_loads_keyring_keys_into_the_environment(monkeypatch):
     keys.save("ANTHROPIC_API_KEY", "sk-sentinel")
     app_module.main()
     assert seen["key"] == "sk-sentinel"
+
+
+async def test_opening_a_project_and_regaining_focus_sync_history(
+    tmp_path, monkeypatch
+):
+    from textual import events
+
+    from hunches import history
+
+    make_project(tmp_path, monkeypatch)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert [e["source"] for e in history.entries("seeds")] == ["baseline"]
+        files.write_text("seeds.csv", "seed\nbar\n")  # an editor, a git checkout
+        app.post_message(events.AppFocus())
+        await pilot.pause()
+        assert [e["source"] for e in history.entries("seeds")] == [
+            "baseline",
+            "external",
+        ]

@@ -1,6 +1,7 @@
 import csv
 import io
 from typing import ClassVar
+from uuid import uuid4
 
 from pydantic_ai import Agent
 from textual.app import ComposeResult
@@ -9,7 +10,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Input, Static
 
-from hunches import candidates, files
+from hunches import candidates, files, history
 from hunches.app import (
     AppFooter,
     ChatPanel,
@@ -29,11 +30,16 @@ seeds already proposed.
 """
 
 
-def write_seeds(seeds: list[str]) -> None:
+def write_seeds(
+    seeds: list[str],
+    source: str = "user",
+    summary: str = "",
+    group: str | None = None,
+) -> None:
     """Write seeds.csv in the format candidates.read_seeds() reads: a `seed` header, one per row."""
     out = io.StringIO()
     csv.writer(out, lineterminator="\n").writerows([["seed"], *([s] for s in seeds)])
-    files.write_text("seeds.csv", out.getvalue())
+    history.save("seeds", out.getvalue(), source, summary, group)
 
 
 class SeedInput(Input):
@@ -121,7 +127,7 @@ class BriefScreen(Screen):
         @self.agent.tool_plain
         async def propose_seeds(seeds: list[str]) -> str:
             """Append seed phrases to the user's seed table."""
-            self.add_seeds(seeds)
+            self.add_seeds(seeds, "assistant", uuid4().hex)
             return f"Added {len(seeds)} seeds."
 
     def compose(self) -> ComposeResult:
@@ -241,17 +247,21 @@ class BriefScreen(Screen):
         if event.input is self.editor:
             self.sync_editor()
 
-    def save(self) -> None:
-        write_seeds(self.seeds)
+    def save(
+        self, summary: str = "", source: str = "user", group: str | None = None
+    ) -> None:
+        write_seeds(self.seeds, source, summary, group)
         self.show()
 
     def record(self, summary: str, change: str) -> None:
         body = f"{change}\n\n# Current seeds\n{numbered(self.seeds) or 'None.'}"
         self.query_one(ChatPanel).record(summary, body)
 
-    def add_seeds(self, new: list[str]) -> None:
+    def add_seeds(
+        self, new: list[str], source: str = "assistant", group: str | None = None
+    ) -> None:
         self.seeds += [s.strip() for s in new if s.strip()]
-        self.save()
+        self.save(f"Seeds added: {len(new)}", source, group)
 
     def move_cursor(self, step: int) -> None:
         if self.editor is None and self.seeds:
@@ -270,7 +280,7 @@ class BriefScreen(Screen):
             return
         gone = self.seeds.pop(self.cursor)
         number = self.cursor + 1
-        self.save()
+        self.save(f"Seed {number} deleted")
         self.record(f"Seed {number} deleted", f"- {number}  {gone}")
 
     def action_discard(self) -> None:
@@ -286,13 +296,13 @@ class BriefScreen(Screen):
             self.seeds.append(text)
             number = len(self.seeds)
             self.editor = None
-            self.save()
+            self.save("Seed added")
             self.record("Seed added", f"+ {number}  {text}")
         else:
             number = editor.seed_index + 1
             self.seeds[editor.seed_index] = text
             self.editor = None
-            self.save()
+            self.save(f"Seed {number} edited")
             self.record(
                 f"Seed {number} edited",
                 f"~ {number}\n  was: {editor.was}\n  now: {text}",

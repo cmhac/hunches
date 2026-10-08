@@ -311,3 +311,137 @@ def test_approval_does_not_disturb_stacks():
     history.approval(5, "dev_done", {}, "Approved")
     history.undo("prompt")
     assert read("prompt.md") == "one"
+
+
+# ---- taxonomy versions and NeedsVersion (task 02)
+
+
+def tax(*names, mode="single"):
+    return files.Taxonomy(
+        mode=mode, labels=[files.Label(name=n, description=n.upper()) for n in names]
+    )
+
+
+def label_gold(*labels):
+    files.write_gold(
+        [
+            files.GoldRow(id="1", text="t1", labels=list(labels), split="dev"),
+            files.GoldRow(id="2", text="t2", labels=[], split="dev"),
+        ]
+    )
+
+
+def taxonomy_names():
+    return [x.name for x in files.read_taxonomy().labels]
+
+
+def gold_labels():
+    return [r.labels for r in files.read_gold()]
+
+
+def save_taxonomy(*names):
+    history.save("taxonomy", files.taxonomy_yaml(tax(*names)), "user", "labels")
+
+
+def test_start_new_version_logs_edit_with_snapshot_and_version_entry():
+    save_taxonomy("a", "b")
+    label_gold("a")
+    assert history.start_new_version(tax("c", "d"), "Taxonomy version 2 started") == 1
+    assert taxonomy_names() == ["c", "d"]
+    assert gold_labels() == [[], []]
+    edit = history.entries("taxonomy")[-1]
+    assert (edit["source"], edit["snapshot"]) == ("user", 1)
+    assert edit["summary"] == "Taxonomy version 2 started"
+    version = history.entries()[-1]
+    assert (version["kind"], version["snapshot"]) == ("version", 1)
+    assert version["summary"] == "Taxonomy version 2 started"
+
+
+def test_undo_of_version_start_restores_version_and_gold_and_redo_returns():
+    save_taxonomy("a", "b")
+    label_gold("a")
+    history.start_new_version(tax("c", "d"), "v2")
+    undo = history.undo("taxonomy")
+    assert undo
+    assert taxonomy_names() == ["a", "b"]
+    assert gold_labels() == [["a"], []]
+    assert (undo["source"], undo["snapshot"]) == ("undo", 2)  # the new state, archived
+    assert history.can_redo("taxonomy")
+    with pytest.raises(
+        history.NeedsVersion
+    ) as e:  # version 1's labels are live: archived first
+        history.redo("taxonomy")
+    assert (e.value.kind, e.value.number) == ("restore", 3)
+    redo = history.redo("taxonomy", confirmed=True)
+    assert redo
+    assert taxonomy_names() == ["c", "d"]
+    assert gold_labels() == [[], []]
+    assert (redo["source"], redo["snapshot"]) == ("redo", 3)
+    assert (
+        history.entries("taxonomy")[-1]["after"]
+        == history.entries("taxonomy")[-3]["after"]
+    )
+
+
+def test_undo_of_version_start_with_new_gold_needs_confirmation_kind_restore():
+    save_taxonomy("a", "b")
+    label_gold("a")
+    history.start_new_version(tax("c", "d"), "v2")
+    label_gold("c")
+    with pytest.raises(history.NeedsVersion) as e:
+        history.undo("taxonomy")
+    assert (e.value.kind, e.value.number) == ("restore", 2)
+    assert [x.name for x in e.value.taxonomy.labels] == ["a", "b"]
+    assert taxonomy_names() == ["c", "d"]  # nothing changed
+    history.undo("taxonomy", confirmed=True)
+    assert taxonomy_names() == ["a", "b"]
+    assert gold_labels() == [["a"], []]  # labels kept, version 1's are back
+    assert files.list_versions()[-1]["version"] == 2  # the labelled state is archived
+
+
+def test_undo_of_plain_label_edit_with_gold_needs_new_version():
+    save_taxonomy("a", "b")
+    save_taxonomy("a", "b", "c")
+    label_gold("c")
+    with pytest.raises(history.NeedsVersion) as e:
+        history.undo("taxonomy")
+    assert (e.value.kind, e.value.number) == ("new_version", 1)
+    assert [x.name for x in e.value.taxonomy.labels] == ["a", "b"]
+    assert taxonomy_names() == ["a", "b", "c"] and gold_labels() == [["c"], []]
+    entry = history.undo("taxonomy", confirmed=True)
+    assert entry
+    assert taxonomy_names() == ["a", "b"]
+    assert gold_labels() == [[], []]  # D12: cleared on the same items
+    assert [r.id for r in files.read_gold()] == ["1", "2"]
+    assert (entry["source"], entry["snapshot"]) == ("undo", 1)
+    assert [v["version"] for v in files.list_versions()] == [1]
+    assert history.can_redo("taxonomy")
+
+
+def test_redo_and_restore_that_change_labels_with_gold_need_new_version():
+    save_taxonomy("a", "b")
+    save_taxonomy("a", "b", "c")
+    history.undo("taxonomy")  # no gold yet: plain
+    label_gold("a")
+    with pytest.raises(history.NeedsVersion) as e:
+        history.redo("taxonomy")
+    assert e.value.kind == "new_version"
+    seq = history.entries("taxonomy")[0]["seq"]
+    history.restore("taxonomy", seq)  # same labels as now: plain, no prompt
+    seq = history.entries("taxonomy")[1]["seq"]
+    with pytest.raises(history.NeedsVersion):
+        history.restore("taxonomy", seq)
+    history.restore("taxonomy", seq, confirmed=True)
+    assert taxonomy_names() == ["a", "b", "c"]
+    assert gold_labels() == [[], []]
+
+
+def test_description_only_undo_never_needs_a_version():
+    save_taxonomy("a", "b")
+    history.save(
+        "taxonomy", files.taxonomy_yaml(tax("a", "b")).replace("A", "Z"), "user", "d"
+    )
+    label_gold("a")
+    history.undo("taxonomy")
+    assert gold_labels() == [["a"], []]
+    assert files.read_taxonomy().labels[0].description == "A"

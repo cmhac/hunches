@@ -164,8 +164,12 @@ def read_taxonomy() -> Taxonomy:
     )
 
 
+def taxonomy_yaml(taxonomy: Taxonomy) -> str:
+    return yaml.safe_dump(taxonomy.model_dump(), sort_keys=False)
+
+
 def write_taxonomy(taxonomy: Taxonomy) -> None:
-    write_text("taxonomy.yaml", yaml.safe_dump(taxonomy.model_dump(), sort_keys=False))
+    write_text("taxonomy.yaml", taxonomy_yaml(taxonomy))
 
 
 def all_labels(taxonomy: Taxonomy) -> list[str]:

@@ -9,6 +9,8 @@ import json
 import os
 from datetime import UTC, datetime
 
+import yaml
+
 from hunches import files
 
 ARTIFACTS = {
@@ -75,6 +77,7 @@ def _edit(
     source: str,
     summary: str,
     group: str | None,
+    snapshot: int | None = None,
 ) -> dict:
     entry = {
         "kind": "edit",
@@ -86,6 +89,8 @@ def _edit(
     }
     if group is not None:
         entry["group"] = group
+    if snapshot is not None:
+        entry["snapshot"] = snapshot
     return _append(entry)
 
 
@@ -157,10 +162,13 @@ def save(
     return True
 
 
-def _stacks(artifact: str) -> tuple[list[list[dict]], list[list[dict]]]:
-    """(undo, redo): lists of units, a unit being the entries of one group, oldest first."""
+def _stacks(
+    artifact: str,
+) -> tuple[list[list[dict]], list[tuple[list[dict], dict]]]:
+    """(undo, redo): lists of units, a unit being the entries of one group, oldest first. A redo item
+    also carries the undo entry that put it there."""
     undo: list[list[dict]] = []
-    redo: list[list[dict]] = []
+    redo: list[tuple[list[dict], dict]] = []
     for e in entries(artifact):
         if e["source"] in EDITS:
             if (
@@ -173,9 +181,9 @@ def _stacks(artifact: str) -> tuple[list[list[dict]], list[list[dict]]]:
                 undo.append([e])
             redo.clear()
         elif e["source"] == "undo" and undo:
-            redo.append(undo.pop())
+            redo.append((undo.pop(), e))
         elif e["source"] == "redo" and redo:
-            undo.append(redo.pop())
+            undo.append(redo.pop()[0])
     return undo, redo
 
 
@@ -189,32 +197,114 @@ def can_redo(artifact: str) -> bool:
     return bool(_stacks(artifact)[1])
 
 
-def undo(artifact: str) -> dict | None:
+def _next_version() -> int:
+    numbers = files.version_numbers()
+    return numbers[-1] + 1 if numbers else 1
+
+
+def _taxonomy(data: str | None) -> files.Taxonomy | None:
+    try:
+        return files.Taxonomy.model_validate(yaml.safe_load(data or ""))
+    except ValueError:
+        return None
+
+
+def _log_changes(source: str, summary: str, snapshot: int) -> dict:
+    """Log what a version restore changed. The taxonomy entry is the move itself; other files that
+    came back with the version are plain restores."""
+    moved = entries("taxonomy")[-1] if entries("taxonomy") else {}
+    for artifact, name in ARTIFACTS.items():
+        current = _current(artifact)
+        mine = entries(artifact)
+        last = mine[-1]["after"] if mine else None
+        if current == last:
+            continue
+        if current is not None:
+            _put_object((files.root() / name).read_bytes())
+        if artifact == "taxonomy":
+            moved = _edit(artifact, last, current, source, summary, None, snapshot)
+        else:
+            _edit(artifact, last, current, "restore", summary, None)
+    return moved
+
+
+def restore_version(n: int, summary: str) -> None:
+    """`files.restore_version`, logged as a restore of the taxonomy (and of whatever else came back)."""
+    sync()
+    number = _next_version()
+    files.restore_version(n)
+    _log_changes("restore", summary, number)
+
+
+def start_new_version(
+    new: files.Taxonomy, summary: str = "", source: str = "user"
+) -> int:
+    """`files.start_new_version`, logged: the taxonomy edit (carrying `snapshot`) and a version entry."""
+    sync()
+    before = _current("taxonomy")
+    n = files.start_new_version(new)
+    after = _put_object(files.taxonomy_yaml(new).encode())
+    _edit("taxonomy", before, after, source, summary, None, n)
+    _append({"kind": "version", "summary": summary, "snapshot": n})
+    return n
+
+
+def _move(
+    artifact: str,
+    target: str | None,
+    source: str,
+    summary: str,
+    confirmed: bool,
+    snapshot: int | None = None,
+) -> dict:
+    """Make `artifact` match object `target` (or, for the start of a taxonomy version, restore the
+    version `snapshot`). A label change while gold labels exist needs the caller's confirmation."""
+    if snapshot is not None:
+        number = _next_version()
+        if files.taxonomy_in_use() and not confirmed:
+            archived = _taxonomy(files.read_text(f"versions/{snapshot}/taxonomy.yaml"))
+            raise NeedsVersion("restore", archived, number)  # ty: ignore[invalid-argument-type]
+        files.restore_version(snapshot)
+        return _log_changes(source, summary, number)
+    if artifact == "taxonomy" and files.taxonomy_in_use():
+        new = _taxonomy(text(target))
+        old = _taxonomy(files.read_text("taxonomy.yaml"))
+        if new and old and files.labels_changed(old, new):
+            if not confirmed:
+                raise NeedsVersion("new_version", new, _next_version())
+            start_new_version(new, summary, source)
+            return entries("taxonomy")[-1]
+    return _write(artifact, _object(target), source, summary, None)
+
+
+def undo(artifact: str, confirmed: bool = False) -> dict | None:
+    """Raises NeedsVersion when the caller must ask first; call again with `confirmed=True`."""
     sync()
     if not can_undo(artifact):
         return None
     unit = _stacks(artifact)[0][-1]
-    target = unit[0]["before"]
-    return _write(
+    return _move(
         artifact,
-        _object(target),
+        unit[0]["before"],
         "undo",
         f"Undid: {unit[-1]['summary']}",
-        None,
+        confirmed,
+        unit[0].get("snapshot"),
     )
 
 
-def redo(artifact: str) -> dict | None:
+def redo(artifact: str, confirmed: bool = False) -> dict | None:
     sync()
     if not can_redo(artifact):
         return None
-    unit = _stacks(artifact)[1][-1]
-    return _write(
+    unit, undone = _stacks(artifact)[1][-1]
+    return _move(
         artifact,
-        _object(unit[-1]["after"]),
+        unit[-1]["after"],
         "redo",
         f"Redid: {unit[-1]['summary']}",
-        None,
+        confirmed,
+        undone.get("snapshot") if unit[0].get("snapshot") else None,
     )
 
 
@@ -222,7 +312,7 @@ def _object(object_hash: str | None) -> bytes:
     return (_dir() / "objects" / str(object_hash)).read_bytes()
 
 
-def restore(artifact: str, seq: int) -> dict:
+def restore(artifact: str, seq: int, confirmed: bool = False) -> dict:
     """Make the file as it was after entry `seq`; a normal, undoable edit."""
     sync()
     entry = next(e for e in entries(artifact) if e["seq"] == seq)
@@ -230,12 +320,12 @@ def restore(artifact: str, seq: int) -> dict:
         raise ValueError(f"entry {seq} left no file to restore")
     if entry["after"] == _current(artifact):
         return entries(artifact)[-1]
-    return _write(
+    return _move(
         artifact,
-        _object(entry["after"]),
+        entry["after"],
         "restore",
         f"Restored: {entry['summary']}",
-        None,
+        confirmed,
     )
 
 
