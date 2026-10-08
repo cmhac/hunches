@@ -1,0 +1,2 @@
+/* Stand-in for the user's terminal font. Real TUI renders in whatever monospace the terminal uses. */
+@import url("https://fonts.googleapis.com/css2?family=Source+Code+Pro:ital,wght@0,400;0,600;0,700;1,400&display=swap");

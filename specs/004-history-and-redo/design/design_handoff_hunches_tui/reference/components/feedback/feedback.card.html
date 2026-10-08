@@ -1,0 +1,26 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Feedback" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>html,body{margin:0;background:var(--ink-0);color:var(--fg);font-family:var(--font-mono);font-size:var(--font-size);line-height:var(--row)}a{color:var(--primary)}a:hover{color:var(--primary-lighten)}#root{padding:16px}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="../../assets/hds-loader.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+loadHDS('../../').then((H) => {
+  const { Terminal, StatusHeader, Footer, Panel, Modal, DataTable, Bar, ProgressBar, Sparkline, Badge, LabelTag, Diff, ChatPanel, Input, Button, Select, TextArea, LabelOption, Notice, Toast } = H;
+  const Grid = ({ cols = 80, rows = 10, children }) => <Terminal cols={cols} rows={rows} chrome={false}>{children}</Terminal>;
+  const Card = () => (
+    <Grid rows={11}>
+      <Notice>Searching...</Notice>
+      <Notice tone="ok">Done. 4,812 candidates written to candidates.jsonl.</Notice>
+      <Notice tone="warn">WARNING: S3 returned its topK cap for 2 seeds.</Notice>
+      <Notice tone="error">Search failed: embedding model mismatch</Notice>
+      <Notice tone="stale" banner>STALE: prompt.md changed since this result. Press r to re-run.</Notice>
+      <Toast severity="success" title="Saved" message="prompt.md written" />
+    </Grid>
+  );
+  ReactDOM.createRoot(document.getElementById('root')).render(<Card />);
+});
+</script></body></html>
