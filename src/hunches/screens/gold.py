@@ -1,5 +1,6 @@
 import math
 import random
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
@@ -48,7 +49,9 @@ def draw(split: str, n: int = files.SAMPLE_SIZE) -> list[files.GoldRow]:
     rows so far, so the same project state always draws the same items. Tasks 14 and 15 reuse this.
     """
     gold = files.read_gold()
-    taken = {r.id for r in gold}
+    taken = {r.id for r in gold} | {
+        r["id"] for r in files.read_jsonl("gold_removed.jsonl")
+    }
     pool = [c for c in files.read_jsonl("candidates.jsonl") if c["id"] not in taken]
     rng = random.Random(f"{Path.cwd().name}:{split}:{len(gold)}")
     rows = [
@@ -57,6 +60,21 @@ def draw(split: str, n: int = files.SAMPLE_SIZE) -> list[files.GoldRow]:
     ]
     files.write_gold(gold + rows)  # persisted before the user sees anything
     return rows
+
+
+def remove(ids: list[str], reason: str) -> int:
+    """Move gold rows to the append-only gold_removed.jsonl (labels kept there); returns how many."""
+    gold = files.read_gold()
+    gone = [r for r in gold if r.id in set(ids)]
+    if not gone:
+        return 0
+    ts = datetime.now(UTC).isoformat()
+    for r in gone:
+        files.append_jsonl(
+            "gold_removed.jsonl", {**r.model_dump(), "reason": reason, "ts": ts}
+        )
+    files.write_gold([r for r in gold if r not in gone])
+    return len(gone)
 
 
 class GoldScreen(Screen):

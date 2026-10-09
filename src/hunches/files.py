@@ -405,6 +405,32 @@ def write_gold(rows: list[GoldRow]) -> None:
     write_jsonl("gold.jsonl", [r.model_dump() for r in rows])
 
 
+def orphaned_gold(split: str | None = None) -> list[GoldRow]:
+    """Gold rows whose id is not in candidates.jsonl (spec 004 D2); they keep their labels."""
+    pool = {r["id"] for r in read_jsonl("candidates.jsonl")}
+    return [r for r in read_gold() if r.id not in pool and split in (None, r.split)]
+
+
+def gold_coverage() -> dict:
+    """Per split: rows, labelled rows, orphaned rows, orphaned labelled rows and their label counts."""
+    out = {}
+    for split in ("dev", "test"):
+        rows = [r for r in read_gold() if r.split == split]
+        orphans = orphaned_gold(split)
+        by_label: dict[str, int] = {}
+        for r in orphans:
+            for label in r.labels:
+                by_label[label] = by_label.get(label, 0) + 1
+        out[split] = {
+            "rows": len(rows),
+            "labelled": sum(bool(r.labels) for r in rows),
+            "orphaned": len(orphans),
+            "orphaned_labelled": sum(bool(r.labels) for r in orphans),
+            "orphaned_by_label": by_label,
+        }
+    return out
+
+
 # ---- taxonomy versions (spec 003, D12): archives are only ever added to, never deleted
 VERSIONED = ["taxonomy.yaml", "prompt.md", "gold.jsonl", "state.json"]
 DERIVED = [
