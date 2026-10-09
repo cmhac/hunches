@@ -9,6 +9,8 @@ gold set, and classified output. An assistant model talks to you; a classifier m
 ```
 uv tool install hunches          # or: pipx install hunches
 uv tool install "hunches[s3]"    # adds boto3 for the S3 Vectors backend
+uv tool install "hunches[pg]"    # adds psycopg for the pgvector (PostgreSQL) backend
+uv tool install "hunches[rds]"   # pg plus boto3, for RDS / Aurora IAM database authentication
 uv tool install "hunches[local]" # adds Sentence Transformers for local query embeddings (Python < 3.14)
 ```
 
@@ -40,7 +42,7 @@ env var yourself.
 `MISSING CORPUS`). `enter` opens one (hunches changes into its directory), `n` creates a new one, `e` edits its
 settings, `x` removes it from the list or deletes its `.hunches/` folder (never the corpus), `l` locates a moved
 project or corpus, `r` refreshes, `esc` goes back to the open project. **New project** asks for the location,
-backend (local corpus or S3 Vectors), corpus and embedding model; the assistant and classifier models are copied
+backend (local corpus, S3 Vectors or PostgreSQL with pgvector), corpus and embedding model; the assistant and classifier models are copied
 from the system defaults into the project, and later system changes never alter an existing project. **Project
 settings** edits them afterwards.
 
@@ -75,7 +77,7 @@ button.
 
 ## System state vs project state
 
-System state (API keys in the keyring, default models, saved S3 stores, the project list) lives in `system.json`
+System state (API keys in the keyring, default models, saved S3 stores, the pgvector result limit, the project list) lives in `system.json`
 under your user config directory (`$HUNCHES_HOME` overrides it) and is never part of a project. Project state is
 only `.hunches/` in the project directory.
 
@@ -96,7 +98,39 @@ Search is brute-force cosine similarity.
 id as the vector key, the text under the `text` metadata key) and use AWS credentials from the usual boto3
 sources. A query returns at most 10,000 hits; if a seed reaches that, the search screen warns.
 
-In both cases `embedding_model` in `config.toml` must be the model the corpus was embedded with; the tool
+**PostgreSQL with pgvector** (a table that already holds the embeddings): set `backend = "pgvector"` and `pg_table`
+(`table` or `schema.table`) in `config.toml`; the columns default to `pg_id_column = "id"`, `pg_text_column = "text"`
+and `pg_vector_column = "embedding"` (a `vector` or `halfvec` column). If the text is in a different table from the
+vectors, choose **Two tables** and set `pg_text_table` (joined on `pg_text_id_column`, default the id column).
+hunches only reads: the connection is read-only, it never creates a table, index or the extension, and never
+inserts. The connection URL holds a password, so it is never written to `config.toml` or `system.json`. Paste it
+into the masked **url** field: Check store, Create and Save keep it in the OS keyring under
+`HUNCHES_PG_URL_<id>`, where `<id>` (stored as `pg_url_id`) is a hash of host, port, database and user, never of the
+password. Projects on the same database share one entry, and projects on different databases never overwrite each
+other. Without a keyring, set that variable in the environment, or name your own with `pg_url_var`.
+Project settings and New project have a **Check store** button that reports the pgvector version, column type and
+dimension, an estimated row count, the indexes and one sample row.
+
+- `pg_search = "exact"` (default) finds every item at or above the similarity floor, equal to the local backend, in
+  one scan of the table for all seeds; it uses no index, so a large table takes time (the Search screen shows
+  elapsed time and rows, and `x` stops it, cancelling the query on the server). `pg_search = "index"` lets an
+  HNSW/IVFFlat index answer one query per seed, needs pgvector 0.8.0 or newer, and **can silently return far fewer
+  hits than exist**; the Search screen then always shows an APPROXIMATE warning.
+- A seed returns at most 10,000 hits (the same cap warning as S3). A search whose result could exceed
+  **512 MB** is refused before it starts, or stopped while streaming; change the limit in **System settings
+  (F5)** (`pg_max_result_mb` in `system.json`, 0 = no limit). `pg_statement_timeout_s` in `config.toml` overrides
+  the role's `statement_timeout` for the search (0 = no limit).
+- Managed services (RDS, Aurora, Supabase and similar) work with a login that can `SELECT` the table; add
+  `?sslmode=require` (or `verify-full`) to the URL as the host documents. Through a transaction-mode pooler (for
+  example Supabase port 6543) Check store suggests the direct or session URL for long searches. Not tested by the
+  project's authors against any managed service yet: see `specs/005-pgvector/manual-checklist.md`.
+- **RDS / Aurora IAM authentication**: install `hunches[rds]`, set `pg_auth = "rds_iam"` (optionally `pg_aws_region`
+  and `pg_aws_profile`; credentials come from the usual boto3 sources) and make the URL variable a URL without a
+  password, with the instance endpoint as host, e.g. `postgresql://db_user@my-instance.abc123.us-east-1.rds.amazonaws.com:5432/mydb`.
+  A fresh token is generated for every connection; `sslmode=require` is added if the URL has none. The database
+  user needs the `rds_iam` role and the AWS identity `rds-db:connect` on that user.
+
+In every case `embedding_model` in `config.toml` must be the model the corpus was embedded with; the tool
 refuses to search otherwise. It only embeds your seed phrases.
 
 ## Stages
@@ -194,4 +228,5 @@ uv run ty check
 uv run pytest
 ```
 
-Tests never call a real LLM or AWS API.
+Tests never call a real LLM, AWS or database API. `tests/test_pg_integration.py` runs against a real PostgreSQL
+with pgvector only when `HUNCHES_TEST_PG_URL` is set (CI has an optional job for it); otherwise it is skipped.

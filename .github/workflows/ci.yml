@@ -18,3 +18,27 @@ jobs:
       - run: uv run ruff format --check
       - run: uv run ty check
       - run: uv run pytest
+
+  # Optional: real PostgreSQL + pgvector (specs/005-pgvector). A failure here does not fail the run.
+  pgvector:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      HUNCHES_TEST_PG_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --all-extras
+      - run: uv run pytest tests/test_pg_integration.py

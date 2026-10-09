@@ -74,6 +74,11 @@ class SystemSettingsScreen(Screen[bool]):
         super().__init__()
         self.current = system.read_system()
         self.edited = False  # the user changed a model or thinking by hand
+        self.pg_max_result_mb = (
+            self.current.pg_max_result_mb
+            if self.current
+            else system.System.model_fields["pg_max_result_mb"].default
+        )
         self.error = ""  # shown beside Save (when a key is missing, the hint wins)
         if self.current:
             self.provider = self.current.provider
@@ -147,6 +152,18 @@ class SystemSettingsScreen(Screen[bool]):
                 yield Button("Reset to recommended", id="reset", compact=True)
             with panel(Vertical(id="stores"), "Saved S3 stores"):
                 yield Vertical(id="storelist")
+            with panel(Vertical(id="pg"), "pgvector"):
+                with Horizontal(classes="row"):
+                    yield Label("Result MB")
+                    yield Input(
+                        str(self.pg_max_result_mb), id="pg-max-result-mb", compact=True
+                    )
+                    yield Static("", id="pg-limit-note")
+                yield Static(
+                    "Largest search result a pgvector project may load, applied to "
+                    "every pgvector project on this machine. 0 disables the guard.",
+                    classes="note",
+                )
             yield Static(
                 "Changes here apply to new projects. Existing projects keep their models.",
                 classes="note",
@@ -163,6 +180,7 @@ class SystemSettingsScreen(Screen[bool]):
         self.refresh_keys()
         self.refresh_models()
         self.refresh_save()
+        self.refresh_pg_note(str(self.pg_max_result_mb))
         await self.refresh_stores()
 
     def on_resize(self) -> None:
@@ -192,6 +210,15 @@ class SystemSettingsScreen(Screen[bool]):
                     classes="row",
                 )
             )
+
+    def refresh_pg_note(self, value: str) -> None:
+        self.query_one("#pg-limit-note", Static).update(
+            "no limit" if value.strip() == "0" else "MB"
+        )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "pg-max-result-mb":
+            self.refresh_pg_note(event.value)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         box_id = event.input.id or ""
@@ -294,6 +321,14 @@ class SystemSettingsScreen(Screen[bool]):
         if all(keys.status(v) == "missing" for v in keys.VARS):
             self.refresh_save()
             return
+        raw = self.query_one("#pg-max-result-mb", Input).value.strip()
+        if not raw.isascii() or not raw.isdigit():
+            self.error = (
+                "ERROR: result limit must be a whole number of megabytes (0 = no limit)"
+            )
+            self.refresh_save()
+            return
+        self.error = ""
         # re-read: stores and projects are edited elsewhere while this screen is open
         base = system.read_system()
         fields = {
@@ -301,6 +336,7 @@ class SystemSettingsScreen(Screen[bool]):
             "assistant_model": self.assistant,
             "assistant_thinking": self.thinking,
             "classifier_model": self.classifier,
+            "pg_max_result_mb": int(raw),
         }
         if base:
             new = base.model_copy(update=fields)

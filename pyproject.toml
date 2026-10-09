@@ -22,6 +22,8 @@ dependencies = [
 
 [project.optional-dependencies]
 s3 = ["boto3"]
+pg = ["psycopg[binary]"]
+rds = ["psycopg[binary]", "boto3"]
 local = ["pydantic-ai-slim[sentence-transformers]"]
 
 [project.scripts]

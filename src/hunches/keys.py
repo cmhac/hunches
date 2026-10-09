@@ -21,6 +21,11 @@ def _stored(var: str) -> str | None:
         return None
 
 
+def resolve(var: str) -> str | None:
+    """The value of any variable: environment first, then the keyring."""
+    return os.environ.get(var) or _stored(var)
+
+
 def status(var: str) -> Literal["env", "keyring", "missing"]:
     if os.environ.get(var):
         return "env"

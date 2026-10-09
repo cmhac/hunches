@@ -24,11 +24,12 @@ def describe(project: system.Project) -> tuple[list[str], str, str]:
     if status != "MISSING DIR" and status != "NO CONFIG":
         config = files.read_config(path)
         backend = config.backend
-        where = (
-            f"{config.s3_bucket}/{config.s3_index}"
-            if backend == "s3"
-            else config.corpus_dir or ""
-        )
+        if backend == "s3":
+            where = f"{config.s3_bucket}/{config.s3_index}"
+        elif backend == "pgvector":
+            where = config.pg_table or ""  # never the URL or its host
+        else:
+            where = config.corpus_dir or ""
     cells = [path.name, backend, where, status, project.last_opened[:10]]
     return cells, status, detail
 

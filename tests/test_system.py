@@ -289,3 +289,28 @@ def test_rename_store_keeps_other_fields_and_refuses_a_taken_name():
     current = system.read_system()
     assert current is not None
     assert {s.name for s in current.s3_stores} == {"b", "c"}
+
+
+def test_pg_max_result_mb_defaults_to_512_for_an_old_file(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HUNCHES_HOME", str(tmp_path))
+    (tmp_path / "system.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "provider": "anthropic",
+                "assistant_model": "a:1",
+                "classifier_model": "c:1",
+            }
+        )
+    )
+    s = system.read_system()
+    assert s is not None and s.pg_max_result_mb == 512 and s.version == 1
+
+
+@pytest.mark.parametrize("mb", [0, 1, 2048])
+def test_pg_max_result_mb_round_trips(tmp_path: Path, monkeypatch, mb):
+    monkeypatch.setenv("HUNCHES_HOME", str(tmp_path))
+    system.write_system(make(pg_max_result_mb=mb))
+    s = system.read_system()
+    assert s is not None and s.pg_max_result_mb == mb
+    assert json.loads((tmp_path / "system.json").read_text())["pg_max_result_mb"] == mb

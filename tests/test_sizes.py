@@ -262,6 +262,84 @@ async def test_settings_screens(size, name):
 
 
 @pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("auth", ["url", "rds_iam"])
+async def test_new_project_pgvector(size, auth):
+    from textual.widgets import Select
+
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.push_screen(NewProjectScreen())
+        await pilot.pause()
+        app.screen.query_one("#backend", Select).value = "pgvector"
+        app.screen.query_one("#pg-auth", Select).value = auth
+        if auth == "rds_iam":  # the tallest form: every optional row shown
+            app.screen.query_one("#pg-layout", Select).value = "two"
+        await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("variant", ["report", "error"])
+async def test_new_project_pgvector_check_store_result(size, variant):
+    from textual.widgets import Select
+
+    from hunches.screens import pg
+
+    result = {
+        "version": (0, 8, 1),
+        "schema": "extensions",
+        "encrypted": False,
+        "type": "vector",
+        "dimension": 1536,
+        "rows": 12_000_000,
+        "indexes": [("docs_embedding_idx", "hnsw", "vector_l2_ops")],
+        "sample": (
+            "doc-1",
+            "A sample text of up to sixty characters, cut by the query",
+        ),
+        "warnings": [
+            (
+                'pg_search = "index" but no index on "embedding" uses vector_cosine_ops; '
+                "the search orders by <=> (cosine), so Postgres would not use it."
+            )
+        ],
+        "notes": ["No index: the search scans the whole table (~12000000 rows)."],
+        "errors": {},
+    }
+    if variant == "error":
+        result["errors"] = {"column": 'relation "public.nope" does not exist ' * 3}
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.push_screen(NewProjectScreen())
+        await pilot.pause()
+        app.screen.query_one("#backend", Select).value = "pgvector"
+        await pilot.pause()
+        pg.done(app.screen, result)
+        await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("auth", ["url", "rds_iam"])
+async def test_project_settings_pgvector(size, auth):
+    from textual.widgets import Select
+
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.push_screen(ProjectSettingsScreen())
+        await pilot.pause()
+        app.screen.query_one("#backend", Select).value = "pgvector"
+        app.screen.query_one("#pg-auth", Select).value = auth
+        if auth == "rds_iam":  # the tallest form: every optional row shown
+            app.screen.query_one("#pg-layout", Select).value = "two"
+        await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
 @pytest.mark.parametrize("name", MODALS)
 async def test_modals(size, name):
     app = HunchesApp()
@@ -436,3 +514,57 @@ async def test_gold_screens_with_orphans(size, stage, variant):
             assert screen.query_one("#info").display
             assert not screen.query_one("#orphans").display
         await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("variant", ["approximate", "cap-warning", "searching"])
+async def test_search_pgvector_states(size, variant, monkeypatch):
+    import threading
+
+    from textual.widgets import Label
+
+    from hunches import candidates, search
+    from hunches.app import say
+    from hunches.screens.search import SearchScreen
+
+    async def embed(seeds, embedder=None):
+        return [[1.0, 0.0] for _ in seeds]
+
+    monkeypatch.setattr(candidates, "embed_seeds", embed)
+    mode = "index" if variant == "approximate" else "exact"
+    config = files.read_config().model_copy(
+        update={"backend": "pgvector", "pg_table": "t", "pg_search": mode}
+    )
+    files.write_config(config)
+    gate = threading.Event()
+
+    def stub(vectors, floor, progress=None, stop=None):
+        assert progress
+        progress(1234567, 0, "")
+        gate.wait(5)
+        return [[] for _ in vectors], False
+
+    monkeypatch.setattr(candidates, "search_pg_exact", stub)
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.goto_stage(2)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SearchScreen)
+        if variant == "approximate":
+            assert screen.query_one("#approximate").display
+        elif variant == "cap-warning":
+            say(
+                screen.query_one("#warning", Label),
+                screen.cap_warning("pgvector", search.PG_TOP_K),
+            )
+        else:
+            screen.start()
+            await pilot.pause(0.6)
+            assert screen.searching
+            assert screen.query_one("#stop").display
+        await pilot.pause()
+        await check(app, pilot, size[0])
+        gate.set()
+        await app.workers.wait_for_complete()

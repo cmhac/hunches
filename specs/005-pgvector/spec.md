@@ -1,0 +1,439 @@
+# 005 — pgvector backend
+
+Status: approved by Chris 2026-10-09 (exact default, 512 MB limit, refuse `index` below 0.8.0, IAM in scope); **implemented** (tasks 01 to 13, one commit each, `005/NN`), **pending Chris's test against his RDS database** before anything is merged; the managed-service steps are in `manual-checklist.md`. Sections titled "Verified in task NN" record what implementation found and where it deviated from the first draft; where they differ from the text above them, they win. Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md`, `../003-tui-redesign/spec.md` and `../004-history-and-redo/spec.md`, all implemented. Written 2026-10-09 against `main` at `c8ebdf1`.
+
+**Read order for an implementer:** this spec → your task file in `tasks/` (`tasks/README.md` has the order and rules) → the code named under "What changes in the code".
+
+## What this is, in one paragraph
+
+Today `hunches` searches an already-embedded corpus from either a local directory (`vectors.npy` + `items.jsonl` + `meta.json`, numpy) or an Amazon S3 Vectors index. This spec adds a third backend, **pgvector**: a table in a PostgreSQL database that has the `vector` extension and already holds the corpus embeddings. As with S3, hunches only **reads** it: it never creates tables, indexes or the extension, never inserts, and never embeds the corpus. Only `search.py` talks to the database; everything downstream (candidates, gold, classifier, metrics, history) is untouched.
+
+## Principles
+
+Same as 001–004 (minimal implementation; no abstraction, base class, registry or plugin system; where behaviours coexist use a plain `if` in one function; plain files in `.hunches/` are the only state; check every API against current docs; never call a real LLM, AWS or database in the default test run; unknown is `?`; never commit secrets). Additional rules:
+
+- **Read-only against the database.** The connection is opened read-only and every statement is a `SELECT` or a `SET LOCAL`.
+- **No secrets in tracked files.** The connection URL contains a password, so it never goes in `config.toml` (tracked) or `system.json`. It comes from an environment variable or the OS keyring (D3).
+- **Recall must not silently degrade.** An approximate index can return far fewer rows than exist above the similarity floor without any error. The default mode is exact (D4); the approximate mode shows a permanent warning.
+
+## Resolved decisions
+
+These are my recommendations; the ones marked **ask** are open for Chris.
+
+| # | Question | Decision | Evidence |
+|---|----------|----------|----------|
+| D1 | Driver | **psycopg 3**, optional extras `pg = ["psycopg[binary]"]` and `rds = ["psycopg[binary]", "boto3"]` (the second only for IAM authentication, D11), imported lazily inside `search()` with the same "needs … `pip install hunches[pg]`" error as boto3. The query vector is sent as a text literal cast in SQL (`%s::vector`), so the separate `pgvector` Python package is not needed. | The pgvector README shows vectors as text literals (`'[1,2,3]'`); the `pgvector` package is only needed to register adapter types ([README](https://github.com/pgvector/pgvector#readme), [pgvector-python](https://pypi.org/project/pgvector/)). Verified in task 01 against the [psycopg install docs](https://www.psycopg.org/psycopg3/docs/basic/install.html): `pip install "psycopg[binary]"` is the recommended binary installation (not supported on PyPy). |
+| D2 | Table layout | **Configurable table and column names with defaults**: `pg_table` (required, may be schema-qualified `schema.table`), `pg_id_column="id"`, `pg_text_column="text"`, `pg_vector_column="embedding"`. The corpus is "already embedded" by someone else, so a fixed schema would be wrong. All identifiers are composed with `psycopg.sql.Identifier`, never string-formatted. | Mirrors S3, where `key` is the id and `metadata.text` the text. |
+| D3 | Where the connection URL lives | **Environment variable first, then the OS keyring**, through the existing `keys.status/save` (which already work for any variable name). Config stores only the variable name: `pg_url_var`, default `HUNCHES_PG_URL`. `keys.VARS` stays LLM-only, so `load_into_env` is unchanged; `search` resolves the URL itself with `os.environ.get(var) or keys._stored(var)`. | `keys.py` takes a `var` argument everywhere. |
+| D4 | Exact vs approximate search | `pg_search = "exact"` (default; Chris agreed 2026-10-09) or `"index"`. **Exact** answers **all seeds in one query** (D10) with a query shape that cannot use an ANN index, so the result equals the local numpy backend (up to the per-seed cap). **Index** lets an HNSW/IVFFlat index answer, one query per seed, with iterative scan (pgvector 0.8.0+, D9); it shows an `APPROXIMATE` warning on the Search screen every time. | See "Why exact is the default". |
+| D5 | Similarity | `similarity = 1 - (column <=> query)`. pgvector documents cosine similarity as 1 minus cosine distance and `<=>` as cosine distance ([README](https://github.com/pgvector/pgvector#readme)); unlike S3 Vectors (001 open item), this is documented, not assumed. The operator is norm-invariant, so the corpus need not be normalised. **A zero vector gives distance `NaN`, and in Postgres `NaN` compares greater than every number, so `1 - NaN >= floor` is TRUE** (checked on PostgreSQL 16 + pgvector 0.6.0: a zero row passed the floor). The SQL therefore also requires `sim <> 'NaN'` (in Postgres `NaN = NaN` is true, so `isnan()`, which does not exist for `double precision`, is not needed). The local backend gives such rows similarity 0. | pgvector README; `candidates.FLOOR`; tested 2026-10-09, see "Verified on a real database". |
+| D6 | Result cap | **Top `PG_TOP_K = 10_000` per seed in both modes** (Chris, 2026-10-09), same as S3 so the existing cap warning applies. `capped` is true when some seed has exactly `PG_TOP_K` hits. In `exact` mode the cap is applied per seed inside the single query (a window function; see below). In `index` mode it is the `LIMIT` the index needs anyway, and the permanent `APPROXIMATE` warning also applies. | S3 precedent (`search.S3_TOP_K`). |
+| D7 | Embedding model | Recorded in `config.toml` as `embedding_model` (as for S3), chosen with the model picker. There is no `meta.json` in a table, so hunches cannot detect a mismatch by itself; **Check store** (below) reports the column dimension so a human can compare it with the model's. | 002 New project, S3 path. |
+| D8 | Saved stores in `system.json` | **Not in this spec.** S3 stores exist so one bucket/index can back several projects (002). For Postgres the reusable parts are a secret (already shared by `pg_url_var`) and five short fields with defaults. Adding `pg_stores` also means a `system.json` schema change; defer until someone asks. | Minimal implementation. **ask.** |
+| D9 | pgvector version | **`exact` mode has no version floor beyond "the `vector` extension is installed"** (tested on 0.6.0 and 0.8.1; older versions untested, so none is promised). **`index` mode needs 0.8.0+** (iterative scans; [changelog](https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md)). **`halfvec` columns exist only in 0.7.0+**, so a table that has one is already on 0.7.0+. hunches reads `pg_extension.extversion` at the start of every search (same connection, one tiny query) and, in `index` mode on < 0.8.0, stops before issuing any `SET` with a message that names the found version. See "Versions". | Changelog: HNSW 0.5.0, halfvec 0.7.0, iterative scans 0.8.0. |
+| D10 | One query for all seeds | **Yes, for `exact`.** One scan of the table answers every seed, and the per-seed top-`PG_TOP_K` cap is kept, so the result is exactly what the per-seed loop would produce (`build_candidates` then merges per seed as today: highest similarity wins, ties to the earlier seed). `index` mode stays one query per seed: a per-row lateral lookup cannot use an ANN index. | Tested against numpy and against the per-seed SQL, 2026-10-09. |
+| D11 | Authentication | Two modes, `pg_auth = "url"` (default: the full URL, password included, from the environment or keyring) and **`"rds_iam"`: RDS / Aurora IAM database authentication**. See "Authentication". | Chris, 2026-10-09: in this spec; he will test it against his RDS instance. |
+| D12 | Result-size limit | **System-level** (`system.json`, `pg_max_result_mb`, default 512, editable in System settings, applies to every pgvector project on the machine); not a per-project field. `0` = no limit. | Chris, 2026-10-09. |
+
+## Why exact is the default
+
+`hunches` asks "every item at or above this similarity", not "the 10 nearest". pgvector's approximate indexes answer a `ORDER BY … LIMIT k` query by walking a graph with a candidate list of `hnsw.ef_search` (default 40), and "with approximate indexes, filtering is applied after the index scan" ([README](https://github.com/pgvector/pgvector#readme)). So an index-backed query asking for 10,000 rows returns about 40 unless iterative scan is on, and with iterative scan it still stops at `hnsw.max_scan_tuples` (default 20,000, approximate), after which it "will still return fewer than LIMIT rows". None of these is an error, and a short result is indistinguishable from "that is all there was". The local backend and S3 Vectors do not have this failure mode, and the whole pipeline (candidate pool, gold sampling, coverage) assumes the pool is complete.
+
+Hence:
+
+- **`exact` (default):** see "One query for all seeds" below. No index is used or needed (the query shape cannot use one), there is no `LIMIT` on the table scan, and the distance floor is applied in SQL.
+- **`index`:** one query per seed (`SELECT id, text, 1 - (vec <=> q) AS sim FROM t WHERE … ORDER BY vec <=> q LIMIT PG_TOP_K`, the shape an index needs), but `SET LOCAL hnsw.iterative_scan = relaxed_order` (results may be slightly out of order; we re-sort client-side) and `SET LOCAL hnsw.max_scan_tuples = <PG_MAX_SCAN>`, with `WHERE 1 - (vec <=> q) >= floor` pushed into SQL so the scan continues until `LIMIT` or `max_scan_tuples`. Always shows: `WARNING: APPROXIMATE pgvector search; the index may hide hits above the floor. Switch to exact in Project settings for a complete pool.` (The 1000 upper bound of `ef_search` I remember is **not** in the README; do not hard-code it. Set only the parameters named here.)
+
+**Measured (see "Verified on a real database"):** on a 300,000-row table with an HNSW index and one seed whose true hit count above the floor was 1,296, an index query with the default settings returned **40** hits; with `hnsw.iterative_scan = relaxed_order` **884**; with `strict_order` **547**; raising `hnsw.max_scan_tuples` to 1,000,000 did not add any. (Synthetic random vectors, one seed, pgvector 0.8.1; indicative, not a benchmark.) The silent shortfall this spec is designed around is real.
+
+## One query for all seeds (`exact`)
+
+Yes: one scan of the table returns the candidates for every seed, with the top-`PG_TOP_K` cap applied **per seed**. The seed vectors are embedded first (as today, cached) and sent once as a text array. Every (row, seed) similarity is computed once; pairs below the floor (or `NaN`) are dropped; the survivors are ranked within each seed; the top `PG_TOP_K` of each seed are returned **without their text**. A second, cheap query then fetches the text of the distinct ids.
+
+Both queries run in one read-only `REPEATABLE READ` transaction (one snapshot), so a table being written to during a long scan cannot give inconsistent results.
+
+```sql
+-- step 1: ids only, so the sort carries a few bytes per pair, not the document text
+WITH seeds AS MATERIALIZED (
+  SELECT u.i - 1 AS i, u.q::{vtype} AS q          -- parse each seed once, not once per row
+  FROM unnest(%s::text[]) WITH ORDINALITY AS u(q, i)
+),
+pairs AS (
+  SELECT t.{id} AS id, d.i, d.sim
+  FROM {table} t
+  CROSS JOIN LATERAL (                              -- refers to t, so the table is the outer side:
+    SELECT s.i, 1 - (t.{vec} OPERATOR({schema}.<=>) s.q) AS sim   -- it is scanned once, whatever S is
+    FROM seeds s
+    OFFSET 0                                        -- stops the planner pulling the expression up and computing it twice
+  ) d
+  WHERE t.{vec} IS NOT NULL
+    AND d.sim >= %s                                 -- the floor
+    AND d.sim <> 'NaN'                              -- zero vectors (D5)
+),
+ranked AS (
+  SELECT *, row_number() OVER (PARTITION BY i ORDER BY sim DESC, id) AS rn FROM pairs
+)
+SELECT id, i, sim FROM ranked WHERE rn <= {PG_TOP_K};
+
+-- step 2: text for the distinct ids (an index lookup when there are few, a scan when there are many)
+SELECT {id}, {text} FROM {table} WHERE {id} = ANY(%s);
+```
+
+`{vtype}` is the schema-qualified type of the vector column (`vector` or `halfvec`, see "Column types and schemas") and `{schema}` the schema that holds the extension. The query vectors are sent as `[x,y,…]` text literals. The exact query does **not** change any planner setting: it has no `ORDER BY` on a distance, so no ANN index can answer it (checked: on a table with an HNSW index every plan was a plain sequential scan). Each of `OFFSET 0`, the `LATERAL` over `t`, the `MATERIALIZED` CTE, the `NaN` test, and the two-step text fetch is there for a reason shown below; do not "simplify" them away without re-running the checks.
+
+**Result.** Step 1 returns at most `S × PG_TOP_K` rows `(id, seed index, similarity)`; step 2 returns text for the distinct ids. `search.search_pg_exact(vectors, floor)` joins them into one hit list per seed (`list[list[(id, text, sim)]]`, best first) plus `capped` (any seed with exactly `PG_TOP_K` rows). `build_candidates` takes a plain `if config.backend == "pgvector" and config.pg_search == "exact":` to get those lists in one call instead of calling `search()` per seed; **the merge, sort, write and meta code below it is unchanged**, so the output is identical to the per-seed path. Ids are passed back to step 2 in the type the driver returned them (text, integer, uuid) and converted with `str()` only when building hits, so an integer or uuid id column still uses its index. Local, S3 and `index` mode are untouched.
+
+**Cost, honestly.** The table is read once, but the database still computes S × N distances and ranks the pairs that pass the floor. The saving over S separate scans is **I/O**, which matters when the table does not fit in cache; when it does fit, the work is CPU-bound and one query is no faster than S queries (measured below). Other reasons to prefer one query: one pass over a table too big to cache, one round trip, one `statement_timeout`, one Stop, one progress display.
+
+**Streaming and progress.** Both queries are read with a server-side (named) cursor in batches. One query has no per-seed progress, so the Search screen shows running time and rows received; `progress` is called as `(received, 0, "")` on this path and the screen handles the zero-total case (`LabelBar` has no total; test at 80×24).
+
+## Versions
+
+- hunches never creates or upgrades the extension. At the start of each search (and in Check store) it runs `SELECT extversion FROM pg_extension WHERE extname = 'vector'` on the connection it already has. No row: `The vector extension is not installed in this database (CREATE EXTENSION vector needs a DBA).` Otherwise the version is parsed as integers (`0.8.1` → `(0, 8, 1)`; any non-numeric suffix ignored) and shown in Check store.
+- `exact`: no version check beyond presence (D9).
+- `index`: `< (0, 8, 0)` stops with `pg_search = "index" needs pgvector 0.8.0 or newer (found 0.6.0). Use pg_search = "exact", or upgrade the extension.` before any `SET`. The same text appears next to the mode selector when Check store has seen the version.
+- A column of type `halfvec` on a pre-0.7.0 server cannot exist, so no separate check.
+- Managed services lag upstream: per AWS's announcements, [RDS for PostgreSQL](https://aws.amazon.com/about-aws/whats-new/2024/11/amazon-rds-for-postgresql-pgvector-080/) offers 0.8.0 from engine versions 17.1, 16.5, 15.9, 14.14 and 13.17, and [Aurora PostgreSQL](https://aws.amazon.com/about-aws/whats-new/2025/04/pgvector-0-8-0-aurora-postgresql) from 16.8, 15.12, 14.17 and 13.20 (April 2025). A database on an older minor version can therefore be limited to `exact`, which is why `exact` has no 0.8 requirement.
+
+## Column types and schemas
+
+**`halfvec`, in plain terms.** pgvector's `vector` type stores each dimension as a 4-byte float. `halfvec` (added in 0.7.0) stores 2 bytes per dimension: half the storage, a little less precision. It matters here because pgvector can build an HNSW or IVFFlat index on a `vector` column only up to 2,000 dimensions, but on a `halfvec` column up to 4,000 ([README](https://github.com/pgvector/pgvector#readme)); I confirmed the first limit (`column cannot have more than 2000 dimensions for hnsw index` on a `vector(3072)` column). So a corpus embedded with a model that outputs more than 2,000 dimensions is commonly stored as `halfvec` so that it can be indexed, and hunches must read such tables.
+
+**Support in v1: `vector` and `halfvec`.** Anything else (`sparsevec`, `bit`, an array) is refused with `Column "embedding" has type sparsevec; hunches supports vector and halfvec.` The column's type is read from the catalog (`pg_attribute` → `pg_type` → `pg_namespace`: type name and schema; queries verified in task 03, see "Verified in task 03") at the start of the search and in Check store. The seed vectors are cast to that type, so the distance is computed natively. Tested on 0.8.1: a `halfvec(3072)` column with 3,000 rows gave similarities within 2e-5 of numpy float32; casting the seeds to `vector` also ran (Postgres has a cast), but the native type is the right one.
+
+**Schemas.** Some services install the extension outside the default search path: Supabase's own [guide](https://supabase.com/docs/guides/database/extensions/pgvector) enables it with `create extension vector with schema extensions`. Tested: with the extension in schema `extensions` and the default `search_path`, `'[1,2,3]'::vector` fails (`type "vector" does not exist`) and so does the bare `<=>`; `'[1,2,3]'::extensions.vector` with `OPERATOR(extensions.<=>)` works. So the query uses the schema of the column's own type for both the cast and the operator, all quoted with `psycopg.sql.Identifier`, and never depends on `search_path`.
+
+## Result size and memory guards
+
+There are two different places "too much data" can pile up, and they need different guards.
+
+**1. On the server (the ranking sort).** The sort in step 1 holds one small row per (item, seed) pair that clears the floor. Measured on 300,000 rows × 10 seeds with the floor at 0.0 (every pair passes: 3,000,000 pairs) and `work_mem` at 4MB:
+
+| Variant | Sort | Time |
+|---|---|---|
+| Text carried through the sort (my first draft) | spilled **2,046,896 kB** (about 2 GB) to disk, rows of 1 KB text | 12.6 s |
+| Ids only, text fetched after (this spec) | spilled 78,448 kB (about 78 MB) | 5.0 s |
+
+Postgres does not run out of memory here: a sort that exceeds `work_mem` spills to temporary files on the server's disk, and the table is streamed by a sequential scan (observed: 4MB and 64kB `work_mem` both completed, 80 MB spill). The risk is disk, not RAM, and the setting that caps temporary-file space, `temp_file_limit`, has context `superuser` (`pg_settings`), so a read-only role on RDS, Aurora or Supabase cannot set it. hunches therefore does three things:
+- Keep the sort narrow (the two-step query above: a 26x smaller spill in the test).
+- Show, in Check store and before a search, the worst-case pair count `S × estimated rows` with the note `A low floor on a large table sorts up to this many pairs on the server (spills to temporary files). Ask your DBA about temp_file_limit.`
+- Honour Stop and `pg_statement_timeout_s`; both end the query on the server.
+
+**2. In hunches (the result).** Bounded by construction: at most `S × PG_TOP_K` rows. But rows carry text, so that bound can still be large (30 seeds × 10,000 × 2 KB = 600 MB). **The escape hatch is the system-level setting `pg_max_result_mb`** (D12; default **512** MB, `0` = no limit; stored in `system.json`, edited in System settings, read at the start of every search):
+- **Before the scan starts** (the failure that matters is the one that comes after a ten-minute scan), hunches reads the column's average width from the planner statistics (`pg_stats.avg_width` for the text column; view and columns verified in task 03) and computes the worst case `S × PG_TOP_K × (avg_width + overhead)`. If that exceeds the limit it refuses to start: `Search could return up to ~N MB (S seeds × 10,000 hits × ~W bytes) which exceeds the result limit of 512 MB. Use fewer seeds or raise the limit in System settings (F5).` No statistics (table never analysed) skips this check.
+- **While streaming**, hunches counts bytes received (id + text + a fixed per-row overhead) and when the limit is passed it calls `cancel_safe()`, closes the connection and raises the same message with the real count. Tested: a named cursor over a 303 MB result stopped after 4,931 rows / 5.0 MB against a 5 MB budget, without reading the rest.
+- Python's merge dict holds one entry per distinct candidate, never more than the rows received, so it is covered by the same limit.
+
+A hard failure is deliberate: a partial candidate list would silently change stage 2's results.
+
+## Managed services (RDS, Aurora, Supabase, other hosted Postgres)
+
+Requirement from Chris: any managed service must work. hunches needs only a login that can `SELECT` from the table and a `vector` extension someone else installed; it never creates anything and needs no superuser, so the privileges are the same on every host. What differs is below; each item says whether I tested it, read it in docs, or could not check.
+
+| Concern | What hunches does | Basis |
+|---|---|---|
+| Connection string and TLS | The URL is passed to psycopg/libpq unchanged, so `?sslmode=require` / `verify-full` and `sslrootcert=` work as the host documents. Check store shows whether the connection is encrypted (`SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()`; the view exists, local value was `false` as expected; not tested against a TLS server). Supabase [recommends](https://supabase.com/docs/guides/database/connecting-to-postgres) SSL on all connection types and `verify-full` for verification. | docs; partly tested |
+| Extension in another schema | Schema-qualified cast and operator taken from the column's type (above). | **tested** (local schema `extensions`); Supabase's schema from its docs |
+| Poolers in transaction mode (Supabase port 6543, PgBouncer, RDS Proxy) | psycopg is opened with `prepare_threshold=None` (never auto-prepare): the psycopg [docs](https://www.psycopg.org/psycopg3/docs/advanced/prepare.html) say poolers are not compatible with prepared statements unless they declare otherwise, and Supabase [says](https://supabase.com/docs/guides/database/connecting-to-postgres) transaction mode does not support them. Everything runs inside **one transaction** (`SET LOCAL`, the named cursor, both queries), which is the only thing transaction mode guarantees; Supabase notes cursors work only within a single transaction. | docs; the single-transaction design is mine and **not tested against a pooler** |
+| Long queries through a pooler | Check store notes when the URL's port or host looks like a transaction pooler (6543, or a `pooler.` host) and suggests the direct or session-mode URL for the search. This is a hint, not a block. | docs; heuristic |
+| Server-side timeouts | Supabase's own [guide](https://supabase.com/docs/guides/database/postgres/timeouts) lists default role timeouts (anon 3 s, authenticated 8 s, `postgres` capped at 2 min by a global default; one copy of the page looked garbled, so confirm there) and shows `alter role … set statement_timeout`. A full scan on a large table can exceed them. Our error carries the hint from "Tables with no index"; `pg_statement_timeout_s` overrides it for the one transaction with `SET LOCAL`. Whether `SET LOCAL` is honoured through a given pooler is untested. | docs; untested |
+| Read replicas (RDS replicas, Aurora readers) | Allowed (the transaction is read-only anyway). A long query on a replica can be cancelled by replication: `canceling statement due to conflict with recovery`, a standby setting (`max_standby_streaming_delay`, [default 30 s on the source I found](https://docs.azure.cn/en-us/postgresql/troubleshoot/troubleshoot-canceling-statement-due-to-conflict-with-recovery)). hunches recognises that message and adds `Fix: run the search against the primary/writer endpoint, or a replica configured for long queries.` The sources I found were general PostgreSQL and Azure; Aurora's behaviour may differ. | docs (not AWS-specific); error hint only |
+| IAM / token authentication (RDS, Aurora) | In scope (D11); see "Authentication". | AWS docs; **untested against a real instance** until Chris runs it |
+| Connection limits, IP allow-lists, VPN / bastion / SSH tunnel | Out of scope; the user arranges network access. Supabase's direct host is IPv6 unless the project has the IPv4 add-on; the shared pooler is IPv4 only ([docs](https://supabase.com/docs/guides/database/connecting-to-postgres)). | docs |
+| Extension version lag | Handled by "Versions": `exact` works without 0.8. | docs |
+
+**Cannot be tested in the build container:** every managed service above (no network access to AWS or Supabase, and no accounts). The acceptance for this requirement is `manual-checklist.md` (written in task 12) that a human runs once per service: Check store, an `exact` search on a small table, a search that deliberately exceeds the host's statement timeout (to see the hint), and the pooler URL variants. **Needs a human.**
+
+### Verified on a real database (2026-10-09)
+
+PostgreSQL 16.15 (Ubuntu package) in the build container. pgvector **0.6.0** (apt) for the first checks and **0.8.1** (built from the `v0.8.1` tag) for the later ones, as marked; psycopg **3.3.6**. Scripts were scratch, not committed; task 12 turns them into the integration test.
+
+| Claim | Result |
+|---|---|
+| The query equals the numpy per-seed reference | 0.6.0: 20,000 rows × 32 dims, 5 seeds, cap 300, floor 0.30: 1,451 candidates, same `max_similarity` (1e-5) and `best_seed`, 0 mismatches. **0.8.1, final two-step form, with two true zero vectors in the table:** 1,450 candidates, 0 mismatches, zero-vector rows excluded, text fetched for every candidate, cap detected on all 5 seeds. |
+| It equals the per-seed SQL (`ORDER BY … LIMIT`) | 0.6.0: 300,000 rows × 64 dims, S = 2, 10, 30: identical `(seed, id)` hit sets. |
+| One scan of the table whatever S is | `Seq Scan on big t (actual rows=300000 loops=1)` for S = 2, 10, 30. My first draft (`FROM docs t CROSS JOIN seeds s CROSS JOIN LATERAL …`) did **not** guarantee this: with 2 seeds the table was scanned twice (`loops=2`). Making the lateral subquery iterate the seeds (so it depends on `t`) fixes it. |
+| `OFFSET 0` prevents double evaluation | Without it the plan shows `1 - (t.embedding <=> s.q)` in both the output and a join filter. |
+| The exact query cannot use an ANN index | 0.8.1, table with a primary key and an HNSW index: every plan was `Seq Scan` only, with no planner setting changed. (An earlier version of this spec turned `enable_indexscan` off; that also blocks the primary-key lookup in step 2 and is not needed.) For `ORDER BY embedding <=> q LIMIT n` queries, turning `enable_indexscan` off did move the plan from an index scan to `Sort` over a seq scan; the PostgreSQL [docs](https://www.postgresql.org/docs/current/runtime-config-query.html) describe the setting. |
+| Text join-back must be a separate query | A single query with `JOIN … ON t.id = top.id` scanned the table twice even with a primary key and one result row (the planner cannot estimate the ranked row count). The two-step form: 1 hit with a PK → `Index Scan using …_pkey` (0.02 s); 85,656 distinct ids → `Seq Scan` with a filter (0.7 s). |
+| Memory behaviour | See "Result size and memory guards": 78 MB vs 2 GB spill, no out-of-memory at `work_mem` 4MB or 64kB. |
+| Result-size guard | A named cursor stopped after 5.0 MB of a 303 MB result. |
+| Read-only transaction | `CREATE TABLE` fails with `ReadOnlySqlTransaction`. |
+| Server-side cursor | `conn.cursor(name=…)` with `itersize` streamed 20,000 rows in a read-only transaction. The psycopg [cursor docs](https://www.psycopg.org/psycopg3/docs/advanced/cursors.html) do not mention itersize or transactions; observed, not documented. |
+| Stop | `Connection.cancel()` from another thread interrupted a running query (`QueryCanceled: canceling statement due to user request`). The psycopg [docs](https://www.psycopg.org/psycopg3/docs/api/connections.html) prefer `cancel_safe()` (3.2+; same behaviour on libpq < 17) and do not address cross-thread use. **Use `cancel_safe()`.** |
+| `statement_timeout` | `SET LOCAL statement_timeout='1s'` raised `QueryCanceled: canceling statement due to statement timeout`. |
+| Zero vectors | `'[0,0,0]' <=> '[1,2,3]'` is `NaN` and `1 - NaN >= 0.3` is **true**; `AND d.sim <> 'NaN'` removes the row. Corrected D5. |
+| halfvec | 0.8.1: `halfvec(3072)` column, HNSW index on it created fine; same on `vector(3072)` fails (2,000-dimension limit); exact search on the halfvec column within 2e-5 of numpy. |
+| Extension in a non-default schema | See "Column types and schemas". |
+| `index` mode recall | See "Why exact is the default": 40 / 884 / 547 of 1,296. |
+| Speed | 0.6.0, 300,000 × 64 table that fits in memory: S = 2: 0.2 s vs 0.1 s per-seed loop; S = 10: 0.5 s vs 0.4 s; S = 30: 1.2 s vs 1.3 s. No speed-up when cached. The I/O saving on a table larger than memory was **not** measured. |
+| LATERAL semantics, CTE inlining | PostgreSQL [LATERAL docs](https://www.postgresql.org/docs/current/queries-table-expressions.html) (evaluated once per row of the referenced table, matching `loops`); [WITH docs](https://www.postgresql.org/docs/current/queries-with.html) (`MATERIALIZED`). |
+
+### Verified in task 02 (connection layer, 2026-10-09)
+
+psycopg 3.3.6, boto3 1.43.108, PostgreSQL 16 (pgvector 0.6.0, local socket).
+
+- **Read-only:** `conn.read_only = True` (property, psycopg docs: "the read-only state of the new transactions"; set before the first statement) makes the implicit `BEGIN` read-only. `show transaction_read_only` is `on`, `CREATE TABLE` raises `ReadOnlySqlTransaction`, `CREATE EXTENSION` raises `cannot execute CREATE EXTENSION in a read-only transaction`.
+- **One transaction:** the connection keeps `autocommit=False`, so psycopg opens one transaction at the first statement and holds it until `commit`/`rollback`/close; `SET LOCAL` therefore lasts the whole search. `conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ` is set at connect (observed `show transaction_isolation` = `repeatable read`). `prepare_threshold=None` is a `psycopg.connect` keyword.
+- **Timeout:** `SET LOCAL` cannot take a bound parameter under psycopg 3's server-side binding, so the statement is `SET LOCAL statement_timeout = <int>` in milliseconds (`pg_statement_timeout_s * 1000`; `0` stays `0`).
+- **IAM:** `boto3.Session(profile_name=...).client("rds", region_name=...).generate_db_auth_token(DBHostname, Port, DBUsername, Region=None)` (signature read from the installed client). The token goes to `psycopg.connect` as the `password` keyword (keywords override the URL's parameters); `sslmode=require` is passed as a keyword only when the URL has no `sslmode`. botocore errors (`BotoCoreError`, `ClientError`) become `AWS: <message>`.
+- **Dimension mismatch text** (used to attach the `Fix:` hint): `different vector dimensions 2 and 3` (`DataException`), and `different halfvec dimensions 2 and 3` for halfvec; the hint matches `different \w+ dimensions`.
+- Not tested: a real IAM token, TLS, a pooler. The auth-failure hint (`Check: ...`) is attached when the connection is `rds_iam` and the message contains `authentication failed` (the usual Postgres wording; the exact text AWS returns for a bad token is unverified).
+
+### Verified in task 03 (server probes, 2026-10-09)
+
+PostgreSQL 16 + pgvector **0.8.1** with the extension in schema `extensions`, psycopg 3.3.6; catalog docs: [pg_extension](https://www.postgresql.org/docs/current/catalog-pg-extension.html), [pg_attribute](https://www.postgresql.org/docs/current/catalog-pg-attribute.html), [pg_class](https://www.postgresql.org/docs/current/catalog-pg-class.html), [pg_stats](https://www.postgresql.org/docs/current/view-pg-stats.html). All four run through the real functions against that server.
+
+- **Version and schema:** `SELECT e.extversion, n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector'` gave `0.8.1 | extensions`. Parsed with `^(\d+)(?:\.(\d+))?(?:\.(\d+))?`, so `0.8.0rc1` is `(0, 8, 0)`, `0.7` is `(0, 7, 0)` and `1.0.0-beta` is `(1, 0, 0)`.
+- **Column type:** `SELECT t.typname, tn.nspname, a.atttypmod FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_namespace tn ON tn.oid = t.typnamespace WHERE a.attrelid = %s::regclass AND a.attname = %s AND NOT a.attisdropped`. Observed: `vector(3)` is `vector | extensions | 3`, `halfvec(3)` is `halfvec | extensions | 3`, a `vector` with no declared dimension has `atttypmod = -1` (reported as dimension `None`), `sparsevec(3)` is `sparsevec`. For `vector` and `halfvec`, `atttypmod` is the dimension itself (no offset), so `format_type` is not needed. The type's schema is `pg_type.typnamespace`, which is the extension's schema, and is what the later `OPERATOR(schema.<=>)` uses.
+- **Table name:** the table is passed as one text parameter to `%s::regclass`, built by quoting each part of `schema.table` (split at the first `.`, `"` doubled). `regclass` also accepts views and partitioned tables, and a table whose name contains `"` worked (`public."we""ird"`). A missing table raises Postgres's own `relation "nope.x" does not exist` (an `UndefinedTable`, which also aborts the open transaction, so the caller must not reuse the connection). No identifier is ever interpolated into SQL text. A missing column returns no row and hunches raises `column "x" of relation "t" does not exist`.
+- **Row estimate:** `SELECT reltuples FROM pg_class WHERE oid = %s::regclass`: `-1` for a table never analysed or vacuumed (PostgreSQL 14+; older servers report 0, which is treated as an estimate of 0 rows), `50` after `ANALYZE`. Negative means unknown (`None`).
+- **Average width:** `SELECT max(s.avg_width) FROM pg_stats s JOIN pg_class c ON c.relname = s.tablename JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.schemaname WHERE c.oid = %s::regclass AND s.attname = %s`. View `pg_stats`, columns `schemaname, tablename, attname, inherited, avg_width`; `avg_width` is the average stored width in bytes (a 100-character text gave 101). It returns no row (NULL from `max`) before `ANALYZE`; a column the role cannot read is also absent from the view. `max` merges the `inherited = true/false` rows of partitioned or inherited tables.
+
+**Not verified (task 03; after task 12 the partitioned table, view, integer and uuid ids and pgvector 0.8.1 are verified, see below):** any managed service; a transaction-mode pooler; TLS; tables larger than memory (the I/O saving, and the temp-file spill at scale); IVFFlat; partitioned tables and views as `pg_table` (the id join in step 2 should work, untested); integer and uuid id columns; pgvector versions other than 0.6.0 and 0.8.1.
+
+### Verified in task 04 (`search_pg_exact`, 2026-10-09)
+
+PostgreSQL 16 + pgvector 0.8.1 (extension in schema `extensions`), psycopg 3.3.6, the real function against 3,000 rows x 16 dims, 4 seeds, two zero vectors in the table.
+
+- **Result equals numpy** for an integer-id table, a uuid-id table (same `(seed, id)` order as the numpy reference, tie broken by the native id) and a `halfvec` table with text ids (similarities within 3e-3; one boundary row near the floor differs, as expected for half precision). Floor 0.3: 350 / 373 / 365 / 363 hits per seed; floor 0.0 with `PG_TOP_K` patched to 50: 50 per seed and `capped` true. The zero-vector rows never appear. A row whose vector is NULL is skipped.
+- **Isolation level and read-only:** set in `pg_connect` (task 02): `conn.read_only = True` and `conn.isolation_level = IsolationLevel.REPEATABLE_READ` on the `autocommit=False` connection, so both statements and both named cursors share one transaction and one snapshot. `search_pg_exact` sets nothing else.
+- **Named cursor:** `conn.cursor(name=...)` returns a `ServerCursor`; `itersize` is an attribute of the installed class (default 100 rows per fetch while iterating) and is set to `PG_BATCH = 5000`. The psycopg cursor docs still do not describe it for this use, so this stays observed rather than documented (iterating 3,000 rows in batches worked).
+- **Identifiers:** composed with `psycopg.sql.Identifier(schema, name)`; the table is split at the first `.` (same rule as the `regclass` quoting of task 03). `Composed.as_string()` works without a connection in 3.3.6 (the tests use it); the cast and the operator use the schema of the column's own type.
+- **Ids:** a Python list of `int` / `uuid.UUID` / `str` reaches `= ANY(%s)` unchanged and is accepted for integer, uuid and text id columns. Step 2 is skipped when step 1 returned no rows (an empty list parameter has no element type to infer).
+- **Ordering:** step 1's outer `SELECT` has no `ORDER BY`, so the client re-sorts each seed by `(-similarity, id)`. For text ids Python compares code points while the server's `ORDER BY ..., id` uses the database collation, so which row falls at the cap boundary among exactly tied similarities can differ in a non-C collation; irrelevant unless a seed has more than `PG_TOP_K` hits.
+- **Errors:** a missing table gives Postgres's `relation "nope.x" does not exist` and a dimension mismatch `different vector dimensions 16 and 3` plus the `Fix:` hint; the connection is closed and not reused. A missing text row is `no text row for id '<id>'`.
+
+### Verified in task 05 (guards, Stop, progress, 2026-10-09)
+
+PostgreSQL 16 + pgvector 0.8.1, psycopg 3.3.6, a 2,000,000-row table (1 KB text, `vector(8)`), the real `search_pg_exact`.
+
+- **API:** `search_pg_exact(vectors, floor, progress=None, stop=None)`. `search.Stop` is the handle (`stop.stop()` sets a flag and calls `cancel_safe()` on the live connection, kept in `stop.conn`); `search.SearchCancelled` is the cancellation. Whenever `stop.stopped` is set, any error from the driver becomes `SearchCancelled`, and a stop requested before the connection is used is honoured before the first query.
+- **`Connection.cancel_safe(*, timeout=30.0)`** (psycopg 3.2+, installed 3.3.6; [docs](https://www.psycopg.org/psycopg3/docs/api/connections.html)): non-blocking cancel that uses libpq 17's improved cancellation and, below libpq 17, falls back to `cancel()`. If a psycopg without it is installed the code calls `cancel()` (the extras do not pin a version). Observed: called from a second thread while a named-cursor query was running, the main thread got `QueryCanceled: canceling statement due to user request` after 1.0 s and `pg_stat_activity` showed no active query afterwards. Called from the main thread between fetches (the streaming abort), then `close()`: no error and no query left running.
+- **Who closes:** the task text says the handle cancels *then closes*. Closing the connection from the second thread while the first is inside the driver call made the first fail with `OperationalError: connection socket closed` instead of `QueryCanceled` (both worked). The handle therefore only cancels; `search_pg_exact` always closes in its `finally`. The streaming abort cancels and closes in the searching thread.
+- **Row overhead constant:** `search.PG_ROW_OVERHEAD = 128` bytes, added to every received row (id and text bytes) in both the pre-flight and the streaming count, covering Python's tuple, float and string headers. An estimate, not a measurement. `1 MB` in the limit is 1,048,576 bytes.
+- **Pre-flight:** worst case = `seeds x PG_TOP_K x (avg_width + 128)`, read from `table_estimates` (two catalog queries, run only when the limit is not 0), refused before the scan when above the limit; no statistics (`avg_width` unknown) skips it. Real run: 100 seeds against the 2M-row table (`avg_width` 1004) was refused with `~1080 MB (100 seeds × 10,000 hits × ~1132 bytes)` and no scan was sent.
+- **Streaming guard:** counted per row over both steps (step 1 rows: id; step 2 rows: id and text). Real run: limit 1 MB with the pre-flight bypassed stopped after 7,953 rows of a result of about 1M rows, message `Search has already received 1.0 MB (7,953 rows), which exceeds the result limit of 1 MB. ...`.
+- **Progress:** `progress(received, 0, "")` is called for every row received (steps 1 and 2 share the counter). A caller that updates a widget should throttle; task 07 owns that.
+- **Stop (real run):** `Stop.stop()` from a timer thread 1.0 s into a 2M x 20-seed scan: `SearchCancelled` raised after 1.0 s, no active query left on the server.
+
+### Verified in task 06 (`index` mode, 2026-10-09)
+
+PostgreSQL 16 + pgvector **0.8.1**, psycopg 3.3.6; README read at the `v0.8.1` tag ([Iterative Index Scans](https://github.com/pgvector/pgvector/blob/v0.8.1/README.md#iterative-index-scans)).
+
+- **API:** `search.search()` has a third branch for `backend == "pgvector"`; `pg_search = "exact"` through it raises `search() runs pg_search = 'index' only; exact search is search_pg_exact` (an internal error, no connection opened). `search.is_approximate(config)` is true for pgvector + `index`; task 07 shows the permanent warning.
+- **Statements, in order:** version probe, `require_index_mode_version` (before any `SET`), column type, `SET LOCAL hnsw.iterative_scan = relaxed_order`, `SET LOCAL hnsw.max_scan_tuples = <PG_MAX_SCAN>`, then `SELECT id, text, 1 - (vec OPERATOR(s.<=>) q) AS sim FROM t WHERE 1 - (...) >= floor AND 1 - (...) <> 'NaN' ORDER BY vec OPERATOR(s.<=>) q LIMIT PG_TOP_K`. The `ORDER BY` is the bare distance operator, the shape the HNSW index needs. Rows are re-sorted client-side by similarity (relaxed order). Nothing else is set.
+- **README facts:** `hnsw.iterative_scan` takes `strict_order` or `relaxed_order`; `hnsw.max_scan_tuples` is "the max number of tuples to visit (20,000 by default)" and "approximate and does not affect the initial scan"; `hnsw.scan_mem_multiplier` ("the max amount of memory to use, as a multiple of `work_mem` (1 by default)") comes with the note "Try increasing this if increasing `hnsw.max_scan_tuples` does not improve recall".
+- **`PG_MAX_SCAN = 20_000`**, the pgvector default, set explicitly so the result does not depend on the server's configuration. Reason: raising it alone did not add hits here or in the 300,000-row measurement above. Re-measured on a 100,000-row x 32-dim table with an HNSW index (random unit vectors, one seed, floor 0.3, true hit count 4,456, `enable_seqscan = off` so the planner used the index; with it on, the planner chose a sequential scan and returned all 4,456): default settings 40 hits; `relaxed_order` 4,148; `relaxed_order` + `max_scan_tuples` 20,000 / 100,000 / 1,000,000 all 4,148; `relaxed_order` + `max_scan_tuples` 1,000,000 + `scan_mem_multiplier = 8` **4,456 (all)**. So the plateau in "Why exact is the default" is the scan's memory budget, not the tuple limit. One table and one seed, indicative only.
+- **Not done, flagged:** task 06 sets only the parameters its text names, so `hnsw.scan_mem_multiplier` is not set. Setting it would make `index` mode recall more, but the mode stays approximate and keeps the permanent warning either way; whether to add it (and the memory it implies per query) is Chris's call.
+- Not tested: IVFFlat (`ivfflat.iterative_scan` / `ivfflat.max_probes` are not set), pgvector 0.8.0 exactly, a managed service.
+
+### Verified in task 07 (`build_candidates` and the Search screen, 2026-10-09)
+
+Stubbed `search_pg_exact`; Pilot tests, nothing touches a database.
+
+- **`build_candidates(embedder, progress, stop=None)`**: `config.backend == "pgvector" and config.pg_search != "index"` (so `None` is exact) makes one `search_pg_exact(vectors, FLOOR, progress=progress, stop=stop)` call, run with `asyncio.to_thread` so the event loop stays free for the Stop key; every other case still calls `search()` per seed. The merge, sort, write and meta code is the same for both. The per-seed path now calls `progress(done, total, seed)` after the seed's search and before the merge loop (it used to be after the merge; nothing observes the difference).
+- **Search screen**: `cap_warning(backend, top_k)` (`S3` for `s3`, `pgvector` for `pgvector`; `PG_TOP_K` or `S3_TOP_K`). `#approximate` is an amber banner with the text from D4, set in `refresh_state`, so it shows every time the screen is shown and stays after a run. In the one-query mode `#progress` has no total: the progress callback arrives from the search thread, so it only stores the row count, and a 0.25 s timer redraws `#progress` as `<elapsed>  <rows> rows` (this is also the throttle task 05 asked for). A `Stop  x` button (`#stop`, key `x`) is shown only while that query runs; it calls `search.Stop.stop()`, the worker ends with `SearchCancelled`, `#warning` says `Search stopped.`, nothing is written and the Run button is enabled again. `x` does nothing for the per-seed paths (S3, local and `index` run in the event loop and cannot be interrupted).
+- **Found by the size sweep (also true for S3 before this task)**: the 118-character cap warning was one unwrapped line and was clipped at every size. `#warning` and `#error` now wrap (`width: 1fr; height: auto`).
+
+### Verified in task 08 (`check_store`, 2026-10-09)
+
+PostgreSQL 16 + pgvector **0.8.1** (extension in schema `extensions`, UTF8 cluster), psycopg 3.3.6; docs: [pg_index](https://www.postgresql.org/docs/current/catalog-pg-index.html), [pg_opclass](https://www.postgresql.org/docs/current/catalog-pg-opclass.html), [pg_stat_ssl](https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STAT-SSL-VIEW). `search.check_store(config, seeds=None)` returns a dict (`version`, `schema`, `encrypted`, `type`, `dimension`, `rows`, `indexes`, `sample`, `warnings`, `notes`, `errors`) and never raises; it was run through the real function against that server.
+
+- **Indexes on the column:** `SELECT i.relname, am.amname, oc.opcname FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_am am ON am.oid = i.relam JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attname = %s AND NOT a.attisdropped CROSS JOIN LATERAL unnest(x.indkey::int2[], x.indclass::oid[]) AS k(attnum, opc) JOIN pg_opclass oc ON oc.oid = k.opc WHERE x.indrelid = %s::regclass AND k.attnum = a.attnum`. `indkey` and `indclass` are parallel arrays, so unnesting them together pairs each key column with its operator class. Observed: `hnsw` indexes gave `vector_cosine_ops` / `vector_l2_ops`, a `halfvec` column gave `halfvec_cosine_ops`, a btree on the text column gave `text_ops` (and none on the vector column). An index on an expression (`(embedding::halfvec(3))`) is not listed: its `indkey` entry is 0. Such an index is not used by `ORDER BY embedding <=> q` anyway.
+- **Correction to the text above:** the cosine class is `<type>_cosine_ops`, so `halfvec_cosine_ops` for a `halfvec` column, and the `index`-mode warning names the class that matches the column's type (`vector_cosine_ops` when the type is unknown).
+- **Encryption:** `SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()` gave `false` on the local unix-socket server (no row would mean unknown, shown as such). TLS itself is not tested.
+- **Row estimate and sample:** `table_estimates` (task 03) for rows, then `SELECT id, left(text, 60) FROM t LIMIT 1` built with `psycopg.sql.Identifier`. The text is cut in SQL, so a long value never travels.
+- **Savepoints:** each piece runs in `conn.transaction()` (a savepoint inside the connection's open transaction). Without it the first failing query would abort the transaction and every later piece would fail with "current transaction is aborted". Verified with a nonexistent table: the version, encryption and unrelated pieces still reported while column, estimates, indexes and sample each carried their own error. `SAVEPOINT` is the one statement that is neither a `SELECT` nor a `SET LOCAL`; it writes nothing.
+- A missing table repeats Postgres's text once per piece that uses it (4 times in a screen that prints all of `errors`); task 10 may show only the first.
+- A `sparsevec` column is a warning (`Column "embedding" has type sparsevec; ...`) with `type` `None`; a missing column is an error under `column`.
+- Not verified: TLS, a pooler (the hint is a port/host check on the URL), a managed service.
+
+### Task 10 (New project, 2026-10-09)
+
+The pgvector section is `screens/pg.py` (`compose_pg`, `pg_fields`, `pg_pressed`, `report`), shared with Project settings (task 11). Ids: `#pg`, `#pg-table`, `#pg-id`, `#pg-text`, `#pg-vector`, `#pg-url-var` (+ `#pg-url-status`), `#pg-url` (masked) with `#save-url`, `#pg-auth`, `#pg-region-row`, `#pg-profile-row`, `#pg-search`, `#pg-timeout`, `#check-pg`, `#pg-status`. The embedding row is no longer inside `#s3`: it is `#embedding-row`, shown for S3 and pgvector. Empty fields are written as absent (the default shows as the placeholder). Check store passes no `seeds` (none exist on this screen), so the worst-case pairs note never shows, and it shows only the first error of `errors`. Create writes the config, registers the project and (since task 11 added pgvector to the `open_project` allow-list) opens it.
+
+### Task 11 (Project settings, Projects, `open_project`, 2026-10-09)
+
+Project settings reuses `screens/pg.py` unchanged (`compose_pg`, `pg_mount`, `pg_fields`, `pg_pressed`, `pg_select_changed`, `pg_input_changed`); the stored values are filled in on mount (unset fields stay empty, the default is the placeholder). The embedding row (`#pick-embedding` button and `#embedding`) now sits outside `#s3` and shows for S3 and pgvector; the two share `s3_embedding`, so the model carries over when the backend is switched. Save writes the active backend's fields and sets every other backend's to `None` (all `Config` fields starting `pg_` for S3/local, the S3 and `corpus_dir` fields for pgvector), in both directions. The confirmation fires when backend, corpus, bucket, index, `pg_table`, the three column names or the embedding model change, with the same text as S3 (`Candidates were generated from the old corpus (candidates.jsonl): re-run Search (stage 2). ...`), not the shorter wording in the UI section above. Changing only search mode, URL variable, auth or timeout needs no confirmation. Projects: Where is `pg_table`. `app.open_project` accepts `OK (pgvector not checked)`; opening never imports or calls psycopg (tested with a fake `connect` that records calls).
+
+### Verified in task 12 (integration tests, 2026-10-09)
+
+`tests/test_pg_integration.py`, run against PostgreSQL **16.15** (Ubuntu package, UTF8 cluster) with pgvector **0.8.1**, psycopg 3.3.6: 17 tests, all passed (about 37 s). Skipped unless `HUNCHES_TEST_PG_URL` is set; `index` tests also need pgvector 0.8.0+. Each test makes its own schema (or scratch database) and drops it. Not run: any other PostgreSQL or pgvector version (so 0.6.0, which tasks 02 to 05 used, is not covered by the file); the CI job (`pgvector` in `.github/workflows/ci.yml`, image `pgvector/pgvector:pg16`, which carries 0.8.x) has not run yet.
+
+- **Equal to numpy:** `build_candidates` on the local backend and on pgvector `exact` give the same ids, `best_seed` and `max_similarity` (1e-5) for 4 seeds (one repeating another, so ties go to the earlier), 300 unnormalised rows with a tie and two zero vectors; with no index and with an HNSW `vector_cosine_ops` index. Also for `halfvec` (3e-3, rows within 3e-3 of the floor may fall either side), bigint and uuid ids, a hash-partitioned table, a view, and the extension in schema `extensions` with the default `search_path`. The zero vectors never appear. The zero-vector row is excluded even at a floor of -1 (local would give it similarity 0 and include it when the floor is 0 or below; the two backends differ there only).
+- **Plan:** `EXPLAIN (ANALYZE)` of the recorded step-1 query on a table with an HNSW index, for 1, 4 and 12 seeds: exactly one `Seq Scan` of the table with 1 loop and no index node.
+- **Spill:** 20,000 rows x 4 seeds at a floor below every similarity returned 4 x 20,000 hits, not capped (with `PG_TOP_K` raised above the row count); the ranking sort ran on disk (`Sort Space Type` Disk, 2,712 kB) at `work_mem` 64kB.
+- **Stop and timeout:** on a view that sleeps 20 ms per row, `Stop.stop()` after 1 s raised `SearchCancelled` well under 6 s and left no active query; `pg_statement_timeout_s = 1` gave Postgres's timeout text plus the `Fix:` hint, without the URL.
+- **Check store** on a real plain table, an indexed table, a partitioned table and a view: no errors; the version, type, dimension, sample, the no-index note and the `hnsw` / `vector_cosine_ops` index entry are as expected.
+- **`index` mode, measured** (100,000 x 32 random unit vectors, HNSW `vector_cosine_ops`, one seed, floor 0.3, true hits 4,647; the numbers vary a little between index builds): with the planner's own choice (a sequential scan) hunches' `index` mode and a plain query both returned all 4,647. With `enable_seqscan = off` (set on the scratch database only) so the index is used: **hunches `index` mode 4,299** (4,317 on another build), a plain `ORDER BY ... LIMIT 10000` query with pgvector's defaults **40**, `exact` 4,647. Same story as above, so the shortfall is real and `index` mode only narrows it.
+- **Found and fixed:** `screens/pg.py:report` called `escape()` on `check_store`'s `version`, which is a tuple `(0, 8, 1)` (task 08), so Check store would have raised `TypeError` on any real connection; the task-10 test stubbed the version as a string. `report` now joins the tuple, the stub in `tests/test_new_project.py` uses a tuple, and the integration test renders a real result. `tests/test_sizes.py` gained `test_new_project_pgvector_check_store_result` (a full report and an error report, 3 sizes).
+
+### Clarifications from implementation (task 13)
+
+Where the first draft above and the code differ, the code and the "Verified in task NN" notes win. In one place:
+
+- The cosine operator class is `<type>_cosine_ops` (`vector_cosine_ops`, `halfvec_cosine_ops`), and the `index`-mode warning names the one matching the column (task 08).
+- `check_store` runs each piece in a `SAVEPOINT` (`conn.transaction()`), so one failing query does not hide the others; `SAVEPOINT` is the one statement that is neither a `SELECT` nor a `SET LOCAL`, and it writes nothing (task 08).
+- `cap_warning(backend, top_k)` (task 07); `Stop` only cancels and `search_pg_exact` closes the connection (task 05); `PG_ROW_OVERHEAD = 128`, `PG_MAX_SCAN = 20_000`, `PG_BATCH = 5_000` (tasks 05, 06, 04).
+- The `Check:` hint for `rds_iam` is attached only when the message contains `authentication failed`. AWS's own text for a denied token is documented as `Failed to authorize the connection request for user ... is not authorized to perform rds-db:connect`, which does not contain it, so the hint may not appear for the most likely failure. Unverified until Chris runs checklist item C12 (and C13, C14), which asks him to record the real wording; widen the match then.
+- `index` mode does not set `hnsw.scan_mem_multiplier`, so it stays approximate by design: raising `max_scan_tuples` alone added nothing, and the plateau was the scan's memory budget (task 06 measurement). Adding it is Chris's call (memory per query), and the `APPROXIMATE` banner is shown either way.
+- Index-mode shortfall, measured twice on pgvector 0.8.1 with an HNSW index in use: plain `ORDER BY ... LIMIT 10000` with defaults returned 40 of 1,296 / 4,456 / 4,647 true hits (three tables); hunches' `index` mode 4,148 of 4,456 and about 4,299 of 4,647; `exact` all of them. With the planner's own choice (a sequential scan) every variant returned everything, so the shortfall appears only when the index is actually used.
+- No config validator for the pgvector fields (see "What changes in the code").
+- CI: the optional `pgvector` job (`continue-on-error`, image `pgvector/pgvector:pg16`) has not run yet.
+
+## Tables with no index (very large, rarely queried)
+
+Supported, and it is the case `exact` mode is built for: it needs no index and never looks for one, so a table with no index at all works the same as an indexed one. Nothing in Check store treats a missing index as a problem in `exact` mode (it only warns in `index` mode, where an index is the whole point). What changes is cost, so the spec adds these:
+
+- **Say it is slow, honestly.** In `exact` mode the whole seed set is one full scan of the table, however many seeds there are (previous section, with the cost caveat there); only `index` mode, which needs an index anyway, runs a query per seed. Check store shows the planner's row estimate and, in `exact` mode with no usable index, a plain note: `No index: the search scans the whole table (~N rows).` Informational, not a warning; the user chose this.
+- **Progress and Stop work.** The Search screen shows elapsed time and candidates received so far (see previous section) and lets the user cancel. Cancelling a worker thread blocked in a driver call does not interrupt the query, so on Stop the code calls `connection.cancel()` (psycopg's way to ask the server to cancel the running statement; verified in task 05: `Connection.cancel_safe()`, falling back to `cancel()`) and closes the connection (the searching thread closes it; the Stop handle only cancels). Otherwise an abandoned multi-minute scan keeps running on the server.
+- **Server timeouts are the user's, not ours.** We do not override `statement_timeout`; an admin may have set one on purpose. If a scan hits it, the error shown is Postgres's own (`canceling statement due to statement timeout`) plus `Fix: raise statement_timeout for this role, or set pg_statement_timeout_s in config.toml`. Optional field `pg_statement_timeout_s` (default unset = the server's setting); when set, `SET LOCAL statement_timeout` is issued. Setting it to `0` means no limit.
+- **Memory and result size:** see "Result size and memory guards"; the system-level `pg_max_result_mb` applies here too.
+
+What this spec does **not** promise: speed. A table of tens of millions of 1,536-dimension vectors will take a long time (minutes at least) for the one scan on typical hardware; I have not measured it. That is inherent to exact search without an index; the product answer is the progress display, working Stop, and the honest note in Check store.
+
+## Config
+
+`.hunches/config.toml` gains these fields, all optional, only read when `backend = "pgvector"`. **In the file they default to absent** (`write_config` omits `None`, so a local or S3 project's config is unchanged); the defaults in the "Default" column are applied when the value is read:
+
+| Field | Default | Notes |
+|---|---|---|
+| `backend` | `"local"` | now `Literal["local", "s3", "pgvector"]` |
+| `pg_table` | — | required for pgvector; `schema.table` or `table` |
+| `pg_id_column` | `"id"` | |
+| `pg_text_column` | `"text"` | |
+| `pg_vector_column` | `"embedding"` | a `vector` or `halfvec` column; the type is read from the catalog, not configured |
+| `pg_url_var` | `"HUNCHES_PG_URL"` | name of the env var / keyring entry holding the URL |
+| `pg_search` | `"exact"` | `"exact"` or `"index"` |
+| `pg_statement_timeout_s` | unset | seconds; unset = the server's `statement_timeout`; `0` = no limit |
+| `pg_auth` | `"url"` | `"url"` or `"rds_iam"` (D11) |
+| `pg_aws_region` | unset | `rds_iam` only; unset = boto3's default region resolution (like `s3_region`) |
+| `pg_aws_profile` | unset | `rds_iam` only; a named AWS profile; unset = boto3's default credential chain |
+| `embedding_model` | — | required, as for S3 |
+
+Switching backend in Project settings writes only the active backend's fields and sets the others to `None` (002 rule, unchanged). Old configs have none of these and load unchanged.
+
+**System level (`system.json`, per user, never in git):** one new field, `pg_max_result_mb: int = 512`. An older `system.json` without it loads with 512. `VERSION` stays 1: the field is additive and has a default; a hunches that predates it ignores the field when reading and drops it if it rewrites the file, which is the same exposure any additive field has had (002 added fields the same way).
+
+## Authentication
+
+`pg_auth = "url"` (default): `pg_url_var` names an environment variable, or a keyring entry, holding a full libpq URL including the password (D3).
+
+`pg_auth = "rds_iam"`: for RDS and Aurora PostgreSQL with IAM database authentication enabled. `pg_url_var` holds a URL **without a password**: `postgresql://db_user@my-instance.abc123.us-east-1.rds.amazonaws.com:5432/mydb?sslmode=verify-full&sslrootcert=/path/global-bundle.pem`. At the start of every connection hunches asks boto3 for a token and uses it as the password:
+
+```python
+session = boto3.Session(profile_name=config.pg_aws_profile)  # None = default chain
+region = config.pg_aws_region or session.region_name  # error if neither
+token = session.client("rds", region_name=region).generate_db_auth_token(
+    DBHostname=host, Port=port, DBUsername=user, Region=region
+)  # host/port/user parsed from the URL
+```
+
+What the AWS docs say, and what follows from it ([IAM database authentication](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html), [Python example](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.Connecting.Python.html), [IAM policy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.IAMPolicy.html)):
+- A token lives 15 minutes and "is only used for authentication and doesn't affect the session after it is established". So a token is generated per connection, immediately before connecting, and never stored or refreshed; a search that runs longer than 15 minutes is unaffected. (A new token is generated for each search because each opens its own connection.)
+- The host must be the real endpoint: "You cannot use a custom Route 53 DNS record instead of the DB instance endpoint to generate the authentication token." hunches uses the URL's host verbatim and says so in the error text if authentication fails.
+- Tokens are large ("generally about 1 KB but can be larger") and a truncated one fails; hunches passes it to psycopg as the `password` argument, not through a URL string.
+- If temporary credentials made the token, they must still be valid when connecting (docs); hunches generates the token immediately before connecting.
+- The connection is encrypted (IAM database authentication runs over SSL/TLS). If the URL has no `sslmode`, hunches adds `sslmode=require`. `verify-full` with the AWS root bundle in the URL is the user's choice and is passed through.
+- The database user needs the `rds_iam` role in Postgres, and the AWS identity needs `rds-db:connect` on `arn:aws:rds-db:<region>:<account>:dbuser:<DbiResourceId>/<db_user>` (for Aurora, the cluster resource id; through RDS Proxy, the proxy's `prx-…` id). hunches cannot check either; when authentication fails, the error text lists both as the likely causes.
+- The sandbox cannot test this (no AWS account). Chris tests it against his own instance; the code is covered by tests with `boto3` and `psycopg` stubbed (arguments passed to `generate_db_auth_token`, the token reaching psycopg as `password`, `sslmode` defaulting, the token and URL scrubbed from errors).
+
+Where the credentials come from is boto3's business (environment, `~/.aws`, SSO, instance role); hunches stores no AWS secrets. Errors from boto3 (no credentials, no region, expired SSO session) are shown as `AWS: <message>`.
+
+## UI
+
+- **New project** (`screens/new_project.py`): Backend Select gets a third option `PostgreSQL (pgvector)`. A `#pg` section (shown like `#s3`): table, id/text/vector column, URL variable (with a status word `env` / `keyring` / `missing` from `keys.status` and a **Save URL…** that stores it in the keyring via `keys.save`, input masked), search mode Select (Exact / Index), embedding model (picker). Required: location, table, embedding model. **Check store** runs in a thread worker like S3's `get_index` and is the only network call on the screen: it opens the connection read-only and shows
+  - the pgvector version (`extversion`), the extension's schema, and whether the connection is encrypted,
+  - the vector column's type and dimension (`pg_attribute` and `pg_type`, `atttypmod` is the dimension; task 03), with a WARNING when the column is not `vector`/`halfvec`,
+  - the planner row estimate (`pg_class.reltuples`; **not** `count(*)`, which is a full scan),
+  - the indexes on the column and their operator class, with a WARNING in `index` mode when none uses the cosine operator class of the column's type (`vector_cosine_ops`, or `halfvec_cosine_ops` for `halfvec`; the index would not be used by `<=>`; the README says the operator class must match the operator). In `exact` mode no index is required: with none, it shows the informational `No index: the search scans the whole table (~N rows).`,
+  - a one-row sample (id and the first 60 characters of text), proving the column mapping works.
+  The catalog queries are in "Verified in task 03".
+- **Project settings** (`screens/project_settings.py`): same section, same Check store, same consequence confirmation as S3 (changing table/columns/model says "Candidates were generated from the old corpus/model; re-run Search").
+- **Projects** (`screens/projects.py`): Backend column `pgvector`; Where column `table` (never the URL or host).
+- **Status** (`system.project_status`, `app.open_project`): pgvector projects show `OK (pgvector not checked)`; the allow-list in `open_project` gains it, as for S3. No network on open.
+- **Search screen** (`screens/search.py`): `cap_warning(top_k)` said `S3 returned its cap…`; it is now `cap_warning(backend, top_k)` (task 07: `WARNING: S3 returned its cap of N hits …` or `WARNING: pgvector returned its cap of N hits …`), and `search.S3_TOP_K` is joined by `search.PG_TOP_K`. The `APPROXIMATE` warning above shows for `pg_search = "index"`. A connection failure surfaces in the existing `#error` line with the exception text, **with the URL's password removed** (see Errors).
+- Every new widget works at 80×24; add the new section to the `tests/test_sizes.py` sweep. Keys and buttons follow the `key_button` rule.
+
+## Errors
+
+| Situation | Message (the Search screen shows it in `#error`) |
+|---|---|
+| `psycopg` not installed | `The pgvector backend needs psycopg: pip install hunches[pg]` |
+| URL var unset and not in keyring | `config.toml: pg_url_var HUNCHES_PG_URL is not set (environment or keyring)` |
+| `pg_table` missing | `config.toml: pg_table is required for pgvector` |
+| Connection/auth/SQL error | The driver's message, passed through a scrubber that replaces the URL and, defensively, the password portion with `***`. Never print the URL. |
+| Table or column missing | The Postgres error text (it names the object). |
+| `rds_iam` without boto3 | `IAM authentication needs boto3: pip install hunches[rds]` |
+| `rds_iam`, no credentials / region | `AWS: <botocore message>`; `pg_aws_region is not set and boto3 found no default region` |
+| `rds_iam`, authentication failed | The server's message, then `Check: the database user has the rds_iam role, the AWS identity may rds-db:connect on this DbiResourceId/user, and the URL host is the instance endpoint (not a custom DNS name).` |
+| Extension missing | `The vector extension is not installed in this database (CREATE EXTENSION vector needs a DBA).` |
+| `index` mode on pgvector < 0.8.0 | `pg_search = "index" needs pgvector 0.8.0 or newer (found X). Use pg_search = "exact", or upgrade the extension.` |
+| Unsupported column type | `Column "embedding" has type sparsevec; hunches supports vector and halfvec.` |
+| Result too large (before or during) | `Search could return up to ~N MB … exceeds the result limit of 512 MB. Use fewer seeds or raise the limit in System settings (F5).` |
+| Replica conflict | Postgres text, then `Fix: run the search against the primary/writer endpoint, or a replica configured for long queries.` |
+| Column dimension ≠ query dimension | Postgres raises on the distance operator; pass its message through and append `Fix: embedding_model in .hunches/config.toml must be the model the table was embedded with.` |
+
+## What changes in the code
+
+- `pyproject.toml`: extras `pg = ["psycopg[binary]"]` and `rds = ["psycopg[binary]", "boto3"]`; add `psycopg` to the dev group so `ty` and tests can import it (as boto3 is handled today: check how and mirror it).
+- `files.py`: `Config.backend` literal, the new fields (above), and (task 01) no validator: nothing validates the S3 fields either, so a missing `pg_table` is reported by `search.pg_connect` (`config.toml: pg_table is required for pgvector`), as a missing bucket is for S3.
+- `search.py`: a third branch in `search()` (a plain `if`/`elif`, not a class) for `index` mode, `PG_TOP_K`, and one new function `search_pg_exact(vectors, floor)` returning one hit list per seed (the single-query path, D10; two queries in one transaction). Local and S3 are untouched.
+- `candidates.py`: `build_candidates` takes one `if` to get its per-seed hit lists from `search_pg_exact` instead of calling `search()` per seed, for `pgvector` + `exact`; the merge, sort, write and meta code is shared and unchanged. Docstring `S3 topK cap` → `backend cap`.
+- `system.py`: `project_status` (one line), no schema change (D8).
+- `screens/new_project.py`, `screens/project_settings.py`, `screens/projects.py`, `screens/search.py`, `app.py:857`: as under "UI".
+- Docs (task 13): `README.md` (install `hunches[pg]` / `hunches[rds]`, a pgvector paragraph after "S3 Vectors", the env var), `AGENTS.md` (Current state, Stack, Layout, "Needs a human"; `CLAUDE.md` is a symlink to it), and one-line notes in 001 and 002 pointing here.
+- `.github/workflows/ci.yml`: optional job for the integration test (below).
+
+## Tests
+
+All default-run tests are offline.
+
+- **Stubbed connection (fast tier).** A fake `psycopg.connect` whose cursor records the SQL and parameters and returns canned rows, in the style of `FakeS3` in `tests/test_search.py`. Assert: results are `(id, text, similarity)` sorted best first with only `sim >= floor` kept (floor inclusive, hand-computed values); `capped` is true only when some seed returns exactly `PG_TOP_K` hits (use a small `PG_TOP_K` via monkeypatch); the `NaN` guard and the `OFFSET 0` / `LATERAL` / `MATERIALIZED` shape are asserted on the SQL text; `exact` sends **one** step-1 query for any number of seeds (assert the fake saw exactly one such `execute` with all seed vectors in one parameter, plus the step-2 text query) and changes no planner setting, `index` issues `hnsw.iterative_scan` and one query per seed; the rows `search_pg_exact` returns feed `build_candidates` to the same `candidates.jsonl` as the per-seed path would for the same data (hand-built, ties to the earlier seed); the connection is read-only; identifiers are quoted (a column named `"text"; DROP TABLE x` stays an identifier); the vector parameter is a text literal; missing `psycopg`, missing URL var, missing table each give the exact message in "Errors"; a connection error containing the URL does not leak the password.
+- **Config:** old configs load; a pgvector config round-trips; switching backend nulls the other backend's fields.
+- **Screens (Pilot):** New project with pgvector chosen (required fields, Check store with a stubbed connection showing dimension and the opclass warning, Create writes the expected `config.toml` and no URL anywhere in it); Project settings switch S3 → pgvector with the confirmation; Projects row shows `pgvector` and the table; Search shows the cap warning and the `APPROXIMATE` warning. Add to the size sweep.
+- **No-index table (stubbed + integration):** a config with `pg_search = "exact"` and a table with no index searches normally; Check store shows the no-index note and no WARNING; in `index` mode with no index it shows the WARNING. Stop calls `cancel()` on the stub connection and closes it; `pg_statement_timeout_s` issues `SET LOCAL statement_timeout` with the value, and `0` is passed through (not treated as unset). The integration test also runs `exact` against a table created with no index, and compares its candidates (ids, `max_similarity`, `best_seed`) with the local backend on the same vectors with several seeds, including a tie; it also reads `EXPLAIN` to check the single-pass plan.
+- **Guards (stubbed):** the pre-flight refusal (statistics say 2 KB average width, 30 seeds, limit 512 MB → refuses before any scan query is sent), the streaming abort (fake cursor yields rows until the budget is passed → `cancel_safe()` called, connection closed, message carries the real count), `0` disables both, and no statistics skips the pre-flight. Version handling: `0.8.1` / `0.6.0` / `0.8.0rc1` parse; `index` on `0.6.0` raises before any `SET`; extension missing; `halfvec` column → seeds cast to `halfvec`; `sparsevec` refused; the schema from the column type appears as `OPERATOR(schema.<=>)` and a quoted identifier. `prepare_threshold` is `None` on the connection. A recovery-conflict error gets the replica hint.
+- **Integration extras (real Postgres):** a `halfvec` table, an extension in a non-default schema, integer and uuid id columns, a partitioned table and a view as `pg_table`, a table with a very low floor to see the spill, and `index` mode only when the server reports pgvector ≥ 0.8.0 (the CI image does).
+- **Managed-service manual checklist (human, once per service):** Check store (version, schema, encryption), `exact` search on a small table, a search that deliberately exceeds the statement timeout (hint appears), the pooler URL variants where the host has them. Recorded in the task 12 report, not automated.
+- **Secret leak test:** after Create, grep `config.toml`, `system.json` and every `.hunches/` file for the password used in the test.
+- **Integration (optional, skipped unless `HUNCHES_TEST_PG_URL` is set):** against a real database with pgvector (CI service container using the `pgvector/pgvector` image): create a table with a few hundred random unit vectors and an HNSW `vector_cosine_ops` index, then assert `exact` equals the numpy result on the same vectors, and show what `index` mode returns under the default settings so the "hides hits" claim in this spec is measured, not assumed. This is the only way to resolve the verification list above; it needs no cloud account.
+
+## Behaviour that changes in 001–004
+
+- 001 "Out of scope: other vector backends" is no longer true; pgvector is the third (task 13 added a one-line pointer to 001 and 002 and left their text as written). The "Vector search" section gains the pgvector paragraph (this spec's "Why exact is the default" is the reference).
+- 002 New project / Project settings gain a third backend; "S3 stores" behaviour is unchanged and there are no saved Postgres stores (D8).
+- 003/004: nothing. `candidates.jsonl` and `candidates.meta.json` are backend-independent.
+
+## Out of scope
+
+Creating or loading a table, creating an index, embedding a corpus, writes of any kind, SSH tunnels, connection pooling (one short connection per query, like S3's one client per call), other databases, hybrid (keyword + vector) search, metadata filters, saved Postgres stores (D8).
+
+## Proposed tasks
+
+Same one-commit-per-task, red/green TDD process as 004 (history: `git log --oneline --grep '^005/'`).
+
+| # | Task | Depends on |
+|---|------|-----------|
+| 01 | Config fields, `pg` / `rds` extras, `System.pg_max_result_mb`, `project_status` | — |
+| 02 | Connection layer: URL lookup, read-only connect, scrubber, `rds_iam`, timeout, errors | 01 |
+| 03 | Server probes: extension version, column type and schema, row/width estimates | 02 |
+| 04 | `search_pg_exact`: the single query, cap, `NaN` guard, result assembly | 03 |
+| 05 | Result-size guards, Stop (`cancel_safe`), progress callback | 04 |
+| 06 | `search()` `index` mode and the `APPROXIMATE` flag | 03 |
+| 07 | `build_candidates` branch and Search screen warnings and progress | 05, 06 |
+| 08 | `check_store` function (no UI) | 03 |
+| 09 | System settings: `pg_max_result_mb` | 01 |
+| 10 | New project: third backend, URL status and save, Check store | 07, 08 |
+| 11 | Project settings, Projects screen, `open_project` allow-list | 08, 10 |
+| 12 | Integration tests, optional CI job, size sweep, manual checklist | all |
+| 13 | Docs (README, AGENTS.md, 001/002 notes) | all |
+
+All thirteen are committed (`005/01` to `005/13`; the order of the commits differs slightly from the table, e.g. 09 before 03). Task files: `tasks/README.md` and `tasks/NN-*.md`.
+
+## Open items
+
+- **ask:** saved Postgres stores in `system.json` (D8). My recommendation is defer.
+- `index` mode needs pgvector 0.8+ for iterative scans; resolved: the `SET LOCAL` names and the recall were checked on 0.8.1 in task 06 and task 12. Open for Chris: whether `index` mode should also set `hnsw.scan_mem_multiplier` (see "Verified in task 06"; not set, because the mode stays approximate and the setting changes memory use per query).
+- **Needs a human:** a PostgreSQL instance with pgvector and an embedded table for the manual end-to-end check, and the "Not verified" list above, above all every managed service (RDS, Aurora, Supabase, each with and without its pooler) and tables larger than memory. Agents cannot fake these. The steps are in `manual-checklist.md`, including the RDS IAM setup.

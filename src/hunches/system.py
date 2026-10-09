@@ -55,6 +55,7 @@ class System(BaseModel):
     classifier_model: str
     recommendation_seen: int = 0
     s3_stores: list[Store] = []
+    pg_max_result_mb: int = 512  # pgvector result-size limit; 0 = no limit
     projects: list[Project] = []
 
 
@@ -215,6 +216,8 @@ def project_status(path: str | Path) -> tuple[str, str]:
         return "NO CONFIG", str(Path(path) / ".hunches" / "config.toml")
     if config.backend == "s3":
         return "OK (s3 not checked)", ""
+    if config.backend == "pgvector":
+        return "OK (pgvector not checked)", ""
     corpus = Path(path) / (config.corpus_dir or "")  # relative to the project
     missing = [
         f

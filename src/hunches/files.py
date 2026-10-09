@@ -21,7 +21,7 @@ SAMPLE_SIZE = 50  # gold rows per split (spec stages 4 and 6)
 
 
 class Config(BaseModel):
-    backend: Literal["local", "s3"] = "local"
+    backend: Literal["local", "s3", "pgvector"] = "local"
     corpus_dir: str | None = (
         None  # local backend: dir with vectors.npy, items.jsonl, meta.json
     )
@@ -29,6 +29,21 @@ class Config(BaseModel):
     s3_index: str | None = None
     embedding_model: str = ""
     s3_region: str | None = None  # None: boto3's default resolution
+    # pgvector backend: None is stored as absent; read through pg_setting() for the defaults
+    pg_table: str | None = None
+    pg_id_column: str | None = None
+    pg_text_column: str | None = None
+    pg_vector_column: str | None = None
+    # two-table layout: the text lives in pg_text_table, joined on pg_text_id_column = pg_id_column
+    pg_text_table: str | None = None
+    pg_text_id_column: str | None = None  # None: the same name as pg_id_column
+    pg_url_var: str | None = None  # an explicit name; the form sets pg_url_id instead
+    pg_url_id: str | None = None  # search.pg_url_id of the URL: names its keyring entry
+    pg_search: Literal["exact", "index"] | None = None
+    pg_statement_timeout_s: int | None = None
+    pg_auth: Literal["url", "rds_iam"] | None = None
+    pg_aws_region: str | None = None
+    pg_aws_profile: str | None = None
     assistant_model: str
     assistant_thinking: ThinkingEffort | None = None  # None: no thinking setting
     classifier_model: str
@@ -51,6 +66,22 @@ class Config(BaseModel):
                     data.setdefault(new, data.pop(old))
                     data.pop(old, None)
         return data
+
+
+PG_DEFAULTS = {
+    "pg_id_column": "id",
+    "pg_text_column": "text",
+    "pg_vector_column": "embedding",
+    "pg_url_var": "HUNCHES_PG_URL",
+    "pg_search": "exact",
+    "pg_auth": "url",
+}  # fields not listed (table, timeout, region, profile) have no default: None
+
+
+def pg_setting(config: Config, name: str):
+    """A pg_* config field with its default applied (a stored 0 stays 0)."""
+    value = getattr(config, name)
+    return PG_DEFAULTS.get(name) if value is None else value
 
 
 def thinking_settings(config: Config) -> ModelSettings | None:

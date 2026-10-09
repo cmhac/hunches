@@ -20,6 +20,20 @@ from hunches.screens.new_project import (
     stored_corpus,
 )
 from hunches.screens.paths import PathInput, browse
+from hunches.screens.pg import (
+    FIELDS,
+    PG_CSS,
+    compose_pg,
+    pg_fields,
+    pg_missing,
+    pg_mount,
+    pg_pressed,
+    pg_refresh,
+    pg_save_url,
+    pg_select_changed,
+    section,
+    timeout_problem,
+)
 from hunches.screens.system import model_line, prices_note, saved_stores
 
 EFFORTS = typing.get_args(ThinkingEffort)
@@ -27,7 +41,8 @@ EFFORTS = typing.get_args(ThinkingEffort)
 
 class ProjectSettingsScreen(Screen):
     stage_name = "Settings"
-    DEFAULT_CSS = """
+    DEFAULT_CSS = (
+        """
     ProjectSettingsScreen > VerticalScroll { height: 1fr; }
     ProjectSettingsScreen .panel { height: auto; }
     ProjectSettingsScreen .row { height: auto; }
@@ -39,12 +54,14 @@ class ProjectSettingsScreen(Screen):
     ProjectSettingsScreen #actions #error { width: 1fr; height: 1; }
     ProjectSettingsScreen .row Button { margin-left: 1; width: auto; min-width: 8; }
     """
+        + PG_CSS
+    )
 
     def __init__(self) -> None:
         super().__init__()
         self.saved = files.read_config()
         self.s3_embedding = self.local_embedding = ""
-        if self.saved.backend == "s3":
+        if self.saved.backend in ("s3", "pgvector"):
             self.s3_embedding = self.saved.embedding_model
         else:  # for a local corpus meta.json is the truth, whatever config.toml says
             self.local_embedding = (
@@ -63,7 +80,11 @@ class ProjectSettingsScreen(Screen):
                 with Horizontal(classes="row"):
                     yield Label("backend")
                     yield Select(
-                        [("Local (numpy)", "local"), ("S3 Vectors", "s3")],
+                        [
+                            ("Local (numpy)", "local"),
+                            ("S3 Vectors", "s3"),
+                            ("PostgreSQL (pgvector)", "pgvector"),
+                        ],
                         value=config.backend,
                         allow_blank=False,
                         compact=True,
@@ -91,11 +112,10 @@ class ProjectSettingsScreen(Screen):
                         with Horizontal(classes="row"):
                             yield Label(id_)
                             yield Input(value or "", id=id_, compact=True)
-                    yield Button(
-                        "Pick embedding model", id="pick-embedding", compact=True
-                    )
                     yield Static("", id="store-status")
                     yield Button("Check store", id="check-store", compact=True)
+                yield from compose_pg()
+                yield Button("Pick embedding model", id="pick-embedding", compact=True)
                 yield Static("", id="embedding")
             with panel(Vertical(), "models"):
                 with Horizontal(classes="row"):
@@ -126,13 +146,15 @@ class ProjectSettingsScreen(Screen):
 
     @property
     def embedding(self) -> str:
-        return self.s3_embedding if self.backend == "s3" else self.local_embedding
+        return self.local_embedding if self.backend == "local" else self.s3_embedding
 
     @property
     def backend(self) -> str:
         return str(self.query_one("#backend", Select).value)
 
     def on_mount(self) -> None:
+        pg_mount(self)
+        self.fill_pg()
         self.show_backend()
         self.refresh_models()
 
@@ -154,10 +176,36 @@ class ProjectSettingsScreen(Screen):
             escape(f"Corpus: {problem}") if problem else ""
         )
 
+    def fill_pg(self) -> None:
+        """The stored pgvector values; an unset field stays empty (its default is the placeholder)."""
+        config = self.config
+        for id_, _, field in FIELDS:
+            self.query_one(f"#{id_}", Input).value = getattr(config, field) or ""
+        timeout = config.pg_statement_timeout_s
+        self.query_one("#pg-timeout", Input).value = (
+            "" if timeout is None else str(timeout)
+        )
+        self.query_one("#pg-region", Input).value = config.pg_aws_region or ""
+        self.query_one("#pg-profile", Input).value = config.pg_aws_profile or ""
+        section(self).url_id, section(self).url_var = (
+            config.pg_url_id,
+            config.pg_url_var,
+        )
+        self.query_one("#pg-layout", Select).value = (
+            "two" if config.pg_text_table else "one"
+        )
+        self.query_one("#pg-auth", Select).value = files.pg_setting(config, "pg_auth")
+        self.query_one("#pg-search", Select).value = files.pg_setting(
+            config, "pg_search"
+        )
+        pg_refresh(self)
+
     def show_backend(self) -> None:
-        s3 = self.backend == "s3"
-        self.query_one("#local").display = not s3
-        self.query_one("#s3").display = s3
+        backend = self.backend
+        self.query_one("#local").display = backend == "local"
+        self.query_one("#s3").display = backend == "s3"
+        self.query_one("#pg").display = backend == "pgvector"
+        self.query_one("#pick-embedding").display = backend != "local"
         self.show_embedding()
         self.refresh_save()
 
@@ -198,6 +246,8 @@ class ProjectSettingsScreen(Screen):
             self.query_one("#region", Input).value = store.region or ""
             self.s3_embedding = store.embedding_model
             self.show_embedding()
+        elif event.select.id in ("pg-auth", "pg-search", "pg-layout"):
+            pg_select_changed(self, event)
         elif event.select.id == "thinking":
             value = None if event.value == "default" else str(event.value)
             self.config.assistant_thinking = value  # ty: ignore[invalid-assignment]
@@ -228,6 +278,8 @@ class ProjectSettingsScreen(Screen):
                     self.show_embedding()
 
             self.app.push_screen(ModelPicker(embedding=True), picked)
+        elif pg_pressed(self, button, self.embedding):
+            pass
         elif button.startswith("pick-"):
             self.pick(button.removeprefix("pick-"))
 
@@ -252,7 +304,28 @@ class ProjectSettingsScreen(Screen):
             self.refresh_save()
             return
         value = lambda i: self.query_one(f"#{i}", Input).value.strip()
-        if self.backend == "s3":
+        no_pg = {f: None for f in files.Config.model_fields if f.startswith("pg_")}
+        if self.backend == "pgvector":
+            missing = pg_missing(self)
+            if not self.embedding:
+                missing.append("embedding model")
+            if missing or (problem := timeout_problem(self)):
+                self.query_one("#error", Static).update(
+                    f"Required: {', '.join(missing)}" if missing else problem
+                )
+                return
+            if not pg_save_url(self):
+                self.query_one("#error", Static).update("URL: not saved (see above)")
+                return
+            fields: dict = {
+                "backend": "pgvector",
+                **pg_fields(self),
+                "corpus_dir": None,
+                "s3_bucket": None,
+                "s3_index": None,
+                "s3_region": None,
+            }
+        elif self.backend == "s3":
             missing = [n for n in ("bucket", "index") if not value(n)]
             if not self.embedding:
                 missing.append("embedding model")
@@ -261,7 +334,7 @@ class ProjectSettingsScreen(Screen):
                     f"Required: {', '.join(missing)}"
                 )
                 return
-            fields: dict = {
+            fields = no_pg | {
                 "backend": "s3",
                 "s3_bucket": value("bucket"),
                 "s3_index": value("index"),
@@ -269,7 +342,7 @@ class ProjectSettingsScreen(Screen):
                 "corpus_dir": None,
             }
         else:
-            fields = {
+            fields = no_pg | {
                 "backend": "local",
                 "corpus_dir": stored_corpus(
                     Path(value("corpus")).expanduser(), Path.cwd()
@@ -285,7 +358,20 @@ class ProjectSettingsScreen(Screen):
             self.app.pop_screen()
             return
         consequences = []
-        data = ("backend", "corpus_dir", "s3_bucket", "s3_index", "embedding_model")
+        data = (
+            "backend",
+            "corpus_dir",
+            "s3_bucket",
+            "s3_index",
+            "pg_table",
+            "pg_id_column",
+            "pg_text_column",
+            "pg_vector_column",
+            "pg_text_table",
+            "pg_text_id_column",
+            "pg_url_id",
+            "embedding_model",
+        )
         if any(getattr(new, f) != getattr(self.saved, f) for f in data):
             consequences.append(
                 "Candidates were generated from the old corpus (candidates.jsonl): "

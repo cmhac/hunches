@@ -152,8 +152,12 @@ async def test_capped_warning_with_stubbed_s3(monkeypatch):
 
 
 def test_cap_warning_formats_thousands():
-    assert SearchScreen.cap_warning(10_000) == (
+    assert SearchScreen.cap_warning("s3", 10_000) == (
         "WARNING: S3 returned its cap of 10,000 hits for at least one seed; "
+        "only the 10,000 highest-scoring hits are kept."
+    )
+    assert SearchScreen.cap_warning("pgvector", 10_000) == (
+        "WARNING: pgvector returned its cap of 10,000 hits for at least one seed; "
         "only the 10,000 highest-scoring hits are kept."
     )
 
@@ -453,3 +457,183 @@ async def test_search_adds_a_sentence_for_the_test_split_and_stays_quiet_without
         assert isinstance(app.screen, SearchScreen)
         app.screen.refresh_state()
         assert not note.display
+
+
+# ---- pgvector (task 05 search_pg_exact is stubbed; nothing touches a database)
+
+
+def use_pgvector(mode=None):
+    config = files.read_config()
+    files.write_config(
+        config.model_copy(
+            update={"backend": "pgvector", "pg_table": "t", "pg_search": mode}
+        )
+    )
+
+
+def hit(i, sim):
+    return (f"i{i}", f"t{i}", sim)
+
+
+async def test_cap_warning_names_pgvector(monkeypatch):
+    use_pgvector()
+    monkeypatch.setattr(
+        candidates,
+        "search_pg_exact",
+        lambda vectors, floor, progress=None, stop=None: ([[hit(0, 0.9)]], True),
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        await run(pilot, app, screen)
+        assert str(screen.query_one("#warning", Label).render()) == (
+            "WARNING: pgvector returned its cap of 10,000 hits for at least one seed; "
+            "only the 10,000 highest-scoring hits are kept."
+        )
+
+
+APPROXIMATE = (
+    "WARNING: APPROXIMATE pgvector search; the index may hide hits above the floor. "
+    "Switch to exact in Project settings for a complete pool."
+)
+
+
+@pytest.mark.parametrize(
+    ("mode", "shown"), [("index", True), ("exact", False), (None, False)]
+)
+async def test_approximate_warning_only_for_index_mode(mode, shown):
+    use_pgvector(mode)
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_search(pilot, app)
+        banner = screen.query_one("#approximate", Static)
+        assert banner.display is shown
+        if shown:
+            assert str(banner.content) == APPROXIMATE
+
+
+async def test_approximate_warning_is_absent_for_local_and_stays_after_a_run(
+    monkeypatch,
+):
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_search(pilot, app)
+        assert not screen.query_one("#approximate").display
+    use_pgvector("index")
+    monkeypatch.setattr(candidates, "search", lambda vector, floor: ([], False))
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        await run(pilot, app, screen)
+        assert screen.query_one("#approximate").display
+
+
+def gated_search(monkeypatch, gate, outcome):
+    """search_pg_exact stub: reports 1,234 rows, waits for `gate`, then returns `outcome`."""
+
+    def stub(vectors, floor, progress=None, stop=None):
+        assert progress
+        progress(1234, 0, "")
+        while not gate.wait(0.01):
+            if stop and stop.stopped:
+                raise search.SearchCancelled
+        return outcome, False
+
+    monkeypatch.setattr(candidates, "search_pg_exact", stub)
+
+
+async def test_unknown_total_shows_elapsed_and_rows_at_80x24(monkeypatch):
+    import threading
+
+    use_pgvector()
+    gate = threading.Event()
+    gated_search(monkeypatch, gate, [[hit(0, 0.9)]])
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        screen.action_run()
+        await pilot.pause(0.6)
+        bar = screen.query_one("#progress", LabelBar)
+        assert bar.display and bar.total == 0
+        assert bar.label.startswith("0s  1,234 rows") or bar.label.startswith(
+            "1s  1,234 rows"
+        )
+        assert str(bar.render().plain).startswith(bar.label)
+        assert screen.query_one("#stop", Button).display
+        assert bar.region.width > 0 and screen.region.contains_region(bar.region)
+        gate.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not bar.display and not screen.query_one("#stop", Button).display
+
+
+async def test_stop_ends_the_run_and_clears_searching(monkeypatch):
+    import threading
+
+    use_pgvector()
+    gated_search(monkeypatch, threading.Event(), [])
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        screen.action_run()
+        await pilot.pause(0.3)
+        assert screen.searching
+        stop = screen.query_one("#stop", Button)
+        assert str(stop.label) == "Stop  x"
+        await pilot.press("x")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not screen.searching and not stop.display
+        assert not screen.query_one("#run", Button).disabled
+        assert str(screen.query_one("#warning", Label).render()) == "Search stopped."
+        assert not screen.query_one("#error").display
+        assert files.read_text("candidates.jsonl") is None
+
+
+async def test_stop_button_click_stops_too(monkeypatch):
+    import threading
+
+    use_pgvector()
+    gated_search(monkeypatch, threading.Event(), [])
+    app = HunchesApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        screen.action_run()
+        await pilot.pause(0.3)
+        await pilot.click("#stop", offset=(2, 0))
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not screen.searching
+
+
+async def test_connection_error_in_the_error_line_has_no_password(monkeypatch):
+    import sys
+    import types
+
+    url = "postgresql://alice:hunter2pw@db.example.com:5432/mydb"
+    monkeypatch.setenv("HUNCHES_PG_URL", url)
+    fake = types.ModuleType("psycopg")
+
+    def connect(*a, **k):
+        raise OSError(f"could not connect to {url}: password hunter2pw refused")
+
+    fake.connect = connect  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    use_pgvector()
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = await open_search(pilot, app)
+        screen.embedder = StubEmbedder({"alpha": [1, 0]})
+        await run(pilot, app, screen)
+        error = screen.query_one("#error", Label)
+        text = str(error.render())
+        assert error.display and text.startswith(
+            "Search failed: could not connect to ***"
+        )
+        assert "hunter2pw" not in text and "alice" not in text
+        assert not screen.searching

@@ -124,3 +124,12 @@ def test_providers_follow_the_keys_present(monkeypatch):
     assert keys.providers() == ["openai"]
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     assert keys.providers() == ["anthropic", "openai"]
+
+
+def test_resolve_prefers_env_then_keyring(monkeypatch):
+    monkeypatch.delenv("MY_PG_URL", raising=False)
+    assert keys.resolve("MY_PG_URL") is None
+    keyring.set_password("hunches", "MY_PG_URL", "from-keyring")
+    assert keys.resolve("MY_PG_URL") == "from-keyring"
+    monkeypatch.setenv("MY_PG_URL", "from-env")
+    assert keys.resolve("MY_PG_URL") == "from-env"

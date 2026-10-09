@@ -13,6 +13,17 @@ from hunches import files, keys, models, system
 from hunches.app import AppFooter, StatusHeader, panel
 from hunches.screens.model_picker import ModelPicker
 from hunches.screens.paths import PathInput, browse
+from hunches.screens.pg import (
+    PG_CSS,
+    compose_pg,
+    pg_fields,
+    pg_missing,
+    pg_mount,
+    pg_pressed,
+    pg_save_url,
+    pg_select_changed,
+    timeout_problem,
+)
 from hunches.screens.system import SystemSettingsScreen, saved_stores
 
 
@@ -59,7 +70,8 @@ def check_index(bucket: str, index: str, region: str | None) -> str:
 
 class NewProjectScreen(Screen):
     stage_name = "New project"
-    DEFAULT_CSS = """
+    DEFAULT_CSS = (
+        """
     NewProjectScreen > VerticalScroll { height: 1fr; }
     NewProjectScreen .panel { height: auto; }
     NewProjectScreen .row { height: auto; }
@@ -73,6 +85,8 @@ class NewProjectScreen(Screen):
     NewProjectScreen #actions #error { width: 1fr; height: 1; }
     NewProjectScreen Rule { margin: 0; }
     """
+        + PG_CSS
+    )
 
     embedding = ""  # the embedding model the project will use
 
@@ -91,7 +105,11 @@ class NewProjectScreen(Screen):
                 with Horizontal(classes="row"):
                     yield Label("backend")
                     yield Select(
-                        [("Local (numpy)", "local"), ("S3 Vectors", "s3")],
+                        [
+                            ("Local (numpy)", "local"),
+                            ("S3 Vectors", "s3"),
+                            ("PostgreSQL (pgvector)", "pgvector"),
+                        ],
                         value="local",
                         allow_blank=False,
                         compact=True,
@@ -121,10 +139,6 @@ class NewProjectScreen(Screen):
                                 id=id_,
                                 compact=True,
                             )
-                    with Horizontal(classes="row"):
-                        yield Label("embedding")
-                        yield Static("", id="embedding")
-                        yield Button("Pick", id="pick-embedding", compact=True)
                     yield Checkbox(
                         "Save this store for other projects",
                         True,
@@ -133,6 +147,11 @@ class NewProjectScreen(Screen):
                     )
                     yield Static("", id="store-status")
                     yield Button("Check store", id="check-store", compact=True)
+                yield from compose_pg()
+                with Horizontal(classes="row", id="embedding-row"):  # s3 and pgvector
+                    yield Label("embedding")
+                    yield Static("", id="embedding")
+                    yield Button("Pick", id="pick-embedding", compact=True)
             with panel(Vertical(), "models"):
                 yield Static("", id="models")
                 yield Rule()
@@ -158,6 +177,8 @@ class NewProjectScreen(Screen):
     def on_mount(self) -> None:
         self.query_one("#open-existing").display = False
         self.query_one("#s3").display = False
+        self.query_one("#embedding-row").display = False
+        pg_mount(self)
         self.refresh_summary()
 
     def refresh_summary(self) -> None:
@@ -193,14 +214,21 @@ class NewProjectScreen(Screen):
     def refresh_create(self) -> None:
         """Create is enabled only for a valid form; the reason sits beside it (create() keeps the guards)."""
         value = lambda i: self.query_one(f"#{i}", Input).value.strip()
-        s3 = self.query_one("#backend", Select).value == "s3"
+        backend = self.query_one("#backend", Select).value
+        s3 = backend == "s3"
+        pg = backend == "pgvector"
         missing = [
             n
             for n in ("location", *(("bucket", "index") if s3 else ()))
             if not value(n)
         ]
         problem = ""
-        if s3:
+        if pg:
+            missing += pg_missing(self)
+            if not self.embedding:
+                missing.append("embedding model")
+            problem = timeout_problem(self)
+        elif s3:
             if not self.embedding:
                 missing.append("embedding model")
         elif not value("corpus"):
@@ -208,7 +236,7 @@ class NewProjectScreen(Screen):
         else:
             problem = check_corpus(Path(value("corpus")).expanduser())[1]
         hint = f"Required: {', '.join(missing)}" if missing else ""
-        hint = hint or (f"Corpus: {problem}" if problem else "")
+        hint = hint or (f"{'Corpus: ' * (not pg)}{problem}" if problem else "")
         line = self.query_one("#error", Static)
         line.set_classes("error" if problem else "note")
         line.update(escape(hint))
@@ -218,9 +246,14 @@ class NewProjectScreen(Screen):
         if event.select.id == "backend":
             local = event.value == "local"
             self.query_one("#local").display = local
-            self.query_one("#s3").display = not local
+            self.query_one("#s3").display = event.value == "s3"
+            self.query_one("#pg").display = event.value == "pgvector"
+            self.query_one("#embedding-row").display = not local
             self.embedding = self.corpus_embedding() if local else self.s3_embedding
             self.refresh_summary()
+        elif event.select.id in ("pg-auth", "pg-search", "pg-layout"):
+            pg_select_changed(self, event)
+            self.refresh_create()
         elif event.select.id == "store" and event.value != -1:
             store = saved_stores()[int(event.value)]  # ty: ignore[invalid-argument-type]
             self.query_one("#bucket", Input).value = store.bucket
@@ -274,6 +307,8 @@ class NewProjectScreen(Screen):
             self.app.push_screen(ModelPicker(embedding=True), picked)
         elif button == "check-store":
             self.check_store()
+        elif pg_pressed(self, button, self.embedding):
+            pass
         elif button == "create":
             self.create()
 
@@ -310,11 +345,20 @@ class NewProjectScreen(Screen):
         current = system.read_system()
         assert current
         value = lambda i: self.query_one(f"#{i}", Input).value.strip()
-        s3 = self.query_one("#backend", Select).value == "s3"
+        backend = self.query_one("#backend", Select).value
+        s3 = backend == "s3"
+        pg = backend == "pgvector"
         needed = ["location", *(["bucket", "index"] if s3 else ["corpus"])]
+        if pg:
+            needed = ["location"]
         missing = [name for name in needed if not value(name)]
-        if s3 and not self.embedding:
+        if pg:
+            missing += pg_missing(self)
+        if (s3 or pg) and not self.embedding:
             missing.append("embedding model")
+        if pg and (problem := timeout_problem(self)):
+            self.fail(problem)
+            return
         if missing:
             self.fail(f"Required: {', '.join(missing)}")
             return
@@ -325,8 +369,13 @@ class NewProjectScreen(Screen):
         if not location.parent.is_dir():
             self.fail("Location: parent folder does not exist")
             return
-        fields: dict = {"backend": "s3"} if s3 else {}
-        if s3:
+        fields: dict = {"backend": backend} if backend != "local" else {}
+        if pg:
+            if not pg_save_url(self):
+                self.fail("URL: not saved (see above)")
+                return
+            fields |= pg_fields(self) | {"embedding_model": self.embedding}
+        elif s3:
             fields |= {
                 "s3_bucket": value("bucket"),
                 "s3_index": value("index"),
