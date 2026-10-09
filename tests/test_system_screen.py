@@ -441,3 +441,75 @@ async def test_modal_groups_now_and_new_lines_and_focuses_use_new(old_system):
         assert any("now" in t and "x:old" in t for t in lines)
         assert any("new" in t and "anthropic:claude-haiku-4-5" in t for t in lines)
         assert not any("unchanged" in t for t in lines)
+
+
+async def test_pg_limit_field_shows_default_and_stored_value(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.screen.query_one("#pg-max-result-mb", Input).value == "512"
+        text = text_of(app.screen)
+        assert "every pgvector project on this machine" in text
+        assert "0 disables" in text
+    system.write_system(existing(pg_max_result_mb=2048))
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.screen.query_one("#pg-max-result-mb", Input).value == "2048"
+
+
+async def test_pg_limit_saves_1024_and_leaves_other_settings(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    system.write_system(existing(classifier_model="x:keep"))
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#pg-max-result-mb", Input).value = "1024"
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert app.result is True
+    saved = stored()
+    assert saved.pg_max_result_mb == 1024
+    assert saved.classifier_model == "x:keep"
+
+
+async def test_pg_limit_zero_is_saved_and_shown_as_no_limit(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    system.write_system(existing())
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#pg-max-result-mb", Input).value = "0"
+        await pilot.pause()
+        assert "no limit" in str(
+            app.screen.query_one("#pg-limit-note", Static).render()
+        )
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+    assert stored().pg_max_result_mb == 0
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.screen.query_one("#pg-max-result-mb", Input).value == "0"
+        assert "no limit" in str(
+            app.screen.query_one("#pg-limit-note", Static).render()
+        )
+
+
+@pytest.mark.parametrize("bad", ["-1", "abc", "1.5", ""])
+async def test_pg_limit_invalid_is_rejected_without_writing(monkeypatch, bad):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    system.write_system(existing())
+    before = system._path().read_text()
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#pg-max-result-mb", Input).value = bad
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert app.result == "unset"
+        assert "whole number of megabytes" in str(
+            app.screen.query_one("#error", Static).render()
+        )
+    assert system._path().read_text() == before
