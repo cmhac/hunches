@@ -114,6 +114,84 @@ def _iam_token(config: Config, url: str) -> str:
         raise ValueError(f"AWS: {e}") from None
 
 
+def _regclass(table: str) -> str:
+    """`schema.table` or `table` as a quoted name for a `%s::regclass` parameter."""
+    schema, dot, name = table.partition(".")
+    parts = [schema, name] if dot else [schema]
+    return ".".join('"' + p.replace('"', '""') + '"' for p in parts)
+
+
+def extension_version(conn) -> tuple[tuple[int, int, int], str]:
+    """((major, minor, patch), schema) of the vector extension."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT e.extversion, n.nspname FROM pg_extension e "
+            "JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector'"
+        )
+        row = cur.fetchone()
+    if not row:
+        raise RuntimeError(
+            "The vector extension is not installed in this database "
+            "(CREATE EXTENSION vector needs a DBA)."
+        )
+    # a suffix such as 0.8.0rc1 or 1.0.0-beta is ignored
+    parts = re.match(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", row[0])
+    major, minor, patch = (int(g or 0) for g in parts.groups()) if parts else (0, 0, 0)
+    return (major, minor, patch), row[1]
+
+
+def require_index_mode_version(version: tuple[int, int, int], mode: str) -> None:
+    if mode == "index" and version < (0, 8, 0):
+        raise RuntimeError(
+            f'pg_search = "index" needs pgvector 0.8.0 or newer (found '
+            f"{'.'.join(map(str, version))}). "
+            'Use pg_search = "exact", or upgrade the extension.'
+        )
+
+
+def column_type(conn, table: str, column: str) -> tuple[str, str, int | None]:
+    """(type name, type schema, dimension or None) of a vector or halfvec column."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.typname, tn.nspname, a.atttypmod FROM pg_attribute a "
+            "JOIN pg_type t ON t.oid = a.atttypid "
+            "JOIN pg_namespace tn ON tn.oid = t.typnamespace "
+            "WHERE a.attrelid = %s::regclass AND a.attname = %s AND NOT a.attisdropped",
+            (_regclass(table), column),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise RuntimeError(f'column "{column}" of relation "{table}" does not exist')
+    typename, schema, typmod = row
+    if typename not in ("vector", "halfvec"):
+        raise RuntimeError(
+            f'Column "{column}" has type {typename}; hunches supports vector and halfvec.'
+        )
+    return typename, schema, typmod if typmod > 0 else None  # -1: no dimension declared
+
+
+def table_estimates(
+    conn, table: str, text_column: str
+) -> tuple[int | None, int | None]:
+    """(planner row estimate, average text width in bytes); None where there are no statistics."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT reltuples FROM pg_class WHERE oid = %s::regclass",
+            (_regclass(table),),
+        )
+        row = cur.fetchone()
+        rows = int(row[0]) if row and row[0] >= 0 else None  # -1: never analysed
+        cur.execute(
+            "SELECT max(s.avg_width) FROM pg_stats s "
+            "JOIN pg_class c ON c.relname = s.tablename "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.schemaname "
+            "WHERE c.oid = %s::regclass AND s.attname = %s",
+            (_regclass(table), text_column),
+        )
+        row = cur.fetchone()
+    return rows, row[0] if row and row[0] is not None else None
+
+
 def search(
     query_vector: list[float], floor: float
 ) -> tuple[list[tuple[str, str, float]], bool]:
