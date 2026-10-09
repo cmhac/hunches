@@ -2,7 +2,7 @@
 
 Status: approved by Chris 2026-10-09 (exact default, 512 MB limit, refuse `index` below 0.8.0, IAM in scope); **not implemented**; this branch holds the spec only. Chris will test the implementation against his RDS database before anything is merged. Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md`, `../003-tui-redesign/spec.md` and `../004-history-and-redo/spec.md`, all implemented. Written 2026-10-09 against `main` at `c8ebdf1`.
 
-**Read order for an implementer:** this spec → your task file (none yet; see "Proposed tasks") → the code named under "What changes in the code".
+**Read order for an implementer:** this spec → your task file in `tasks/` (`tasks/README.md` has the order and rules) → the code named under "What changes in the code".
 
 ## What this is, in one paragraph
 
@@ -304,12 +304,21 @@ Same one-commit-per-task, red/green TDD process as 004.
 
 | # | Task | Depends on |
 |---|------|-----------|
-| 01 | Config fields, `pg` extra, `search()` `index` branch, `search_pg_exact` (two-step, guards, version and type checks) + `build_candidates` branch (stubbed), errors and scrubber | — |
-| 02 | Check-store function and column-type / version / statistics queries (verified against PostgreSQL docs) | 01 |
-| 03 | New project: third backend, URL status/save, Check store | 01, 02 |
-| 04 | Project settings, Projects, status allow-list, Search warnings | 01 |
-| 05 | Integration test + optional CI job; managed-service checklist; size sweep | all |
-| 06 | README, AGENTS.md, 001/002 notes | all |
+| 01 | Config fields, `pg` / `rds` extras, `System.pg_max_result_mb`, `project_status` | — |
+| 02 | Connection layer: URL lookup, read-only connect, scrubber, `rds_iam`, timeout, errors | 01 |
+| 03 | Server probes: extension version, column type and schema, row/width estimates | 02 |
+| 04 | `search_pg_exact`: the single query, cap, `NaN` guard, result assembly | 03 |
+| 05 | Result-size guards, Stop (`cancel_safe`), progress callback | 04 |
+| 06 | `search()` `index` mode and the `APPROXIMATE` flag | 03 |
+| 07 | `build_candidates` branch and Search screen warnings and progress | 05, 06 |
+| 08 | `check_store` function (no UI) | 03 |
+| 09 | System settings: `pg_max_result_mb` | 01 |
+| 10 | New project: third backend, URL status and save, Check store | 07, 08 |
+| 11 | Project settings, Projects screen, `open_project` allow-list | 08, 10 |
+| 12 | Integration tests, optional CI job, size sweep, manual checklist | all |
+| 13 | Docs (README, AGENTS.md, 001/002 notes) | all |
+
+Task files: `tasks/README.md` and `tasks/NN-*.md`.
 
 ## Open items
 
