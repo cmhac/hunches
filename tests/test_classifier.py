@@ -5,7 +5,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage
 
 from hunches import cost
-from hunches.classifier import classify, classify_many, system_prompt
+from hunches.classifier import classify, classify_many, is_cached, system_prompt
 from hunches.files import Label, Taxonomy
 
 
@@ -174,3 +174,27 @@ def test_system_prompt_asks_for_reasoning_first():
         "First give a short reasoning (one to three sentences) that names the "
         "evidence in the text, then the labels."
     ) in system_prompt("prompt", taxonomy())
+
+
+async def test_is_cached_follows_classify_and_calls_nothing():
+    tax = taxonomy()
+    model, calls = scripted(["a"])
+    assert not is_cached("t", "p", tax, "fn")
+    await classify("t", "p", tax, model)
+    assert is_cached("t", "p", tax, model.model_name)
+    assert len(calls) == 1  # is_cached made no call
+    # a different text, prompt, taxonomy or model is a different key
+    assert not is_cached("other", "p", tax, model.model_name)
+    assert not is_cached("t", "p2", tax, model.model_name)
+    assert not is_cached("t", "p", taxonomy("single"), model.model_name)
+    assert not is_cached("t", "p", tax, "another-model")
+
+
+def test_is_cached_old_list_shape_is_a_miss():
+    tax = taxonomy()
+    cost.cache_put(
+        cost.cache_key("m", system_prompt("p", tax), "t"),
+        ["a"],
+        RequestUsage(input_tokens=1, output_tokens=1),
+    )
+    assert not is_cached("t", "p", tax, "m")

@@ -10,21 +10,9 @@ from textual.widgets import Button, Static
 from hunches import cost, files
 from hunches.app import AppFooter, StatusHeader
 from hunches.classifier import classify_many
+from hunches.files import above_threshold, pending
 from hunches.screens.final import RESULT
 from hunches.screens.progress import RunIndicator, eta_text, seconds_text
-
-
-def above_threshold() -> list[dict]:
-    cutoff = json.loads(files.read_text("threshold.json") or "{}")["threshold"]
-    return [
-        c for c in files.read_jsonl("candidates.jsonl") if c["max_similarity"] >= cutoff
-    ]
-
-
-def pending() -> list[dict]:
-    """Candidates at or above the threshold with no successful row of the current run yet."""
-    done = files.done_result_ids()
-    return [c for c in above_threshold() if c["id"] not in done]
 
 
 def estimate(n: int, model: str) -> str:
@@ -35,13 +23,13 @@ def estimate(n: int, model: str) -> str:
         if rate
         else "no timing samples yet, so no time estimate"
     )
-    entry = cost.breakdown().get(model)
-    if not entry or not entry["calls"]:
+    per_call, sampled = cost.per_call_dollars(model)
+    if not sampled:
         cost_text = "no sample usage yet, so no cost estimate"
-    elif entry["dollars"] is None:
+    elif per_call is None:
         cost_text = "cost ? (WARNING: price unknown for this model)"
     else:
-        cost_text = f"~${entry['dollars'] / entry['calls'] * n:.4f}"
+        cost_text = f"~${per_call * n:.4f}"
     return f"{n} items to classify; time {time_text}; cost {cost_text}"
 
 

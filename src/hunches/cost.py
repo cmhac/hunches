@@ -90,6 +90,19 @@ def breakdown() -> dict[str, dict]:
     return _read()["models"]
 
 
+def per_call_dollars(model: str) -> tuple[float | None, bool]:
+    """(average dollars per recorded live call, whether any call is recorded).
+
+    None with True: the price is unknown; with False: there is no sample to price from.
+    """
+    entry = breakdown().get(model)
+    if not entry or not entry["calls"]:
+        return None, False
+    if entry["dollars"] is None:
+        return None, True
+    return entry["dollars"] / entry["calls"], True
+
+
 def record_timing(label: str, n_items: int, seconds: float) -> None:
     """Live (non-cached) work only; used for items/sec estimates."""
     data = _read()

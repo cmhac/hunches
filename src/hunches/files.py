@@ -322,6 +322,17 @@ def done_result_ids() -> set[str]:
     return {i for i, r in _results() if r is None or r == run}
 
 
+def above_threshold() -> list[dict]:
+    cutoff = json.loads(read_text("threshold.json") or "{}")["threshold"]
+    return [c for c in read_jsonl("candidates.jsonl") if c["max_similarity"] >= cutoff]
+
+
+def pending() -> list[dict]:
+    """Candidates at or above the threshold with no successful row of the current run yet."""
+    done = done_result_ids()
+    return [c for c in above_threshold() if c["id"] not in done]
+
+
 def approve(flag: str, stage: int, summary: str) -> None:
     """Set a State flag, record the inputs it was approved under and log the approval."""
     from hunches import history  # history imports this module
