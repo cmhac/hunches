@@ -22,7 +22,7 @@ These are my recommendations; the ones marked **ask** are open for Chris.
 
 | # | Question | Decision | Evidence |
 |---|----------|----------|----------|
-| D1 | Driver | **psycopg 3**, optional extras `pg = ["psycopg[binary]"]` and `rds = ["psycopg[binary]", "boto3"]` (the second only for IAM authentication, D11), imported lazily inside `search()` with the same "needs … `pip install hunches[pg]`" error as boto3. The query vector is sent as a text literal cast in SQL (`%s::vector`), so the separate `pgvector` Python package is not needed. | The pgvector README shows vectors as text literals (`'[1,2,3]'`); the `pgvector` package is only needed to register adapter types ([README](https://github.com/pgvector/pgvector#readme), [pgvector-python](https://pypi.org/project/pgvector/)). Binary-wheel behaviour of `psycopg[binary]` is from memory: verify against the psycopg install docs in task 01. |
+| D1 | Driver | **psycopg 3**, optional extras `pg = ["psycopg[binary]"]` and `rds = ["psycopg[binary]", "boto3"]` (the second only for IAM authentication, D11), imported lazily inside `search()` with the same "needs … `pip install hunches[pg]`" error as boto3. The query vector is sent as a text literal cast in SQL (`%s::vector`), so the separate `pgvector` Python package is not needed. | The pgvector README shows vectors as text literals (`'[1,2,3]'`); the `pgvector` package is only needed to register adapter types ([README](https://github.com/pgvector/pgvector#readme), [pgvector-python](https://pypi.org/project/pgvector/)). Verified in task 01 against the [psycopg install docs](https://www.psycopg.org/psycopg3/docs/basic/install.html): `pip install "psycopg[binary]"` is the recommended binary installation (not supported on PyPy). |
 | D2 | Table layout | **Configurable table and column names with defaults**: `pg_table` (required, may be schema-qualified `schema.table`), `pg_id_column="id"`, `pg_text_column="text"`, `pg_vector_column="embedding"`. The corpus is "already embedded" by someone else, so a fixed schema would be wrong. All identifiers are composed with `psycopg.sql.Identifier`, never string-formatted. | Mirrors S3, where `key` is the id and `metadata.text` the text. |
 | D3 | Where the connection URL lives | **Environment variable first, then the OS keyring**, through the existing `keys.status/save` (which already work for any variable name). Config stores only the variable name: `pg_url_var`, default `HUNCHES_PG_URL`. `keys.VARS` stays LLM-only, so `load_into_env` is unchanged; `search` resolves the URL itself with `os.environ.get(var) or keys._stored(var)`. | `keys.py` takes a `var` argument everywhere. |
 | D4 | Exact vs approximate search | `pg_search = "exact"` (default; Chris agreed 2026-10-09) or `"index"`. **Exact** answers **all seeds in one query** (D10) with a query shape that cannot use an ANN index, so the result equals the local numpy backend (up to the per-seed cap). **Index** lets an HNSW/IVFFlat index answer, one query per seed, with iterative scan (pgvector 0.8.0+, D9); it shows an `APPROXIMATE` warning on the Search screen every time. | See "Why exact is the default". |
@@ -212,10 +212,11 @@ Switching backend in Project settings writes only the active backend's fields an
 `pg_auth = "rds_iam"`: for RDS and Aurora PostgreSQL with IAM database authentication enabled. `pg_url_var` holds a URL **without a password**: `postgresql://db_user@my-instance.abc123.us-east-1.rds.amazonaws.com:5432/mydb?sslmode=verify-full&sslrootcert=/path/global-bundle.pem`. At the start of every connection hunches asks boto3 for a token and uses it as the password:
 
 ```python
-session = boto3.Session(profile_name=config.pg_aws_profile)           # None = default chain
-region = config.pg_aws_region or session.region_name                   # error if neither
+session = boto3.Session(profile_name=config.pg_aws_profile)  # None = default chain
+region = config.pg_aws_region or session.region_name  # error if neither
 token = session.client("rds", region_name=region).generate_db_auth_token(
-    DBHostname=host, Port=port, DBUsername=user, Region=region)        # host/port/user parsed from the URL
+    DBHostname=host, Port=port, DBUsername=user, Region=region
+)  # host/port/user parsed from the URL
 ```
 
 What the AWS docs say, and what follows from it ([IAM database authentication](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html), [Python example](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.Connecting.Python.html), [IAM policy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.IAMPolicy.html)):

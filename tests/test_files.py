@@ -267,3 +267,107 @@ def test_models_have_no_default_so_system_settings_is_the_only_source():
 
     with pytest.raises(ValidationError):
         Config()  # ty: ignore[missing-argument]
+
+
+def test_local_and_s3_configs_write_no_pg_fields():
+    files.ensure_root()
+    files.write_config(Config(assistant_model="a", classifier_model="c"))
+    local = files.Path(".hunches/config.toml").read_text()
+    assert (
+        local
+        == 'backend = "local"\nembedding_model = ""\nassistant_model = "a"\nclassifier_model = "c"\ntarget_metric = "accuracy"\ntarget_score = 0.9\n'
+    )
+    files.write_config(
+        Config(
+            backend="s3",
+            s3_bucket="b",
+            s3_index="i",
+            assistant_model="a",
+            classifier_model="c",
+        )
+    )
+    assert "pg_" not in files.Path(".hunches/config.toml").read_text()
+
+
+def test_old_configs_without_pg_fields_load():
+    files.ensure_root()
+    files.Path(".hunches/config.toml").write_text(
+        'backend = "s3"\ns3_bucket = "b"\ns3_index = "i"\nassistant_model = "a"\n'
+        'classifier_model = "c"\n'
+    )
+    config = files.read_config()
+    assert config.backend == "s3" and config.pg_table is None
+    assert config.pg_search is None and config.pg_auth is None
+
+
+def test_pgvector_config_round_trips_and_omits_unset_fields():
+    config = Config(
+        backend="pgvector",
+        pg_table="public.docs",
+        pg_statement_timeout_s=0,
+        pg_search="index",
+        pg_auth="rds_iam",
+        pg_aws_region="eu-west-1",
+        embedding_model="openai:text-embedding-3-small",
+        assistant_model="a",
+        classifier_model="c",
+    )
+    files.ensure_root()
+    files.write_config(config)
+    text = files.Path(".hunches/config.toml").read_text()
+    assert 'backend = "pgvector"' in text and 'pg_table = "public.docs"' in text
+    assert "pg_statement_timeout_s = 0" in text  # 0 is a value, not unset
+    for unset in ("pg_id_column", "pg_url_var", "pg_aws_profile", "s3_bucket"):
+        assert unset not in text
+    assert files.read_config() == config
+
+
+def test_pg_defaults_apply_when_read_not_when_stored():
+    config = Config(
+        backend="pgvector", pg_table="t", assistant_model="a", classifier_model="c"
+    )
+    assert config.pg_id_column is None
+    got = {
+        name: files.pg_setting(config, name)
+        for name in (
+            "pg_id_column",
+            "pg_text_column",
+            "pg_vector_column",
+            "pg_url_var",
+            "pg_search",
+            "pg_auth",
+            "pg_statement_timeout_s",
+            "pg_aws_region",
+            "pg_aws_profile",
+        )
+    }
+    assert got == {
+        "pg_id_column": "id",
+        "pg_text_column": "text",
+        "pg_vector_column": "embedding",
+        "pg_url_var": "HUNCHES_PG_URL",
+        "pg_search": "exact",
+        "pg_auth": "url",
+        "pg_statement_timeout_s": None,
+        "pg_aws_region": None,
+        "pg_aws_profile": None,
+    }
+    set_ = Config(
+        backend="pgvector",
+        pg_table="t",
+        pg_id_column="pk",
+        pg_statement_timeout_s=0,
+        assistant_model="a",
+        classifier_model="c",
+    )
+    assert files.pg_setting(set_, "pg_id_column") == "pk"
+    assert files.pg_setting(set_, "pg_statement_timeout_s") == 0
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("pg_search", "fast"), ("pg_auth", "password"), ("backend", "mysql")],
+)
+def test_invalid_pg_choices_are_rejected(field, value):
+    with pytest.raises(ValidationError):
+        Config(**{field: value}, assistant_model="a", classifier_model="c")

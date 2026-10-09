@@ -448,3 +448,10 @@ async def test_footer_has_no_stage_keys_without_a_project(tmp_path):
         await pilot.pause()
         keys = {k: b.binding.description for k, b in app.screen.active_bindings.items()}
         assert keys["n"] == "New" and "p" not in keys
+
+
+def test_status_pgvector_is_ok_but_not_checked(tmp_path):
+    project = make_project(
+        tmp_path, corpus=False, backend="pgvector", pg_table="public.docs"
+    )
+    assert system.project_status(project) == ("OK (pgvector not checked)", "")
