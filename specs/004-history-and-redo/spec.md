@@ -117,6 +117,13 @@ Status = Literal["current", "stale", "incomplete", "not_started"]
 
 Every non-`current` status carries a **reason of at most 24 characters**, used by the rail tooltip, the banners and the plan. For stale stages it is built from the components that differ, most upstream first: `seeds changed`, `embedding model changed`, `candidates changed`, `prompt changed`, `taxonomy changed`, `classifier model changed`, `gold rows changed`. If several differ, the first is the reason (the plan may show all). Stage 8 has no components, only `run`, so its reason is stage 7's when that is stale, otherwise `classifier input changed`. For incomplete stages it is a count: `44 of 50 rows`.
 
+Clarifications made while implementing `stage_status` (task 04):
+
+- **Stage 8** is `stale` only when a success row of a candidate at or above the threshold has a `run` that is not current. A run that is merely partial (rows current, some candidates missing) is `not_started`, so a resumed run shows no mark. Stage 8 is never `incomplete`. **Stage 9** is `current` when stage 8 is complete, otherwise `not_started`.
+- A stage's recorded components are the union of what `state.inputs[flag]` and the derived file (`test_result.json`, `threshold.json`) recorded, so a re-run that rewrote the file is still `stale` until the user re-approves. Stage 2 compares `candidates.meta.json` (`seeds_digest`, `embedding_model`). Stages 1, 3 and 4 never are stale.
+- `RunScreen.run_all` drops, before classifying, the error rows and the rows of the items it is about to classify, so a re-run replaces stale rows instead of duplicating them (D3: they stay until overwritten).
+- Incomplete reasons: `not approved`, `no seeds`, `files missing`, `no candidates`, `N of 50 rows`, `not accepted`, `not chosen`.
+
 ## Backend
 
 ### `history.py` (new)

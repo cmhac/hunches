@@ -10,7 +10,7 @@ from textual.widgets import Button, Static
 from hunches import cost, files
 from hunches.app import AppFooter, StatusHeader
 from hunches.classifier import classify_many
-from hunches.screens.final import RESULT, prompt_hash
+from hunches.screens.final import RESULT
 from hunches.screens.progress import RunIndicator, eta_text, seconds_text
 
 
@@ -22,8 +22,8 @@ def above_threshold() -> list[dict]:
 
 
 def pending() -> list[dict]:
-    """Candidates at or above the threshold with no successful row in results.jsonl yet."""
-    done = {r["id"] for r in files.read_jsonl("results.jsonl") if "error" not in r}
+    """Candidates at or above the threshold with no successful row of the current run yet."""
+    done = files.done_result_ids()
     return [c for c in above_threshold() if c["id"] not in done]
 
 
@@ -104,9 +104,11 @@ class RunScreen(Screen):
             self.show()
 
     def blocked(self) -> bool:
-        """True unless test_result.json records the current prompt and classifier model."""
-        tested = json.loads(files.read_text(RESULT) or "{}").get("prompt_hash")
-        return tested != prompt_hash()
+        """True unless test_result.json was computed under the current prompt, taxonomy and classifier model."""
+        text = files.read_text(RESULT)
+        if text is None:
+            return True
+        return bool(set(files.result_changes(json.loads(text))) - {"gold_test"})
 
     def state(self, todo: list[dict]) -> str:
         if self.running:
@@ -179,15 +181,18 @@ class RunScreen(Screen):
 
     async def run_all(self) -> None:
         indicator = self.query_one(RunIndicator)
-        # failed rows from an earlier run are dropped; the items are retried now
-        old = files.read_jsonl("results.jsonl")
-        if any("error" in r for r in old):
-            files.write_jsonl("results.jsonl", [r for r in old if "error" not in r])
+        # failed rows and rows of another run are dropped; those items are classified now
         todo = pending()
+        redo = {c["id"] for c in todo}
+        old = files.read_jsonl("results.jsonl")
+        keep = [r for r in old if "error" not in r and r["id"] not in redo]
+        if len(keep) != len(old):
+            files.write_jsonl("results.jsonl", keep)
         taxonomy = files.read_taxonomy()
         prompt = files.read_text("prompt.md") or ""
         total = len(above_threshold())
         base = total - len(todo)
+        run = files.run_digest(prompt, taxonomy, self.model)
         start = time.monotonic()
         done = live = 0
         indicator.set_progress(base, total)
@@ -204,6 +209,8 @@ class RunScreen(Screen):
                 }
                 if p.labels is None:
                     row["error"] = p.error or "unknown error"
+                else:
+                    row["run"] = run
                 files.append_jsonl("results.jsonl", row)
                 done += 1
                 live += not p.cached

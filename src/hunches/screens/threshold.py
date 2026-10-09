@@ -35,7 +35,16 @@ def sample_bands(cands: list[dict], per_band: int = PER_BAND) -> list[list[str]]
         )
         rng = random.Random(f"{Path.cwd().name}:threshold:{band}")
         ids.append(rng.sample(pool, min(per_band, len(pool))))
-    files.write_text(SAMPLE, json.dumps({"ids": ids, "predictions": {}}))
+    files.write_text(
+        SAMPLE,
+        json.dumps(
+            {
+                "ids": ids,
+                "predictions": {},
+                "inputs": files.current_inputs("threshold_chosen"),
+            }
+        ),
+    )
     return ids
 
 
@@ -241,7 +250,13 @@ class ThresholdScreen(Screen):
                     self.predictions[todo[i]] = p.labels
                     files.write_text(
                         SAMPLE,
-                        json.dumps({"ids": self.ids, "predictions": self.predictions}),
+                        json.dumps(
+                            {
+                                "ids": self.ids,
+                                "predictions": self.predictions,
+                                "inputs": files.current_inputs("threshold_chosen"),
+                            }
+                        ),
                     )
                     self.progress = (len(self.predictions), total)
                     indicator.set_progress(
@@ -290,6 +305,7 @@ class ThresholdScreen(Screen):
                     "n_candidates": sum(
                         c["max_similarity"] >= cutoff for c in self.cands
                     ),
+                    "inputs": files.current_inputs("threshold_chosen"),
                 },
                 indent=2,
             ),

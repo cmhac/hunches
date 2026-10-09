@@ -9,7 +9,6 @@ from textual.widgets import Button, Input, Label, OptionList, Select, Static
 
 from hunches import files, system
 from hunches.app import ConfirmScreen, HunchesApp
-from hunches.screens.final import prompt_hash
 from hunches.screens.model_picker import ModelPicker
 from hunches.screens.paths import PathPicker
 from hunches.screens.project_settings import ProjectSettingsScreen
@@ -190,7 +189,8 @@ async def test_changing_the_classifier_states_consequences_and_marks_the_test_st
 ):
     project = project_in(tmp_path, monkeypatch, **settings_config())
     (project / ".hunches" / "prompt.md").write_text("p")
-    hash_before = prompt_hash()
+    result = {"inputs": files.current_inputs("test_done")}
+    assert files.result_changes(result) == []
     other = "anthropic:claude-sonnet-5-5"
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
@@ -205,7 +205,7 @@ async def test_changing_the_classifier_states_consequences_and_marks_the_test_st
     saved = files.read_config(project)
     assert saved.classifier_model == other
     assert saved.assistant_model == ASSISTANT
-    assert prompt_hash() != hash_before  # FinalScreen's stale check sees it
+    assert files.result_changes(result) == ["classifier_model"]  # FinalScreen sees it
 
 
 async def test_changing_assistant_and_thinking_affects_only_future_chat_turns(

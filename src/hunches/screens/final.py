@@ -1,5 +1,4 @@
 import dataclasses
-import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -17,7 +16,7 @@ from hunches.screens import report
 from hunches.screens.gold import GoldScreen
 from hunches.screens.progress import RunIndicator, eta_text
 
-RESULT = "test_result.json"
+RESULT = files.RESULT_FILE
 
 
 def test_stage() -> Screen:
@@ -26,12 +25,6 @@ def test_stage() -> Screen:
     if not rows or any(not r.labels for r in rows):
         return GoldScreen("test")
     return FinalScreen()
-
-
-def prompt_hash() -> str:
-    # JSON keeps ("ab", "c") and ("a", "bc") distinct
-    data = [files.read_text("prompt.md") or "", files.read_config().classifier_model]
-    return hashlib.sha256(json.dumps(data).encode()).hexdigest()
 
 
 class FinalScreen(Screen):
@@ -119,7 +112,7 @@ class FinalScreen(Screen):
         self.call_after_refresh(self.show)  # needs the laid-out table width
 
     def stale(self) -> bool:
-        return self.result is not None and self.result["prompt_hash"] != prompt_hash()
+        return self.result is not None and bool(files.result_changes(self.result))
 
     def action_rerun(self) -> None:
         if self.running:
@@ -192,7 +185,7 @@ class FinalScreen(Screen):
                 files.all_labels(self.taxonomy),
             )
             self.result = {
-                "prompt_hash": prompt_hash(),
+                "inputs": files.current_inputs("test_done"),
                 "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
                 "metrics": dataclasses.asdict(m),
                 "disagreements": [
