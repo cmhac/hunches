@@ -122,7 +122,12 @@ class BriefScreen(Screen):
 
         @self.agent.instructions
         def current_seeds() -> str:
-            return "# Current seeds\n" + (numbered(self.seeds) or "None yet.")
+            return (
+                "# Current seeds\n"
+                + (numbered(self.seeds) or "None yet.")
+                + "\n\n"
+                + files.assistant_context()
+            )
 
         @self.agent.tool_plain
         async def propose_seeds(seeds: list[str]) -> str:

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from conftest import panel_title
 from pydantic_ai.messages import ModelRequest
@@ -438,3 +440,49 @@ async def test_proposed_seeds_are_one_assistant_group(tmp_path, monkeypatch):
         assert candidates.read_seeds() == ["alpha", "gamma", "delta"]
         assert history.undo("seeds") is not None
         assert candidates.read_seeds() == ["alpha"]
+
+
+async def test_instructions_carry_status_and_gold_coverage_and_the_embedding_change(
+    tmp_path, monkeypatch
+):
+    setup(tmp_path, monkeypatch, ["alpha"])
+    files.write_jsonl(
+        "candidates.jsonl",
+        [{"id": "c", "text": "t", "max_similarity": 0.7, "best_seed": "alpha"}],
+    )
+    files.write_text(
+        "candidates.meta.json",
+        json.dumps(
+            {
+                "seeds_digest": candidates.seeds_digest(["alpha"]),
+                "embedding_model": "old-model",
+            }
+        ),
+    )
+    files.write_gold(
+        [files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev")]
+    )
+    seen: list[str | None] = []
+
+    async def spy(messages, info: AgentInfo):
+        seen.append(info.instructions)
+        yield "ok"
+
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.agent.model = FunctionModel(stream_function=spy)
+        box = screen.query_one("#chat-input", Input)
+        box.focus()
+        box.value = "hi"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        await app.workers.wait_for_complete()
+    text = seen[0] or ""
+    assert "# Pipeline status\n1 Brief and seeds:" in text
+    assert "2 Search: STALE: embedding model changed (the project now uses" in text
+    assert "the candidates were built with old-model)" in text
+    assert "# Gold coverage\ndev: 1 rows, 1 labelled, 1 orphaned" in text
+    assert '- gone "lost row" [a]' in text

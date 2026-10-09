@@ -673,6 +673,63 @@ def stage_status() -> dict[int, tuple[Status, str]]:
     return status
 
 
+STAGE_NAMES = [
+    "Brief and seeds",
+    "Search",
+    "Taxonomy and prompt",
+    "Gold dev set",
+    "Tuning loop",
+    "Gold test set",
+    "Threshold",
+    "Full run",
+    "Browse",
+]
+ORPHAN_LIST_CAP = 10
+
+
+def pipeline_status_text() -> str:
+    """The `# Pipeline status` section the assistants are told (spec 004)."""
+    lines = ["# Pipeline status"]
+    for n, (status, reason) in stage_status().items():
+        mark = {
+            "current": "current",
+            "stale": f"STALE: {reason}",
+            "incomplete": f"INCOMPLETE: {reason}",
+            "not_started": "not started",
+        }[status]
+        if reason == REASONS["embedding_model"]:
+            built = json.loads(read_text("candidates.meta.json") or "{}")
+            mark += (
+                f" (the project now uses {components()['embedding_model']}; "
+                f"the candidates were built with {built.get('embedding_model')})"
+            )
+        lines.append(f"{n} {STAGE_NAMES[n - 1]}: {mark}")
+    return "\n".join(lines)
+
+
+def gold_coverage_text(split: str | None = None) -> str:
+    """The `# Gold coverage` section: per split the counts and the capped list of orphaned rows."""
+    lines = ["# Gold coverage"]
+    for name, counts in gold_coverage().items():
+        if split not in (None, name):
+            continue
+        lines.append(
+            f"{name}: {counts['rows']} rows, {counts['labelled']} labelled, "
+            f"{counts['orphaned']} orphaned (no longer in the candidate pool)"
+        )
+        orphans = orphaned_gold(name)
+        for r in orphans[:ORPHAN_LIST_CAP]:
+            labels = ", ".join(r.labels) or "unlabelled"
+            lines.append(f'- {r.id} "{r.text[:80]}" [{labels}]')
+        if len(orphans) > ORPHAN_LIST_CAP:
+            lines.append(f"- ... and {len(orphans) - ORPHAN_LIST_CAP} more")
+    return "\n".join(lines)
+
+
+def assistant_context() -> str:
+    return f"{pipeline_status_text()}\n\n{gold_coverage_text()}"
+
+
 def first_incomplete_stage() -> int:
     """The lowest stage, 1-9, that is not current (stale, incomplete or not started); 9 when all are
     current. The completion rules are in `stage_status`."""

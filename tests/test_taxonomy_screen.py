@@ -15,7 +15,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import Button, Input, Select, TextArea
 
-from hunches import files, history
+from hunches import candidates, files, history
 from hunches.app import ChatPanel, ConfirmScreen, HunchesApp
 from hunches.screens import taxonomy as tx
 from hunches.screens.taxonomy import TaxonomyScreen
@@ -390,6 +390,36 @@ async def test_instructions_carry_seeds_taxonomy_prompt_and_the_mode_sentence(
         await pilot.press("enter")
         await pilot.pause(0.3)
     assert calls.instructions[-1] == text
+
+
+async def test_instructions_carry_status_and_gold_coverage_and_the_embedding_change(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    files.write_text(
+        "candidates.meta.json",
+        json.dumps(
+            {
+                "seeds_digest": candidates.seeds_digest(["x", "y"]),
+                "embedding_model": "old-model",
+            }
+        ),
+    )
+    files.write_gold(
+        [files.GoldRow(id="g", text="gold text", labels=["a"], split="test")]
+    )
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert isinstance(pilot.app, HunchesApp)
+        pilot.app.goto_stage(3)  # startup resumes at the stale stage 2
+        await start(pilot.app, pilot)
+    text = calls.instructions[-1] or ""
+    assert "# Pipeline status\n1 Brief and seeds:" in text
+    assert "2 Search: STALE: embedding model changed (the project now uses" in text
+    assert "the candidates were built with old-model)" in text
+    assert "# Gold coverage\ndev: 0 rows" in text
+    assert "test: 1 rows, 1 labelled, 1 orphaned" in text
 
 
 async def test_instructions_without_files_say_none_yet(tmp_path, monkeypatch, calls):

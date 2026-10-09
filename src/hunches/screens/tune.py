@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.messages import ToolCallPart
@@ -22,6 +22,7 @@ from hunches import files, history, metrics
 from hunches.app import (
     AppFooter,
     ChatPanel,
+    ConfirmScreen,
     StatusHeader,
     confirm_approve,
     key_button,
@@ -31,6 +32,7 @@ from hunches.app import (
     say,
 )
 from hunches.classifier import classify_many
+from hunches.screens import gold as gold_screen
 from hunches.screens import report
 from hunches.screens.progress import RunIndicator, eta_text
 from hunches.screens.taxonomy import prompt_change, taxonomy_text
@@ -67,10 +69,42 @@ FIRST_REPLY = (
     "main pattern in the errors. Offer to propose a prompt edit. Call propose_prompt only "
     "when the user asks or agrees."
 )
+STATUS_REPLY = (
+    "Reply in one or two sentences: what changed in the pipeline status or the gold coverage "
+    "and what it means for tuning. Do not repeat the lists."
+)
 UPDATE_REPLY = (
     "Reply in two or three sentences: what changed since the last run and whether the target "
     "is met."
 )
+
+
+def status_digest() -> str:
+    """What the assistant was last told about the pipeline: the two context sections."""
+    return hashlib.sha256(files.assistant_context().encode()).hexdigest()
+
+
+def removal_question(rows: list[files.GoldRow], reason: str) -> str:
+    """The confirmation for the assistant's remove_gold; the held-out warning whenever a test row is in it."""
+    counts = [
+        (n, split)
+        for split in ("dev", "test")
+        if (n := sum(r.split == split for r in rows))
+    ]
+    what = " and ".join(
+        f"{n} {split} row{'' if n == 1 else 's'}" for n, split in counts
+    )
+    text = (
+        f"The assistant wants to remove {what}.\n\nReason: {reason}\n\n"
+        "The rows and their labels are kept in gold_removed.jsonl and are never drawn again."
+    )
+    if any(r.split == "test" for r in rows):
+        text += (
+            "\n\nTest rows are held out so that the test result is an honest estimate. "
+            "Replacing labelled test rows changes the items the result is measured on, and the "
+            "test evaluation has to be run again."
+        )
+    return text
 
 
 def digest_of(prompt: str, model: str, rows: list, m: metrics.Metrics) -> str:
@@ -91,7 +125,12 @@ def read_meta() -> dict | None:
 def write_meta(meta: dict) -> None:
     path = files.root() / META
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({**meta, "sent_at": datetime.now(UTC).isoformat()}))
+    kept = (
+        read_meta() or {}
+    )  # the dev-run digest and the status digest are written separately
+    path.write_text(
+        json.dumps({**kept, **meta, "sent_at": datetime.now(UTC).isoformat()})
+    )
 
 
 def prompt_record(intro: str, old: str, new: str) -> str:
@@ -416,7 +455,8 @@ class TuneScreen(Screen):
                 target += f" (dev set now: {value:.3f})"
             return (
                 f"# Current prompt\n{self.prompt or 'None yet.'}\n\n"
-                f"# Current taxonomy\n{self.taxonomy_text()}\n\n# Target\n{target}"
+                f"# Current taxonomy\n{self.taxonomy_text()}\n\n# Target\n{target}\n\n"
+                f"{files.assistant_context()}"
             )
 
         @self.agent.tool_plain
@@ -425,6 +465,38 @@ class TuneScreen(Screen):
             if self.running or self.stopped:
                 return NOT_AVAILABLE
             return self.disagreements_text(label, limit)
+
+        @self.agent.tool_plain
+        async def get_gold_coverage(split: Literal["dev", "test"] | None = None) -> str:
+            """Read the gold coverage: rows, labelled rows and the rows no longer in the candidate pool (id, text, labels), optionally for one split."""
+            return files.gold_coverage_text(split)
+
+        @self.agent.tool_plain
+        async def remove_gold(ids: list[str], reason: str) -> str:
+            """Remove gold rows by id, for example rows that are no longer in the candidate pool. The user confirms; nothing is removed until they do. Their labels are kept in a log."""
+            wanted = set(ids)
+            rows = [r for r in files.read_gold() if r.id in wanted]
+            if not rows:
+                return "No gold row has those ids. Nothing removed."
+            if not await self.app.push_screen_wait(
+                ConfirmScreen(removal_question(rows, reason))
+            ):
+                return "The user rejected the removal."
+            n = gold_screen.remove(ids, reason)
+            self.run_worker(self.sync_status(), group="status")
+            return f"Removed {n} rows."
+
+        @self.agent.tool_plain
+        async def draw_gold(split: Literal["dev", "test"], n: int) -> str:
+            """Draw n more candidates into a gold split, for example after rows were removed. They start unlabelled; the user labels them, you cannot."""
+            if n < 1:
+                return "Nothing drawn: n must be at least 1."
+            rows = gold_screen.draw(split, n)
+            self.run_worker(self.sync_status(), group="status")
+            return (
+                f"Drew {len(rows)} unlabelled {split} rows. They are not labelled yet: "
+                "the user labels them on the gold screen."
+            )
 
         @self.agent.tool
         async def propose_prompt(
@@ -641,7 +713,7 @@ class TuneScreen(Screen):
                         self.query_one("#dis").focus()
                 if completed:
                     self.run_worker(
-                        self.sync_context(), group="context", exclusive=True
+                        self.sync_context_and_status(), group="context", exclusive=True
                     )
 
     def target(self) -> float:
@@ -929,6 +1001,7 @@ class TuneScreen(Screen):
         text += f"\n\n# Disagreements ({more})\n{self.describe(shown)}\n\n"
         if first:
             text += f"# Current prompt\n{self.prompt}\n\n# Taxonomy\n{self.taxonomy_text()}\n\n"
+        text += f"{files.assistant_context()}\n\n"
         text += f"# Instructions\n{FIRST_REPLY if first else UPDATE_REPLY}"
         n = len(m.disagreements)
         plural = "" if n == 1 else "s"
@@ -951,6 +1024,7 @@ class TuneScreen(Screen):
         if chat.history and old and old.get("context_digest") == digest:
             return
         first = not (chat.history and old)
+        told = status_digest()
         text, summary = self.run_context(first)
         if not first and old and old.get("metric") == self.config.target_metric:
             summary = (
@@ -963,10 +1037,38 @@ class TuneScreen(Screen):
             write_meta(
                 {
                     "context_digest": digest,
+                    "status_digest": told,
                     "metric": self.config.target_metric,
                     "value": self.target(),
                 }
             )
+
+    async def sync_context_and_status(self) -> None:
+        await self.sync_context()
+        await self.sync_status()
+
+    async def sync_status(self) -> None:
+        """Add an UPDATED line when the pipeline status or gold coverage is not what the assistant last
+        saw (spec 004 D9). Nothing is sent before a first context turn recorded what it saw."""
+        if not self.ready:
+            return
+        chat = self.query_one(ChatPanel)
+        while chat.running:
+            await asyncio.sleep(0.05)
+        await self.flush_records()
+        old = read_meta()
+        digest = status_digest()
+        if not (chat.history and old and old.get("status_digest")):
+            return
+        if old["status_digest"] == digest:
+            return
+        text = f"{files.assistant_context()}\n\n# Instructions\n{STATUS_REPLY}"
+        sent = len(chat.history)
+        await chat.send_context(
+            text, "update", "Pipeline status or gold coverage changed"
+        )
+        if len(chat.history) > sent:  # a failed turn must not claim to be sent
+            write_meta({"status_digest": digest})
 
     def note_edit(self, summary: str, body: str) -> None:
         """Queue a YOU EDITED line; it is written once no reply is streaming (a turn would overwrite it)."""

@@ -432,7 +432,7 @@ class TaxonomyScreen(Screen):
             text += "\n\n# Current prompt\n" + (self.prompt or "None yet.")
             if mode:
                 text += f"\n\nThe user chose mode {mode}; do not ask about it again."
-            return text
+            return f"{text}\n\n{files.assistant_context()}"
 
         @self.agent.tool_plain
         async def write_taxonomy(

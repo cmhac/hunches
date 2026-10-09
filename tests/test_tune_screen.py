@@ -10,7 +10,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Select, Static, TextArea
 
 from hunches import files, history, metrics
-from hunches.app import ChatLine, ChatPanel, FoldLine, HunchesApp
+from hunches.app import ChatLine, ChatPanel, ConfirmScreen, FoldLine, HunchesApp
 from hunches.screens import tune
 from hunches.screens.progress import RunIndicator
 from hunches.screens.tune import (
@@ -987,6 +987,28 @@ async def test_instructions_carry_the_current_prompt_taxonomy_and_target(assista
         )
 
 
+async def test_instructions_carry_status_and_gold_coverage_and_the_embedding_change(
+    assistant,
+):
+    files.write_text(
+        "candidates.meta.json", json.dumps({"embedding_model": "old-model"})
+    )
+    files.write_gold(
+        files.read_gold()
+        + [files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev")]
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await start(app, pilot)
+        await quiesce(app, pilot)
+    text = assistant.instructions[0] or ""
+    assert "# Pipeline status\n1 Brief and seeds:" in text
+    assert "2 Search: STALE: embedding model changed (the project now uses m;" in text
+    assert "the candidates were built with old-model)" in text
+    assert "# Gold coverage\ndev: 9 rows, 9 labelled, 1 orphaned" in text
+    assert '- gone "lost row" [a]' in text
+
+
 async def test_propose_is_disabled_while_a_reply_streams(assistant):
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -1120,3 +1142,237 @@ async def test_accepted_prompt_is_saved_through_history():
         last = history.entries("prompt")[-1]
         assert last["source"] == "user"
         assert history.text(last["after"]) == "Classify. BETTER!"
+
+
+# ---- spec 004 task 07: status, gold coverage and the gold tools
+
+
+def meta_now() -> dict:
+    return json.loads(files.read_text("chat/tuning.meta.json") or "{}")
+
+
+async def say(app, pilot, screen, text):
+    box = screen.query_one("#chat-input")
+    box.focus()
+    box.value = text
+    await pilot.press("enter")
+    await quiesce(app, pilot)
+
+
+async def test_context_turn_carries_both_sections_and_records_what_was_told(assistant):
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await start(app, pilot)
+        await quiesce(app, pilot)
+    assert "# Pipeline status\n1 Brief and seeds:" in assistant.prompts[0]
+    assert (
+        "# Gold coverage\ndev: 8 rows, 8 labelled, 0 orphaned" in assistant.prompts[0]
+    )
+    assert meta_now()["status_digest"]
+    assert meta_now()["context_digest"]  # the dev-run digest is kept beside it
+
+
+async def test_updated_message_is_added_once_per_change_and_never_repeated(assistant):
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 1
+        await screen.sync_status()  # nothing changed
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 1
+
+        files.write_gold(
+            files.read_gold()
+            + [files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev")]
+        )
+        await screen.sync_status()
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 2
+        update = assistant.prompts[1]
+        assert "# Pipeline status" in update
+        assert "dev: 9 rows, 9 labelled, 1 orphaned" in update
+        assert '- gone "lost row" [a]' in update
+        assert "# Instructions" in update
+        assert len(history_requests("update")) == 1
+
+        await screen.sync_status()  # same state: not again
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 2
+
+        files.write_text(
+            "candidates.meta.json", json.dumps({"embedding_model": "old-model"})
+        )
+        await screen.sync_status()  # the stale set changed
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 3
+        assert "STALE: embedding model changed" in assistant.prompts[2]
+        assert len(history_requests("update")) == 2
+        assert meta_now()["context_digest"]  # the context digest survives the merge
+
+
+async def test_failed_status_turn_is_not_recorded_as_sent(assistant):
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        told = meta_now()["status_digest"]
+        files.write_gold(
+            files.read_gold()
+            + [files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev")]
+        )
+        assistant.fail = True
+        await screen.sync_status()
+        await quiesce(app, pilot)
+        assert meta_now()["status_digest"] == told
+        assistant.fail = False
+        await screen.sync_status()  # so the next try sends it
+        await quiesce(app, pilot)
+        assert meta_now()["status_digest"] != told
+
+
+async def test_get_gold_coverage_tool_returns_the_section_for_a_split(assistant):
+    files.write_gold(
+        files.read_gold()
+        + [
+            files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev"),
+            files.GoldRow(id="t", text="test row", labels=["b"], split="test"),
+        ]
+    )
+    assistant.tools["coverage"] = ("get_gold_coverage", {"split": "dev"})
+    assistant.tools["all"] = ("get_gold_coverage", {})
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        await say(app, pilot, screen, "coverage")
+        await say(app, pilot, screen, "all")
+    dev_only, both = tool_returns("get_gold_coverage")
+    assert dev_only == files.gold_coverage_text("dev")
+    assert "dev: 9 rows" in dev_only and "test:" not in dev_only
+    assert both == files.gold_coverage_text()
+    assert "test: 1 rows, 1 labelled, 1 orphaned" in both
+
+
+def question(app) -> str:
+    screen = app.screen
+    assert isinstance(screen, ConfirmScreen)
+    return screen.question
+
+
+def removal_args(*ids):
+    return ("remove_gold", {"ids": list(ids), "reason": "seeds changed"})
+
+
+async def test_remove_gold_writes_nothing_until_confirmed_and_returns_the_answer(
+    assistant,
+):
+    assistant.tools["remove"] = removal_args("0", "1")
+    before = files.read_text("gold.jsonl")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        box = screen.query_one("#chat-input")
+        box.focus()
+        box.value = "remove"
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        assert "2 dev rows" in question(app)
+        assert files.read_text("gold.jsonl") == before  # still nothing written
+        assert files.read_text("gold_removed.jsonl") is None
+        await pilot.click("#no")
+        await quiesce(app, pilot)
+        assert tool_returns("remove_gold") == ["The user rejected the removal."]
+        assert files.read_text("gold.jsonl") == before
+        assert files.read_text("gold_removed.jsonl") is None
+
+        box.focus()
+        box.value = "remove"
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.click("#yes")
+        await quiesce(app, pilot)
+    assert tool_returns("remove_gold")[-1] == "Removed 2 rows."
+    assert [r.id for r in files.read_gold()] == ["2", "3", "4", "5", "6", "7"]
+    removed = files.read_jsonl("gold_removed.jsonl")
+    assert [(r["id"], r["reason"], r["labels"]) for r in removed] == [
+        ("0", "seeds changed", ["a"]),
+        ("1", "seeds changed", ["b"]),
+    ]
+
+
+async def test_remove_gold_names_the_split_in_the_question(assistant):
+    files.write_gold(
+        files.read_gold()
+        + [files.GoldRow(id="t", text="test row", labels=["b"], split="test")]
+    )
+    assistant.tools["remove"] = removal_args("t")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        box = screen.query_one("#chat-input")
+        box.focus()
+        box.value = "remove"
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        assert "1 test row" in question(app)
+        assert "held out" in question(app)
+        await pilot.click("#no")
+        await quiesce(app, pilot)
+
+
+async def test_remove_gold_with_unknown_ids_asks_nothing(assistant):
+    assistant.tools["remove"] = removal_args("nope")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        await say(app, pilot, screen, "remove")
+    assert tool_returns("remove_gold") == [
+        "No gold row has those ids. Nothing removed."
+    ]
+
+
+async def test_draw_gold_adds_unlabelled_rows_and_the_user_labels_them(assistant):
+    files.write_jsonl(
+        "candidates.jsonl",
+        [
+            {"id": str(i), "text": f"item {i}", "max_similarity": 0.7, "best_seed": "x"}
+            for i in range(12)
+        ],
+    )
+    assistant.tools["draw"] = ("draw_gold", {"split": "dev", "n": 3})
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        await say(app, pilot, screen, "draw")
+    (result,) = tool_returns("draw_gold")
+    new = [r for r in files.read_gold() if r.id not in {str(i) for i in range(8)}]
+    assert len(new) == 3 and all(r.labels == [] and r.split == "dev" for r in new)
+    assert result.startswith("Drew 3 unlabelled dev rows")
+    assert "the user labels them" in result
+
+
+async def test_no_assistant_tool_sets_a_gold_label(assistant):
+    names = set()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        names = set(screen.agent._function_toolset.tools)
+    assert names == {
+        "get_disagreements",
+        "propose_prompt",
+        "get_gold_coverage",
+        "remove_gold",
+        "draw_gold",
+    }
+    import inspect
+
+    for name in ("remove_gold", "draw_gold", "get_gold_coverage"):
+        params = inspect.signature(
+            screen.agent._function_toolset.tools[name].function
+        ).parameters
+        assert "labels" not in params and "label" not in params

@@ -643,15 +643,15 @@ from hunches.screens.tune import TuneScreen
 
 # (number, name, ScreenClass). Each stage task changes exactly one line here.
 STAGES = [
-    (1, "Brief and seeds", BriefScreen),
-    (2, "Search", SearchScreen),
-    (3, "Taxonomy and prompt", TaxonomyScreen),
-    (4, "Gold dev set", GoldScreen),
-    (5, "Tuning loop", TuneScreen),
-    (6, "Gold test set", test_stage),
-    (7, "Threshold", ThresholdScreen),
-    (8, "Full run", RunScreen),
-    (9, "Browse", BrowseScreen),
+    (1, files.STAGE_NAMES[0], BriefScreen),
+    (2, files.STAGE_NAMES[1], SearchScreen),
+    (3, files.STAGE_NAMES[2], TaxonomyScreen),
+    (4, files.STAGE_NAMES[3], GoldScreen),
+    (5, files.STAGE_NAMES[4], TuneScreen),
+    (6, files.STAGE_NAMES[5], test_stage),
+    (7, files.STAGE_NAMES[6], ThresholdScreen),
+    (8, files.STAGE_NAMES[7], RunScreen),
+    (9, files.STAGE_NAMES[8], BrowseScreen),
 ]
 
 
