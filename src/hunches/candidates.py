@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import hashlib
 import io
@@ -10,7 +11,7 @@ from pydantic_ai import Embedder
 
 from hunches.cost import cache_get, cache_key, cache_put, embedding_dollars, record
 from hunches.files import read_config, read_text, write_jsonl, write_text
-from hunches.search import search
+from hunches.search import search, search_pg_exact
 
 FLOOR = 0.60
 # Lower edges of the similarity bands; the last band (0.75+) is open-ended.
@@ -79,18 +80,32 @@ def top_seeds(rows: list[dict], threshold: float, n: int = 10) -> list[tuple[str
 async def build_candidates(
     embedder: Embedder | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    stop=None,
 ) -> bool:
-    """Write candidates.jsonl; returns True if any search hit the S3 topK cap (show a warning).
+    """Write candidates.jsonl; returns True if any search hit the backend cap (show a warning).
 
-    `progress(done, total, seed)` is called after each seed's search.
+    `progress(done, total, seed)` is called after each seed's search. pgvector exact search
+    answers every seed in one query (in a thread, so Stop works), calling `progress(rows, 0, "")`
+    per row received; `stop` is a `search.Stop` for it.
     """
     seeds = read_seeds()
     best: dict[str, dict] = {}
     capped = False
     vectors = await embed_seeds(seeds, embedder)
-    for done, (seed, vector) in enumerate(zip(seeds, vectors), 1):
-        hits, seed_capped = search(vector, FLOOR)
-        capped = capped or seed_capped
+    config = read_config()
+    if config.backend == "pgvector" and config.pg_search != "index":
+        per_seed, capped = await asyncio.to_thread(
+            search_pg_exact, vectors, FLOOR, progress=progress, stop=stop
+        )
+    else:
+        per_seed = []
+        for done, (seed, vector) in enumerate(zip(seeds, vectors), 1):
+            hits, seed_capped = search(vector, FLOOR)
+            capped = capped or seed_capped
+            per_seed.append(hits)
+            if progress:
+                progress(done, len(seeds), seed)
+    for seed, hits in zip(seeds, per_seed):
         for id, text, sim in hits:
             if id not in best or sim > best[id]["max_similarity"]:
                 best[id] = {
@@ -99,8 +114,6 @@ async def build_candidates(
                     "max_similarity": sim,
                     "best_seed": seed,
                 }
-        if progress:
-            progress(done, len(seeds), seed)
     rows = sorted(best.values(), key=lambda r: (-r["max_similarity"], r["id"]))
     write_jsonl("candidates.jsonl", rows)
     meta = {

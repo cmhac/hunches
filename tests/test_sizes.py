@@ -436,3 +436,57 @@ async def test_gold_screens_with_orphans(size, stage, variant):
             assert screen.query_one("#info").display
             assert not screen.query_one("#orphans").display
         await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("variant", ["approximate", "cap-warning", "searching"])
+async def test_search_pgvector_states(size, variant, monkeypatch):
+    import threading
+
+    from textual.widgets import Label
+
+    from hunches import candidates, search
+    from hunches.app import say
+    from hunches.screens.search import SearchScreen
+
+    async def embed(seeds, embedder=None):
+        return [[1.0, 0.0] for _ in seeds]
+
+    monkeypatch.setattr(candidates, "embed_seeds", embed)
+    mode = "index" if variant == "approximate" else "exact"
+    config = files.read_config().model_copy(
+        update={"backend": "pgvector", "pg_table": "t", "pg_search": mode}
+    )
+    files.write_config(config)
+    gate = threading.Event()
+
+    def stub(vectors, floor, progress=None, stop=None):
+        assert progress
+        progress(1234567, 0, "")
+        gate.wait(5)
+        return [[] for _ in vectors], False
+
+    monkeypatch.setattr(candidates, "search_pg_exact", stub)
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.goto_stage(2)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SearchScreen)
+        if variant == "approximate":
+            assert screen.query_one("#approximate").display
+        elif variant == "cap-warning":
+            say(
+                screen.query_one("#warning", Label),
+                screen.cap_warning("pgvector", search.PG_TOP_K),
+            )
+        else:
+            screen.start()
+            await pilot.pause(0.6)
+            assert screen.searching
+            assert screen.query_one("#stop").display
+        await pilot.pause()
+        await check(app, pilot, size[0])
+        gate.set()
+        await app.workers.wait_for_complete()

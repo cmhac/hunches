@@ -228,6 +228,14 @@ PostgreSQL 16 + pgvector **0.8.1**, psycopg 3.3.6; README read at the `v0.8.1` t
 - **Not done, flagged:** task 06 sets only the parameters its text names, so `hnsw.scan_mem_multiplier` is not set. Setting it would make `index` mode recall more, but the mode stays approximate and keeps the permanent warning either way; whether to add it (and the memory it implies per query) is Chris's call.
 - Not tested: IVFFlat (`ivfflat.iterative_scan` / `ivfflat.max_probes` are not set), pgvector 0.8.0 exactly, a managed service.
 
+### Verified in task 07 (`build_candidates` and the Search screen, 2026-10-09)
+
+Stubbed `search_pg_exact`; Pilot tests, nothing touches a database.
+
+- **`build_candidates(embedder, progress, stop=None)`**: `config.backend == "pgvector" and config.pg_search != "index"` (so `None` is exact) makes one `search_pg_exact(vectors, FLOOR, progress=progress, stop=stop)` call, run with `asyncio.to_thread` so the event loop stays free for the Stop key; every other case still calls `search()` per seed. The merge, sort, write and meta code is the same for both. The per-seed path now calls `progress(done, total, seed)` after the seed's search and before the merge loop (it used to be after the merge; nothing observes the difference).
+- **Search screen**: `cap_warning(backend, top_k)` (`S3` for `s3`, `pgvector` for `pgvector`; `PG_TOP_K` or `S3_TOP_K`). `#approximate` is an amber banner with the text from D4, set in `refresh_state`, so it shows every time the screen is shown and stays after a run. In the one-query mode `#progress` has no total: the progress callback arrives from the search thread, so it only stores the row count, and a 0.25 s timer redraws `#progress` as `<elapsed>  <rows> rows` (this is also the throttle task 05 asked for). A `Stop  x` button (`#stop`, key `x`) is shown only while that query runs; it calls `search.Stop.stop()`, the worker ends with `SearchCancelled`, `#warning` says `Search stopped.`, nothing is written and the Run button is enabled again. `x` does nothing for the per-seed paths (S3, local and `index` run in the event loop and cannot be interrupted).
+- **Found by the size sweep (also true for S3 before this task)**: the 118-character cap warning was one unwrapped line and was clipped at every size. `#warning` and `#error` now wrap (`width: 1fr; height: auto`).
+
 ## Tables with no index (very large, rarely queried)
 
 Supported, and it is the case `exact` mode is built for: it needs no index and never looks for one, so a table with no index at all works the same as an indexed one. Nothing in Check store treats a missing index as a problem in `exact` mode (it only warns in `index` mode, where an index is the whole point). What changes is cost, so the spec adds these:

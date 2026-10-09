@@ -149,3 +149,101 @@ def test_top_seeds_at_two_thresholds():
     assert candidates.top_seeds(rows, 0.7) == [("B", 2)]  # A drops out, ranking changes
     assert candidates.top_seeds(rows, 0.65)[0] == ("B", 2)
     assert len(candidates.top_seeds(rows * 1, 0.6, n=1)) == 1
+
+
+def use_pgvector(search_mode=None):
+    config = files.read_config()
+    files.write_config(
+        config.model_copy(
+            update={"backend": "pgvector", "pg_table": "t", "pg_search": search_mode}
+        )
+    )
+
+
+HITS = [
+    # alpha: i1 ties with beta
+    [("i0", "t0", 1.0), ("i1", "t1", 0.8), ("i5", "t5", 0.7), ("i2", "t2", 0.6)],
+    # beta
+    [("i3", "t3", 1.0), ("i4", "t4", 0.866), ("i1", "t1", 0.8), ("i5", "t5", 0.75)],
+]
+
+
+async def test_pgvector_exact_is_one_call_and_merges_like_the_per_seed_path(
+    monkeypatch,
+):
+    use_pgvector()
+    calls = []
+
+    def stub(vectors, floor, progress=None, stop=None):
+        calls.append((vectors, floor, progress, stop))
+        return HITS, True
+
+    def no_per_seed(*a):
+        raise AssertionError("search() must not run in exact mode")
+
+    monkeypatch.setattr(candidates, "search_pg_exact", stub)
+    monkeypatch.setattr(candidates, "search", no_per_seed)
+    seen = []
+    handle = object()
+    embedder = StubEmbedder({"alpha": [1, 0], "beta": [0, 1]})
+    capped = await candidates.build_candidates(
+        embedder, progress=lambda *a: seen.append(a), stop=handle
+    )
+    assert capped is True
+    assert len(calls) == 1
+    assert calls[0][0] == [[1, 0], [0, 1]] and calls[0][1] == 0.6
+    assert calls[0][3] is handle
+    rows = files.read_jsonl("candidates.jsonl")
+    # i1: alpha 0.8 ties beta 0.8 -> earlier seed; i5: beta 0.75 beats alpha 0.7
+    assert [(r["id"], r["best_seed"], r["max_similarity"]) for r in rows] == [
+        ("i0", "alpha", 1.0),
+        ("i3", "beta", 1.0),
+        ("i4", "beta", 0.866),
+        ("i1", "alpha", 0.8),
+        ("i5", "beta", 0.75),
+        ("i2", "alpha", 0.6),
+    ]
+    meta = json.loads(files.read_text("candidates.meta.json") or "")
+    assert meta["seeds_digest"] == candidates.seeds_digest(["alpha", "beta"])
+    assert meta["floor"] == 0.6 and meta["embedding_model"] == "m"
+    calls[0][2](5, 0, "")  # the callback given to the search is the caller's
+    assert seen == [(5, 0, "")]
+
+
+async def test_pgvector_exact_calls_the_search_once_for_any_number_of_seeds(
+    monkeypatch,
+):
+    use_pgvector("exact")
+    files.write_text("seeds.csv", "seed\nalpha\nbeta\ngamma\ndelta\n")
+    calls = []
+
+    def stub(vectors, floor, progress=None, stop=None):
+        calls.append(len(vectors))
+        return [[] for _ in vectors], False
+
+    monkeypatch.setattr(candidates, "search_pg_exact", stub)
+    vec = {"alpha": [1, 0], "beta": [0, 1], "gamma": [1, 0], "delta": [0, 1]}
+    assert await candidates.build_candidates(StubEmbedder(vec)) is False
+    assert calls == [4]
+    assert files.read_jsonl("candidates.jsonl") == []
+
+
+@pytest.mark.parametrize("backend", ["local", "s3", "index"])
+async def test_other_modes_still_search_once_per_seed(monkeypatch, backend):
+    if backend == "index":
+        use_pgvector("index")
+    elif backend == "s3":
+        files.write_config(files.read_config().model_copy(update={"backend": "s3"}))
+    calls = []
+
+    def per_seed(vector, floor):
+        calls.append(vector)
+        return [], False
+
+    def no_exact(*a, **k):
+        raise AssertionError("search_pg_exact must not run")
+
+    monkeypatch.setattr(candidates, "search", per_seed)
+    monkeypatch.setattr(candidates, "search_pg_exact", no_exact)
+    await candidates.build_candidates(StubEmbedder({"alpha": [1, 0], "beta": [0, 1]}))
+    assert calls == [[1, 0], [0, 1]]

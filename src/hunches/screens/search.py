@@ -1,3 +1,4 @@
+import time
 from typing import ClassVar
 
 from rich.text import Text
@@ -18,8 +19,12 @@ from hunches.app import (
     retitle,
     say,
 )
-from hunches.screens.progress import LabelBar
+from hunches.screens.progress import LabelBar, seconds_text
 
+APPROXIMATE = (
+    "WARNING: APPROXIMATE pgvector search; the index may hide hits above the floor. "
+    "Switch to exact in Project settings for a complete pool."
+)
 RERUN = (
     "You've already run the searches, and haven't changed the seed candidates. "
     "Depending on the size of the corpus, this can take a long time. "
@@ -37,12 +42,14 @@ def bar(n: int, biggest: int, width: int) -> str:
 
 
 class SearchScreen(Screen):
-    BINDINGS: ClassVar = [("r", "run", "Run search")]
+    BINDINGS: ClassVar = [("r", "run", "Run search"), ("x", "stop", "Stop")]
     DEFAULT_CSS = """
     SearchScreen #top { height: 1; margin-bottom: 1; }
     SearchScreen #top > Button { width: auto; }
+    SearchScreen #stop { display: none; margin-left: 1; }
     SearchScreen #status { width: auto; margin-left: 2; }
     SearchScreen #progress { margin-left: 2; }
+    SearchScreen #warning, SearchScreen #error { width: 1fr; height: auto; }
     SearchScreen #results { height: 1fr; }
     SearchScreen #results.-inactive { opacity: 40%; }
     SearchScreen #bands-panel { height: auto; }
@@ -59,17 +66,25 @@ class SearchScreen(Screen):
         self.searching = False
         self.rows: list[dict] = []
         self.threshold = candidates.FLOOR  # top-seeds minimum similarity
+        self.stop_handle = search.Stop()
+        self.one_query = (
+            False  # pgvector exact: no per-seed progress, rows received instead
+        )
+        self.received = 0
+        self.started = 0.0
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         with Horizontal(id="top"):
             yield key_button("Run search", "r", id="run", variant="primary")
+            yield key_button("Stop", "x", id="stop", variant="error")
             yield Label("", id="status")
             yield LabelBar(0, 0, "", align="left", id="progress")
         yield Static("", id="pool", classes="banner -stale")
         yield Static(
             "", id="embedding-warning", classes="banner -warning", markup=False
         )
+        yield Static("", id="approximate", classes="banner -warning", markup=False)
         yield Static("", id="gold-orphans", classes="warn", markup=False)
         yield Label("", id="warning", classes="warn")
         yield Label("", id="error", classes="error")
@@ -83,9 +98,10 @@ class SearchScreen(Screen):
         yield AppFooter()
 
     @staticmethod
-    def cap_warning(top_k: int) -> str:
+    def cap_warning(backend: str, top_k: int) -> str:
+        name = "S3" if backend == "s3" else backend
         return (
-            f"WARNING: S3 returned its cap of {top_k:,} hits for at least one seed; "
+            f"WARNING: {name} returned its cap of {top_k:,} hits for at least one seed; "
             f"only the {top_k:,} highest-scoring hits are kept."
         )
 
@@ -100,6 +116,7 @@ class SearchScreen(Screen):
             compact=True,
         )
         self.query_one("#seeds-panel").query_one(PanelTitle).mount(select)
+        self.set_interval(0.25, self.tick)
         self.refresh_state()
         self.show(files.read_jsonl("candidates.jsonl"))  # resume: show the last run
 
@@ -132,6 +149,11 @@ class SearchScreen(Screen):
         status.set_class(bool(note), "warn")
         status.display = bool(note)
         self.query_one("#progress").display = self.searching
+        self.query_one("#stop").display = self.searching and self.one_query
+        say(
+            self.query_one("#approximate", Static),
+            APPROXIMATE if search.is_approximate(files.read_config()) else "",
+        )
         self.query_one("#results").set_class(not approved or not exists, "-inactive")
         say(
             self.query_one("#embedding-warning", Static),
@@ -166,7 +188,14 @@ class SearchScreen(Screen):
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.action_run()
+        if event.button.id == "stop":
+            self.action_stop()
+        else:
+            self.action_run()
+
+    def action_stop(self) -> None:
+        if self.searching and self.one_query:
+            self.stop_handle.stop()
 
     def action_run(self) -> None:
         if self.searching or not files.read_state().seeds_approved:
@@ -187,18 +216,45 @@ class SearchScreen(Screen):
         for id_ in ("#error", "#warning"):
             say(self.query_one(id_, Label), "")
         total = len(candidates.read_seeds())
-        self.query_one("#progress", LabelBar).update_bar(total, 0, f"0/{total}")
+        config = files.read_config()
+        self.one_query = config.backend == "pgvector" and not search.is_approximate(
+            config
+        )
+        self.stop_handle = search.Stop()
+        self.received, self.started = 0, time.monotonic()
+        bar = self.query_one("#progress", LabelBar)
+        if self.one_query:
+            bar.update_bar(0, 0, self.rows_text())
+        else:
+            bar.update_bar(total, 0, f"0/{total}")
         self.refresh_state()
         self.run_worker(self.run_search(), exclusive=True)
 
+    def rows_text(self) -> str:
+        elapsed = seconds_text(time.monotonic() - self.started)
+        return f"{elapsed}  {self.received:,} rows"
+
+    def tick(self) -> None:
+        if self.searching and self.one_query:
+            self.query_one("#progress", LabelBar).update_bar(0, 0, self.rows_text())
+
     def on_progress(self, done: int, total: int, seed: str) -> None:
+        if (
+            total == 0
+        ):  # the one query runs in a thread: only note the count, tick() draws
+            self.received = done
+            return
         self.query_one("#progress", LabelBar).update_bar(
             total, done, f"{done}/{total}  {seed}"
         )
 
     async def run_search(self) -> None:
         try:
-            capped = await candidates.build_candidates(self.embedder, self.on_progress)
+            capped = await candidates.build_candidates(
+                self.embedder, self.on_progress, self.stop_handle
+            )
+        except search.SearchCancelled:
+            say(self.query_one("#warning", Label), "Search stopped.")
         except Exception as e:  # noqa: BLE001  config/model/network errors must not kill the app
             message = f"Search failed: {e}"
             if "mismatch" in str(e):
@@ -209,10 +265,9 @@ class SearchScreen(Screen):
             say(self.query_one("#error", Label), message)
         else:
             if capped:
-                say(
-                    self.query_one("#warning", Label),
-                    self.cap_warning(search.S3_TOP_K),
-                )
+                backend = files.read_config().backend
+                top_k = search.PG_TOP_K if backend == "pgvector" else search.S3_TOP_K
+                say(self.query_one("#warning", Label), self.cap_warning(backend, top_k))
             self.show(files.read_jsonl("candidates.jsonl"))
         self.searching = False
         self.refresh_state()
