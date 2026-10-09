@@ -8,7 +8,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Static
 
 from hunches import cost, files
-from hunches.app import AppFooter, StatusHeader
+from hunches.app import AppFooter, StageBanner, StatusHeader, current_status, plan_hint
 from hunches.classifier import classify_many
 from hunches.files import above_threshold, pending
 from hunches.screens.final import RESULT
@@ -79,6 +79,7 @@ class RunScreen(Screen):
             )
             yield AppFooter()
             return
+        yield StageBanner(self.banner_text)
         yield RunIndicator()
         with Vertical(id="blocked"):
             yield Static(
@@ -98,6 +99,17 @@ class RunScreen(Screen):
             return True
         return bool(set(files.result_changes(json.loads(text))) - {"gold_test"})
 
+    def banner_text(self) -> str:
+        """Rows from another prompt: a re-run replaces them. The untested block comes first."""
+        kind, reason = current_status()[8]
+        if not self.ready or self.running or kind != "stale" or self.blocked():
+            return ""
+        return (
+            f"STALE: {reason}. results.jsonl was made with an earlier prompt. Re-run "
+            "classifies those items again; items already cached cost nothing."
+            + plan_hint()
+        )
+
     def state(self, todo: list[dict]) -> str:
         if self.running:
             return "running"
@@ -105,7 +117,12 @@ class RunScreen(Screen):
             return "failed"
         if not todo:
             return "complete"
-        resumable = self.started or files.read_jsonl("results.jsonl")
+        # rows of another prompt are replaced, not resumed
+        resumable = (
+            self.started
+            or files.done_result_ids()
+            or any("error" in r for r in files.read_jsonl("results.jsonl"))
+        )
         return "stopped" if resumable else "idle"
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
@@ -118,6 +135,7 @@ class RunScreen(Screen):
         return not self.running and bool(pending())
 
     def show(self) -> None:
+        self.query_one(StageBanner).refresh_text()
         blocked = self.blocked()
         indicator = self.query_one(RunIndicator)
         indicator.display = not blocked
@@ -128,7 +146,13 @@ class RunScreen(Screen):
         failed = sum("error" in r for r in files.read_jsonl("results.jsonl"))
         indicator.set_title(TITLES[state])
         indicator.set_progress(total - len(todo), total)
-        indicator.set_button(None if blocked else BUTTON.get(state))
+        button = BUTTON.get(state)
+        if (
+            button in ("start", "resume")
+            and current_status(fresh=True)[8][0] == "stale"
+        ):
+            button = "rerun"
+        indicator.set_button(None if blocked else button)
         if state == "idle":
             indicator.set_status(estimate(len(todo), self.model))
         elif state == "failed":

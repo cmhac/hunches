@@ -11,7 +11,16 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Static
 
 from hunches import candidates, cost, files
-from hunches.app import AppFooter, StatusHeader, key_button, panel, say
+from hunches.app import (
+    AppFooter,
+    StageBanner,
+    StatusHeader,
+    current_status,
+    key_button,
+    panel,
+    plan_hint,
+    say,
+)
 from hunches.classifier import classify_many
 from hunches.screens.progress import RunIndicator, eta_text
 
@@ -19,13 +28,16 @@ SAMPLE = "threshold_sample.json"
 PER_BAND = 30
 
 
-def sample_bands(cands: list[dict], per_band: int = PER_BAND) -> list[list[str]]:
+def sample_bands(
+    cands: list[dict], per_band: int = PER_BAND, fresh: bool = False
+) -> list[list[str]]:
     """Candidate ids sampled from each band (all of them if the band is smaller).
 
     Reproducible (RNG seeded by project name and band) and persisted in SAMPLE, so reopening
-    the screen reuses the same items. Task 12's gold.draw excludes gold ids, so it can't be used.
+    the screen reuses the same items (`fresh`: the candidates changed, so draw again).
+    Task 12's gold.draw excludes gold ids, so it can't be used.
     """
-    saved = files.read_text(SAMPLE)
+    saved = None if fresh else files.read_text(SAMPLE)
     if saved:
         return json.loads(saved)["ids"]
     ids = []
@@ -117,6 +129,7 @@ class ThresholdScreen(Screen):
             )
             yield AppFooter()
             return
+        yield StageBanner(self.banner_text)
         yield Static(
             "Off-topic = predicted exactly {off_topic}. Small samples are noisy; mind n. "
             "Enter on a row chooses its lower bound as the cutoff.",
@@ -136,6 +149,15 @@ class ThresholdScreen(Screen):
         yield RunIndicator()
         yield AppFooter()
 
+    def banner_text(self) -> str:
+        kind, reason = current_status()[7]
+        if self.running or self.stopped or kind != "stale":
+            return ""
+        return (
+            f"STALE: {reason}. The rates below are for the current settings. "
+            "Choose a band and save the cutoff again." + plan_hint()
+        )
+
     def on_mount(self) -> None:
         if not self.ready:
             return
@@ -146,9 +168,14 @@ class ThresholdScreen(Screen):
         table.add_column(Text("Cumulative ≥ lower", justify="right"), width=20)
         indicator = self.query_one(RunIndicator)
         indicator.set_title("Sampling each similarity band")
-        self.ids = sample_bands(self.cands)
+        # a sample made under other inputs is classified again (the cache makes that cheap); one made
+        # from other candidates is drawn again. Its file stays until the first new prediction.
+        old = files.changed(
+            json.loads(files.read_text(SAMPLE) or "{}").get("inputs", {})
+        )
+        self.ids = sample_bands(self.cands, fresh="candidates" in old)
         saved = json.loads(files.read_text(SAMPLE) or "{}")
-        self.predictions = saved.get("predictions", {})
+        self.predictions = {} if old else saved.get("predictions", {})
         previous = json.loads(files.read_text("threshold.json") or "{}")
         if "threshold" in previous:
             if previous["threshold"] in candidates.BANDS:
@@ -159,6 +186,7 @@ class ThresholdScreen(Screen):
         self.action_start()
 
     def show(self) -> None:
+        self.query_one(StageBanner).refresh_text()
         table = self.query_one("#bands", DataTable)
         row = table.cursor_row
         table.clear()

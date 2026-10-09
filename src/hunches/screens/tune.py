@@ -22,11 +22,14 @@ from hunches.app import (
     AppFooter,
     ChatPanel,
     ConfirmScreen,
+    StageBanner,
     StatusHeader,
     confirm_approve,
+    current_status,
     key_button,
     modal_box,
     panel,
+    plan_hint,
     retitle,
     say,
 )
@@ -424,6 +427,7 @@ class TuneScreen(Screen):
         Binding("plus,equals_sign", "score(0.01)", "Target +", show=False),
         Binding("minus", "score(-0.01)", "Target -", show=False),
         ("f2", "done", "Done"),
+        ("r", "rerun", "Re-run"),
         ("x", "stop", "Stop"),
         ("s", "start", "Resume"),
     ]
@@ -477,6 +481,8 @@ class TuneScreen(Screen):
         self.errors: dict[int, str] = {}
         self.reasoning: dict[int, str] = {}
         self.metrics: metrics.Metrics | None = None
+        # the components the last finished dev run was made under; Done waits until they are current
+        self.ran: dict[str, str] | None = None
         self.running = self.stopped = False
         self.worker = None
         self.tab = "results"  # under 120 columns: "chat" or "results"
@@ -581,6 +587,7 @@ class TuneScreen(Screen):
             )
             yield AppFooter()
             return
+        yield StageBanner(self.banner_text, id="stale-banner")
         with Horizontal(id="tabs"):
             yield Tab("Chat", "chat")
             yield Tab("Results", "results")
@@ -615,6 +622,7 @@ class TuneScreen(Screen):
                         yield Button("−", id="score-down", compact=True)
                         yield Static("", id="score")
                         yield Button("+", id="score-up", compact=True)
+                        yield key_button("Re-run", "r", id="rerun", compact=True)
                     with Horizontal(id="action-row"):
                         yield key_button(
                             "Propose edit", "e", id="propose", compact=True
@@ -626,6 +634,30 @@ class TuneScreen(Screen):
                 yield Static("", id="note", markup=False)
                 yield RunIndicator()
         yield AppFooter()
+
+    def banner_text(self) -> str:
+        """The STALE banner: what changed and what to do about it."""
+        if self.running or self.stopped or self.metrics is None:
+            return ""
+        kind, reason = current_status()[5]
+        if not self.current:
+            if changed := files.changed(self.ran or {}):
+                reason = files.REASONS[changed[0]]
+            return (
+                f"STALE: {reason or 'inputs changed'}. These results are from before the "
+                "change. Press r to re-run, then approve again." + plan_hint()
+            )
+        if kind != "stale":
+            return ""
+        return (
+            f"STALE: {reason}. The results below are current. Approve again with F2."
+            + plan_hint()
+        )
+
+    @property
+    def current(self) -> bool:
+        """The metrics on screen were made with the prompt, taxonomy, model and gold rows as they are now."""
+        return self.ran is not None and not files.changed(self.ran)
 
     def on_mount(self) -> None:
         if not self.ready:
@@ -695,6 +727,18 @@ class TuneScreen(Screen):
         self.note = ""
         self.worker = self.run_worker(self.run_dev(), exclusive=True)
 
+    def action_rerun(self) -> None:
+        """r: classify the dev set again with the files as they are now (cached items are free)."""
+        if not self.ready or self.running or self.stopped:
+            return
+        rows = [r for r in files.read_gold() if r.split == "dev" and r.labels]
+        if [(r.id, r.labels) for r in rows] != [(r.id, r.labels) for r in self.rows]:
+            # other rows than the results on screen were made with: those results go
+            self.rows = rows
+            self.metrics, self.predicted = None, []
+            self.errors, self.reasoning = {}, {}
+        self.rerun()
+
     def action_start(self) -> None:
         if self.stopped:
             self.rerun()  # finished items come back from the classifier cache
@@ -717,6 +761,7 @@ class TuneScreen(Screen):
         )
         start = time.monotonic()
         finished = completed = False
+        snapshot = files.current_inputs("dev_done")
         indicator.set_button("stop")
         indicator.set_progress(0, total, detail=detail)
         self.show()
@@ -746,6 +791,7 @@ class TuneScreen(Screen):
                 files.all_labels(self.taxonomy),
             )
             self.history.append(self.target())
+            self.ran = snapshot
             completed = True
         except Exception as e:  # noqa: BLE001  auth/network errors must not kill the app
             finished = True  # failed, not stopped: the panels show again
@@ -775,6 +821,7 @@ class TuneScreen(Screen):
     def show(self) -> None:
         m = self.metrics
         busy = self.running or self.stopped
+        self.query_one(StageBanner).refresh_text()
         for id_ in ("metrics-panel", "body", "controls"):
             self.query_one(f"#{id_}").display = not busy
         self.query_one(RunIndicator).display = busy
@@ -828,8 +875,9 @@ class TuneScreen(Screen):
             idle and m and m.disagreements
         )
         self.query_one("#edit-prompt", Button).disabled = not (not busy and m)
+        self.query_one("#rerun", Button).disabled = busy
         done = self.query_one("#done", Button)
-        done.disabled = busy or m is None
+        done.disabled = busy or m is None or not self.current
         done.variant = "success" if self.met() else "default"
         self.refresh_bindings()
 
@@ -884,6 +932,8 @@ class TuneScreen(Screen):
             self.action_propose()
         elif id_ == "edit-prompt":
             self.action_edit_prompt()
+        elif id_ == "rerun":
+            self.action_rerun()
         elif id_ == "done":
             self.action_done()
         elif "Stop" in str(event.button.label):
@@ -979,7 +1029,13 @@ class TuneScreen(Screen):
         self.rerun()
 
     def action_done(self) -> None:
-        if not self.ready or self.running or self.stopped or not self.metrics:
+        if (
+            not self.ready
+            or self.running
+            or self.stopped
+            or not self.metrics
+            or not self.current
+        ):
             return
         goto = lambda: self.app.goto_stage(self.app.stage + 1)  # ty: ignore[unresolved-attribute]
         score = f"dev {self.config.target_metric} {self.target():.3f}"

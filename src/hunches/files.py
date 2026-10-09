@@ -673,6 +673,14 @@ def stage_status() -> dict[int, tuple[Status, str]]:
     return status
 
 
+def embedding_change() -> tuple[str, str] | None:
+    """(embedding model now, the one the candidates were built with) when they differ, else None.
+    A candidates.meta.json that records no model (an old project) counts as unchanged."""
+    built = json.loads(read_text("candidates.meta.json") or "{}").get("embedding_model")
+    now = components()["embedding_model"]
+    return (now, built) if built and built != now else None
+
+
 STAGE_NAMES = [
     "Brief and seeds",
     "Search",

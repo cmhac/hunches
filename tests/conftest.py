@@ -140,3 +140,12 @@ def pytest_collection_modifyitems(items):
             sources[path] = "run_test(" in path.read_text()
         if sources[path]:
             item.add_marker(pytest.mark.ui)
+
+
+@pytest.fixture(autouse=True)
+def fresh_status(monkeypatch):
+    """The rail and the stage banners reuse `stage_status` for half a second; tests that edit files
+    and look at the screen straight away need every look to be a fresh one."""
+    import hunches.app
+
+    monkeypatch.setattr(hunches.app, "STATUS_AGE", 0, raising=False)

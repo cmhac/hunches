@@ -520,3 +520,55 @@ async def test_f3_opens_settings_from_a_stage_and_saving_reloads_the_stage(
         assert app.screen is not stage_screen  # rebuilt with the new config
         assert len(app.screen_stack) == 2
     os.chdir(tmp_path)
+
+
+async def test_saving_a_new_embedding_model_on_a_project_with_candidates_says_so_in_one_line(
+    tmp_path, monkeypatch
+):
+    import json
+
+    project_in(tmp_path, monkeypatch, **settings_config())
+    files.write_jsonl(
+        "candidates.jsonl",
+        [{"id": "c1", "text": "t", "max_similarity": 0.9, "best_seed": "x"}],
+    )
+    files.write_text(
+        "candidates.meta.json",
+        json.dumps(
+            {"seeds_digest": "d", "embedding_model": "openai:text-embedding-3-small"}
+        ),
+    )
+    other = make_corpus(tmp_path / "other", "openai:text-embedding-3-large")
+    app = Host()
+    notes = []
+    app.notify = lambda message, **kw: notes.append(message)  # ty: ignore[invalid-assignment]
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#corpus", Input).value = str(other)
+        await pilot.pause()
+        await save_and_confirm(app, pilot)
+    assert notes == [
+        (
+            "Embedding model changed to openai:text-embedding-3-large; the candidates were "
+            "built with openai:text-embedding-3-small. Run the search again (stage 2); gold "
+            "rows may no longer be in the pool."
+        )
+    ]
+
+
+async def test_saving_without_an_embedding_change_or_candidates_adds_no_note(
+    tmp_path, monkeypatch
+):
+    project_in(tmp_path, monkeypatch, **settings_config())
+    other = make_corpus(tmp_path / "other", "openai:text-embedding-3-large")
+    app = Host()
+    notes = []
+    app.notify = lambda message, **kw: notes.append(message)  # ty: ignore[invalid-assignment]
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#corpus", Input).value = str(other)
+        await pilot.pause()
+        await save_and_confirm(
+            app, pilot
+        )  # no candidates yet: nothing was built with the old model
+    assert notes == []

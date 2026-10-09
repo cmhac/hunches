@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -362,6 +363,7 @@ async def test_controls_mirror_actions_and_enabled_states():
             "score-up": "+",
             "propose": "Propose edit  e",
             "edit-prompt": "Edit prompt  o",
+            "rerun": "Re-run  r",
             "done": "Done  F2",
         }
         assert str(screen.query_one("#score", Static).render()) == "0.90"
@@ -1500,3 +1502,118 @@ async def test_an_outside_edit_of_the_prompt_is_followed_and_nothing_is_re_run(
         assert screen.prompt == "Classify. Edited in an editor."
         assert len(calls) == 8 and len(assistant.prompts) == before
         assert len(app.notices()) == 1
+
+
+# ---- spec 004 task 09: r re-runs the dev set; Done waits for a run that is current ----------
+
+
+async def test_r_and_the_rerun_button_run_the_dev_set_again_from_the_cache():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)  # the mount run failed (no classifier)
+        screen.rerun()
+        await settle(app, pilot)
+        assert len(calls) == 8 and len(screen.history) == 1
+        button = screen.query_one("#rerun", Button)
+        assert str(button.label) == "Re-run  r" and not button.disabled
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert len(screen.history) == 2  # it ran again
+        assert len(calls) == 8  # unchanged inputs: every item came from the cache
+        await pilot.click("#rerun", offset=(2, 0))
+        await settle(app, pilot)
+        assert len(screen.history) == 3 and len(calls) == 8
+
+
+async def test_r_does_nothing_while_the_dev_set_is_running():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)
+        before = (screen.worker, len(screen.history))
+        screen.running = True  # a run is in progress
+        screen.action_rerun()
+        screen.running = False
+        assert (screen.worker, len(screen.history)) == before  # nothing was started
+
+
+async def test_done_is_disabled_until_a_run_is_current_after_an_outside_edit():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)
+        screen.rerun()
+        await settle(app, pilot)
+        done = screen.query_one("#done", Button)
+        assert not done.disabled
+        files.write_text("prompt.md", "Classify. BETTER!")  # edited in an editor
+        app.check_history()
+        await settle(app, pilot)
+        assert done.disabled and screen.prompt == "Classify. BETTER!"
+        banner = screen.query_one("#stale-banner")
+        assert banner.display
+        assert str(banner.render()) == (
+            "STALE: prompt changed. These results are from before the change. "
+            "Press r to re-run, then approve again."
+        )
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app.stage == 5 and not files.read_state().dev_done  # F2 did nothing
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert len(calls) == 16  # the new prompt: every item is a live call
+        assert not done.disabled and not banner.display
+        await pilot.press("f2")
+        await pilot.pause()
+        assert files.read_state().dev_done and app.stage == 6
+
+
+async def test_removing_gold_through_the_assistant_makes_the_run_not_current(assistant):
+    assistant.tools["remove"] = removal_args("0", "1")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        assert len(calls) == 8 and len(screen.rows) == 8
+        done = screen.query_one("#done", Button)
+        assert not done.disabled
+        box = screen.query_one("#chat-input")
+        box.focus()
+        box.value = "remove"
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.click("#yes")
+        await quiesce(app, pilot)
+        assert (
+            done.disabled and len(screen.rows) == 8
+        )  # the table shows the run that was made
+        banner = screen.query_one("#stale-banner")
+        assert str(banner.render()).startswith("STALE: gold rows changed. ")
+        screen.set_focus(screen.query_one("#dis"))
+        await pilot.press("r")
+        await quiesce(app, pilot)
+        assert [r.id for r in screen.rows] == ["2", "3", "4", "5", "6", "7"]
+        assert len(calls) == 8  # the six remaining rows were all cached
+        assert not done.disabled and not banner.display
+
+
+async def test_a_prompt_edited_while_the_dev_set_runs_leaves_the_results_not_current(
+    monkeypatch,
+):
+    class EditsOnFirstCall(list):
+        def append(self, item):
+            super().append(item)
+            if len(self) == 1:  # an editor saves prompt.md mid-run
+                files.write_text("prompt.md", "Classify. BETTER!")
+
+    monkeypatch.setattr(sys.modules[__name__], "calls", EditsOnFirstCall())
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)
+        screen.rerun()
+        await settle(app, pilot)
+        assert screen.metrics is not None
+        assert not screen.current  # the run began under the old prompt
+        assert screen.query_one("#done", Button).disabled

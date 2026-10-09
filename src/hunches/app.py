@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -84,6 +85,38 @@ def key_button(label: str, key: str, **kwargs) -> Button:
     return Button(f"{label}  {key}", **kwargs)
 
 
+class StageBanner(Static):
+    """A full-width banner whose text a screen supplies (empty hides it).
+
+    It asks again twice a second, so it follows undo, redo, outside edits and approvals without the
+    screen wiring each of them. `warning` is the amber notice, otherwise the red STALE banner.
+    """
+
+    def __init__(
+        self, text: Callable[[], str], warning: bool = False, **kwargs
+    ) -> None:
+        super().__init__(
+            "",
+            classes=f"banner {'-warning' if warning else '-stale'}",
+            markup=False,
+            **kwargs,
+        )
+        self.text = text
+        self.display = False
+
+    def on_mount(self) -> None:
+        self.refresh_text()
+        self.set_interval(0.5, self.refresh_text)
+
+    def refresh_text(self) -> None:
+        say(self, self.text())
+
+
+def plan_hint() -> str:
+    """The sentence that points at F9, while there is a plan to show."""
+    return " F9 shows the redo plan." if marked(current_status()) else ""
+
+
 RAIL_WIDTH = 26
 RAIL_MIN = 100  # terminal columns from which the header becomes the left rail
 DESTINATIONS = [
@@ -106,7 +139,41 @@ RAIL_ACTIONS = {
     "projects",
     "system_settings",
     "history",
+    "redo_plan",
 }
+MARKS = {
+    "stale": "↻",
+    "incomplete": "◐",
+}  # the stage statuses that get a mark; never colour alone
+STATUS_AGE = (
+    0.5  # seconds a stage_status result is reused: the rail and banners poll it
+)
+StageStatus = dict[int, tuple[files.Status, str]]
+_STATUS: tuple[Path, float, StageStatus] | None = None
+
+
+def current_status(fresh: bool = False) -> StageStatus:
+    """`files.stage_status()`, reused for STATUS_AGE seconds unless `fresh` or the project changed.
+
+    The rail and the stage banners ask several times a second; the status reads a handful of small
+    files and scans results.jsonl once per change, which on a big project is worth not repeating.
+    """
+    global _STATUS
+    now = time.monotonic()
+    here = Path.cwd()
+    last = _STATUS
+    if fresh or last is None or last[0] != here or now - last[1] > STATUS_AGE:
+        try:
+            last = _STATUS = (here, now, files.stage_status())
+        except (OSError, ValueError):  # a half-written file; look again next time
+            if last is None or last[0] != here:
+                return {n: ("not_started", "") for n in range(1, 10)}
+    return last[2]
+
+
+def marked(status: StageStatus) -> list[int]:
+    """The stages with a stale or incomplete mark, in order."""
+    return [n for n, (kind, _) in status.items() if kind in MARKS]
 
 
 def wide(app) -> bool:
@@ -157,6 +224,16 @@ class StatusHeader(Static):
         self.set_class(wide(self.app), "-rail")
         self.refresh_cost()
 
+    def follow(self, status: StageStatus) -> None:
+        """Tooltip with the reasons, and the footer when the set of marked stages changed."""
+        tip = "\n".join(
+            f"{n} {files.STAGE_NAMES[n - 1]} · {status[n][0].upper()}: {status[n][1]}"
+            for n in marked(status)
+        )
+        if tip != (self.tooltip or ""):
+            self.tooltip = tip or None
+            self.screen.refresh_bindings()  # F9 appears and disappears with the marks
+
     def refresh_rail(self, stage: int) -> None:
         """Rail markup: stages and destinations at the top, cost at the bottom."""
         dollars, unknown = cost.total()
@@ -190,13 +267,30 @@ class StatusHeader(Static):
         if len(project) > RAIL_WIDTH - 3:
             project = project[: RAIL_WIDTH - 4] + "…"
         lines = [plain("hunches", "b $primary"), plain(project, "$text-muted"), ""]
+        status = current_status()
         for num, label, _ in STAGES:
+            mark = MARKS.get(status[num][0])
             if num == current:
-                lines.append(row("●", "$primary", label, "b #EEF1F5", on=True))
+                lines.append(
+                    row(
+                        mark or "●",
+                        "$warning" if mark else "$primary",
+                        label,
+                        "b #EEF1F5",
+                        on=True,
+                    )
+                )
+            elif mark:
+                lines.append(row(mark, "$warning", label, "$warning"))
             elif num < stage:
                 lines.append(row("✓", "$success", label, "$text-muted"))
             else:
                 lines.append(row("·", "$text-disabled", label, "$text-disabled"))
+        kinds = [k for k in MARKS if any(status[n][0] == k for n in status)]
+        if kinds:
+            lines.append(
+                plain("  ".join(f"{MARKS[k]} {k}" for k in kinds), "$text-muted")
+            )
         lines.append("")
         for label, key in DESTINATIONS:
             if label == here:
@@ -209,6 +303,8 @@ class StatusHeader(Static):
                     else "$text-muted"
                 )
                 lines.append(row(" ", tone, label, tone, key=key))
+        if kinds:
+            lines.append(row(" ", "$warning", "↻ Redo plan", "$warning", key="F9"))
         bottom = [
             plain("n/p stage · q quit", "$text-disabled"),
             "",
@@ -234,21 +330,27 @@ class StatusHeader(Static):
                 self.screen, "stage_name", "Setup"
             ),  # non-stage screens name themselves
         )
+        status = current_status()
+        self.follow(status)
         if self.has_class("-rail"):
             return self.refresh_rail(stage)
         project = Path.cwd().name
         if len(project) > 16:
             project = project[:15] + "…"
         stepper = "".join(
-            "[$text-disabled]○[/]"
+            f"[$warning]{MARKS[status[num][0]]}[/]"
+            if status[num][0] in MARKS
+            else "[$text-disabled]○[/]"
             if num > stage
             else "[$primary]◉[/]"
             if num == stage
             else "[$text-muted]●[/]"
             for num, _, _ in STAGES
         )
+        kind = status[stage][0] if stage else ""
+        badge = f" [b reverse $warning] {kind.upper()} [/]" if kind in MARKS else ""
 
-        def left(with_name: bool) -> tuple[str, int]:
+        def left(with_name: bool, with_badge: bool = True) -> tuple[str, int]:
             """Markup and plain length of everything left of the cost."""
             text = f"[b $primary]hunches[/]  [#EEF1F5]{escape(project)}[/]  {stepper}"
             width = len(f"hunches  {project}  ") + len(STAGES)
@@ -258,6 +360,9 @@ class StatusHeader(Static):
                 if with_name:
                     text += f" {name}"
                     width += 1 + len(name)
+                if badge and with_badge:
+                    text += badge
+                    width += 3 + len(kind)
             elif with_name:
                 text += f"  {name}"
                 width += 2 + len(name)
@@ -272,9 +377,12 @@ class StatusHeader(Static):
         else:
             right_plain = f"cost ${dollars:.4f}"
         room = self.size.width - 2  # padding; 0 before the first layout
+        # the stage name goes first, then (an unknown price can be cut to 24 cells) the badge
         markup, width = left(True)
         if room and width + 2 + len(right_plain) > room:
-            markup, width = left(False)  # drop the stage name first
+            markup, width = left(False)
+        if room and width + 2 + (24 if unknown else len(right_plain)) > room:
+            markup, width = left(False, False)
         if unknown and room and width + 2 + len(right_plain) > room:
             right_plain = right_plain[: max(24, room - width - 2) - 2] + "… "
         if unknown:
@@ -650,6 +758,7 @@ from hunches.screens.gold import GoldScreen
 from hunches.screens.history import ExternalNotice, HistoryScreen
 from hunches.screens.project_settings import ProjectSettingsScreen
 from hunches.screens.projects import ProjectsScreen
+from hunches.screens.redo_plan import RedoPlanScreen
 from hunches.screens.run import RunScreen
 from hunches.screens.search import SearchScreen
 from hunches.screens.system import RecommendationModal, SystemSettingsScreen
@@ -682,6 +791,7 @@ class HunchesApp(App):
         ("f4", "projects", "Projects"),
         ("f5", "system_settings", "System settings"),
         ("f8", "history", "History"),
+        ("f9", "redo_plan", "Redo plan"),
         # the screens bind F6 and F7 themselves; this one undoes an outside edit announced on any other screen
         Binding("f6", "undo_notice", "Undo", show=False),
         Binding("escape", "dismiss_notice", "Dismiss", show=False),
@@ -689,6 +799,9 @@ class HunchesApp(App):
 
     stage = 0  # 1-9 once running
     stage_shown = False
+    plan_active = False  # the user left the Redo plan with "Go to": reopen it after each re-approval
+    plan_stages: tuple[int, ...] = ()  # the stages the plan listed then
+    plan_done: tuple[int, ...] = ()  # of those, the ones approved again since
     seen = 0  # the highest history seq already checked for outside edits
 
     @property
@@ -784,6 +897,22 @@ class HunchesApp(App):
         new = [e for e in history.entries() if e["seq"] > self.seen]
         self.seen = max([self.seen, *(e["seq"] for e in new)])
         screen = self.base_screen()
+        again = [
+            e["stage"]
+            for e in new
+            if e["kind"] == "approval" and e["stage"] in self.plan_stages
+        ]
+        if self.plan_active and not again and not marked(current_status(fresh=True)):
+            self.plan_active, self.plan_done = (
+                False,
+                (),
+            )  # nothing left to redo: the plan is over
+        if self.plan_active and again:
+            self.plan_done = (
+                *self.plan_done,
+                *(n for n in again if n not in self.plan_done),
+            )
+            self.open_plan()
         for entry in new:
             if entry["kind"] == "edit" and entry["source"] == "external":
                 if moved := getattr(screen, "history_changed", None):
@@ -800,6 +929,26 @@ class HunchesApp(App):
     def action_dismiss_notice(self) -> None:
         for notice in self.notices():
             notice.remove()
+
+    def action_redo_plan(self) -> None:
+        self.open_plan()
+
+    def open_plan(self) -> None:
+        if not isinstance(self.screen, RedoPlanScreen):
+            self.push_screen(
+                RedoPlanScreen(list(self.plan_done) if self.plan_active else []),
+                self.plan_closed,
+            )
+
+    def plan_closed(self, stage: int | None) -> None:
+        """Close ends the plan; "Go to" starts (or continues) it and opens that stage."""
+        if stage is None:
+            self.plan_active, self.plan_done = False, ()
+            return
+        if not self.plan_active:
+            self.plan_active, self.plan_done = True, ()
+        self.plan_stages = tuple(marked(current_status(fresh=True)))
+        self.goto_stage(stage)
 
     def action_history(self) -> None:
         """The History modal; not while an editor is open (its draft is not in the history)."""
@@ -843,6 +992,13 @@ class HunchesApp(App):
             notices = self.notices()
             return bool(notices) and (
                 action == "dismiss_notice" or notices[0].can_undo()
+            )
+        if action == "redo_plan":  # stage screens only, and only with something to redo
+            return (
+                bool(self.stage)
+                and not isinstance(self.screen, ModalScreen)
+                and not hasattr(self.screen, "stage_name")
+                and bool(marked(current_status()))
             )
         if (
             action == "goto"

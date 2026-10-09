@@ -10,7 +10,17 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Static
 
 from hunches import cost, files, metrics
-from hunches.app import AppFooter, StatusHeader, key_button, panel, retitle, say
+from hunches.app import (
+    AppFooter,
+    StageBanner,
+    StatusHeader,
+    current_status,
+    key_button,
+    panel,
+    plan_hint,
+    retitle,
+    say,
+)
 from hunches.classifier import classify_many
 from hunches.screens import report
 from hunches.screens.gold import GoldScreen
@@ -71,7 +81,7 @@ class FinalScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
-        yield Static("", id="banner", classes="banner -stale", markup=False)
+        yield StageBanner(self.banner_text, id="banner")
         with panel(Vertical(id="metrics-panel"), "test set · held out"):
             yield Static(
                 "Tuning against test disagreements weakens this held-out result.",
@@ -113,6 +123,19 @@ class FinalScreen(Screen):
 
     def stale(self) -> bool:
         return self.result is not None and bool(files.result_changes(self.result))
+
+    def banner_text(self) -> str:
+        if self.running or self.stopped or self.result is None:
+            return ""
+        if self.stale():
+            return "STALE: prompt.md or classifier model changed since this result was computed. Press r to re-run."
+        kind, reason = current_status()[6]
+        if kind != "stale":
+            return ""
+        return (
+            f"STALE: {reason}. The result below is current. Accept again with F2."
+            + plan_hint()
+        )
 
     def action_rerun(self) -> None:
         if self.running:
@@ -213,16 +236,12 @@ class FinalScreen(Screen):
 
     def show(self) -> None:
         r = self.result
-        banner = self.query_one("#banner", Static)
         busy = self.running or self.stopped
-        banner.display = self.stale() and not busy
+        self.query_one(StageBanner).refresh_text()
         self.query_one("#metrics-panel").display = not busy
         self.query_one("#body").display = not busy
         self.query_one(RunIndicator).display = busy
         self.query_one("#accept", Button).disabled = busy or r is None or self.stale()
-        banner.update(
-            "STALE: prompt.md or classifier model changed since this result was computed. Press r to re-run."
-        )
         names = [lab.name for lab in self.taxonomy.labels]
         retitle(
             self.query_one("#metrics-panel"),
