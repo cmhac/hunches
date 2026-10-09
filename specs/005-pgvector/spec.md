@@ -169,6 +169,17 @@ PostgreSQL 16.15 (Ubuntu package) in the build container. pgvector **0.6.0** (ap
 | Speed | 0.6.0, 300,000 × 64 table that fits in memory: S = 2: 0.2 s vs 0.1 s per-seed loop; S = 10: 0.5 s vs 0.4 s; S = 30: 1.2 s vs 1.3 s. No speed-up when cached. The I/O saving on a table larger than memory was **not** measured. |
 | LATERAL semantics, CTE inlining | PostgreSQL [LATERAL docs](https://www.postgresql.org/docs/current/queries-table-expressions.html) (evaluated once per row of the referenced table, matching `loops`); [WITH docs](https://www.postgresql.org/docs/current/queries-with.html) (`MATERIALIZED`). |
 
+### Verified in task 02 (connection layer, 2026-10-09)
+
+psycopg 3.3.6, boto3 1.43.108, PostgreSQL 16 (pgvector 0.6.0, local socket).
+
+- **Read-only:** `conn.read_only = True` (property, psycopg docs: "the read-only state of the new transactions"; set before the first statement) makes the implicit `BEGIN` read-only. `show transaction_read_only` is `on`, `CREATE TABLE` raises `ReadOnlySqlTransaction`, `CREATE EXTENSION` raises `cannot execute CREATE EXTENSION in a read-only transaction`.
+- **One transaction:** the connection keeps `autocommit=False`, so psycopg opens one transaction at the first statement and holds it until `commit`/`rollback`/close; `SET LOCAL` therefore lasts the whole search. `conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ` is set at connect (observed `show transaction_isolation` = `repeatable read`). `prepare_threshold=None` is a `psycopg.connect` keyword.
+- **Timeout:** `SET LOCAL` cannot take a bound parameter under psycopg 3's server-side binding, so the statement is `SET LOCAL statement_timeout = <int>` in milliseconds (`pg_statement_timeout_s * 1000`; `0` stays `0`).
+- **IAM:** `boto3.Session(profile_name=...).client("rds", region_name=...).generate_db_auth_token(DBHostname, Port, DBUsername, Region=None)` (signature read from the installed client). The token goes to `psycopg.connect` as the `password` keyword (keywords override the URL's parameters); `sslmode=require` is passed as a keyword only when the URL has no `sslmode`. botocore errors (`BotoCoreError`, `ClientError`) become `AWS: <message>`.
+- **Dimension mismatch text** (used to attach the `Fix:` hint): `different vector dimensions 2 and 3` (`DataException`), and `different halfvec dimensions 2 and 3` for halfvec; the hint matches `different \w+ dimensions`.
+- Not tested: a real IAM token, TLS, a pooler. The auth-failure hint (`Check: ...`) is attached when the connection is `rds_iam` and the message contains `authentication failed` (the usual Postgres wording; the exact text AWS returns for a bad token is unverified).
+
 **Not verified:** any managed service; a transaction-mode pooler; TLS; tables larger than memory (the I/O saving, and the temp-file spill at scale); `index` mode's `max_scan_tuples` plateau (why raising it to 1,000,000 added nothing; maybe `hnsw.scan_mem_multiplier`, untested); IVFFlat; partitioned tables and views as `pg_table` (the id join in step 2 should work, untested); integer and uuid id columns; pgvector versions other than 0.6.0 and 0.8.1.
 
 ## Tables with no index (very large, rarely queried)
