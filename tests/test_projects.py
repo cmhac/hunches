@@ -455,3 +455,51 @@ def test_status_pgvector_is_ok_but_not_checked(tmp_path):
         tmp_path, corpus=False, backend="pgvector", pg_table="public.docs"
     )
     assert system.project_status(project) == ("OK (pgvector not checked)", "")
+
+
+async def test_pgvector_row_shows_the_backend_and_the_table_never_the_host(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HUNCHES_PG_URL", "postgresql://u:pw@db.example.com:5432/app")
+    project = make_project(
+        tmp_path,
+        "pg",
+        corpus=False,
+        backend="pgvector",
+        pg_table="public.docs",
+        pg_url_var="HUNCHES_PG_URL",
+    )
+    register(project)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        [row] = rows(app.screen.query_one(DataTable))
+        assert row[:4] == ["pg", "pgvector", "public.docs", "OK (pgvector not checked)"]
+        assert not any("example.com" in cell or "pw" in cell for cell in row)
+
+
+async def test_opening_a_pgvector_project_makes_no_connection(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    fake = types.ModuleType("psycopg")
+    fake.connect = lambda *a, **kw: calls.append((a, kw))  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    monkeypatch.chdir(tmp_path)
+    project = make_project(
+        tmp_path, "pg", corpus=False, backend="pgvector", pg_table="docs"
+    )
+    register(project)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.stage == 1
+        assert Path.cwd() == project.resolve()
+    assert calls == []
+    import os
+
+    os.chdir(tmp_path)

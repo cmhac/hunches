@@ -854,7 +854,7 @@ class HunchesApp(App):
         """Switch to the project at `path`. The only place that changes the working directory."""
         path = Path(path)
         status, detail = system.project_status(path)
-        if status not in ("OK", "OK (s3 not checked)"):
+        if status not in ("OK", "OK (s3 not checked)", "OK (pgvector not checked)"):
             self.notify(f"Cannot open {path.name}: {status} {detail}", severity="error")
             return
         if any(w.is_running for w in self.workers):

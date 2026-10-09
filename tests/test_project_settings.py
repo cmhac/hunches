@@ -572,3 +572,281 @@ async def test_saving_without_an_embedding_change_or_candidates_adds_no_note(
             app, pilot
         )  # no candidates yet: nothing was built with the old model
     assert notes == []
+
+
+# --- pgvector backend (005/11) ---
+
+EMBEDDING = "openai:text-embedding-3-small"
+PG_URL = "postgresql://u:s3cr3t-pw-91@db.example.com:5432/app"
+
+
+def pg_project(tmp_path, monkeypatch, **extra):
+    project = tmp_path / "pgproj"
+    (project / ".hunches").mkdir(parents=True)
+    monkeypatch.chdir(project)
+    fields: dict = {
+        "pg_table": "public.docs",
+        "pg_text_column": "body",
+        "pg_url_var": "MY_PG",
+        "pg_search": "index",
+        "pg_statement_timeout_s": 30,
+    } | extra
+    files.write_config(
+        files.Config(
+            backend="pgvector",
+            embedding_model=EMBEDDING,
+            assistant_model=ASSISTANT,
+            classifier_model=CLASSIFIER,
+            **fields,
+        )
+    )
+    return project
+
+
+def value(screen, id_):
+    return screen.query_one(f"#{id_}", Input).value
+
+
+async def test_pgvector_settings_open_with_the_stored_values(tmp_path, monkeypatch):
+    pg_project(
+        tmp_path,
+        monkeypatch,
+        pg_auth="rds_iam",
+        pg_aws_region="eu-west-1",
+        pg_aws_profile="dev",
+    )
+    monkeypatch.setenv("MY_PG", PG_URL)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert screen.query_one("#backend", Select).value == "pgvector"
+        assert screen.query_one("#pg").display
+        assert not screen.query_one("#s3").display
+        assert not screen.query_one("#local").display
+        assert [
+            value(screen, i)
+            for i in (
+                "pg-table",
+                "pg-id",
+                "pg-text",
+                "pg-vector",
+                "pg-url-var",
+                "pg-timeout",
+                "pg-region",
+                "pg-profile",
+            )
+        ] == ["public.docs", "", "body", "", "MY_PG", "30", "eu-west-1", "dev"]
+        assert screen.query_one("#pg-search", Select).value == "index"
+        assert screen.query_one("#pg-auth", Select).value == "rds_iam"
+        assert screen.query_one("#pg-region-row").display
+        assert str(screen.query_one("#pg-url-status", Static).render()) == "env"
+        assert EMBEDDING in text_of(screen)
+        screen.query_one("#save", Button).press()  # untouched: nothing to confirm
+        await pilot.pause()
+        assert not isinstance(app.screen, (ProjectSettingsScreen, ConfirmScreen))
+
+
+@pytest.mark.parametrize(
+    ("id_", "new"),
+    [("pg-table", "public.other"), ("pg-text", "content"), ("pg-vector", "vec")],
+)
+async def test_changing_table_or_columns_confirms_and_a_decline_writes_nothing(
+    tmp_path, monkeypatch, id_, new
+):
+    project = pg_project(tmp_path, monkeypatch)
+    before = (project / ".hunches" / "config.toml").read_bytes()
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one(f"#{id_}", Input).value = new
+        question = await save_and_confirm(app, pilot, approve=False)
+        assert "candidates.jsonl" in question and "re-run Search" in question
+        assert isinstance(app.screen, ProjectSettingsScreen)
+    assert (project / ".hunches" / "config.toml").read_bytes() == before
+
+
+async def test_approving_a_table_change_saves_it(tmp_path, monkeypatch):
+    project = pg_project(tmp_path, monkeypatch)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#pg-table", Input).value = "public.other"
+        await save_and_confirm(app, pilot)
+    saved = files.read_config(project)
+    assert (saved.pg_table, saved.pg_text_column) == ("public.other", "body")
+    assert (saved.pg_search, saved.pg_statement_timeout_s) == ("index", 30)
+
+
+async def test_changing_the_embedding_model_confirms(tmp_path, monkeypatch):
+    project = pg_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    new = "openai:text-embedding-3-large"
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#pick-embedding", Button).press()
+        await pilot.pause()
+        picker = app.screen
+        assert isinstance(picker, ModelPicker)
+        picker.query_one(OptionList).highlighted = [r.model for r in picker.rows].index(
+            new
+        )
+        await pilot.press("enter")
+        await pilot.pause()
+        question = await save_and_confirm(app, pilot)
+        assert "candidates.jsonl" in question
+    assert files.read_config(project).embedding_model == new
+
+
+async def test_pgvector_requires_table_and_a_whole_number_timeout(
+    tmp_path, monkeypatch
+):
+    project = pg_project(tmp_path, monkeypatch)
+    before = (project / ".hunches" / "config.toml").read_bytes()
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#pg-table", Input).value = ""
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert "Required: table" in str(app.screen.query_one("#error", Static).render())
+        app.screen.query_one("#pg-table", Input).value = "t"
+        app.screen.query_one("#pg-timeout", Input).value = "soon"
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert "timeout must be whole seconds" in str(
+            app.screen.query_one("#error", Static).render()
+        )
+        assert isinstance(app.screen, ProjectSettingsScreen)
+    assert (project / ".hunches" / "config.toml").read_bytes() == before
+
+
+async def test_s3_to_pgvector_and_back_nulls_the_other_backends_fields(
+    tmp_path, monkeypatch
+):
+    project = s3_project(tmp_path, monkeypatch)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#backend", Select).value = "pgvector"
+        await pilot.pause()
+        assert screen.query_one("#pg").display and not screen.query_one("#s3").display
+        assert EMBEDDING in text_of(screen)  # the model carries over
+        screen.query_one("#pg-table", Input).value = "docs"
+        screen.query_one("#pg-timeout", Input).value = "0"
+        await save_and_confirm(app, pilot)
+    assert (project / ".hunches" / "config.toml").read_text() == (
+        'backend = "pgvector"\n'
+        f'embedding_model = "{EMBEDDING}"\n'
+        'pg_table = "docs"\n'
+        "pg_statement_timeout_s = 0\n"
+        f'assistant_model = "{ASSISTANT}"\n'
+        f'classifier_model = "{CLASSIFIER}"\n'
+        'target_metric = "accuracy"\n'
+        "target_score = 0.9\n"
+    )
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#backend", Select).value = "s3"
+        await pilot.pause()
+        screen.query_one("#bucket", Input).value = "b3"
+        screen.query_one("#index", Input).value = "i3"
+        await save_and_confirm(app, pilot)
+    assert (project / ".hunches" / "config.toml").read_text() == (
+        'backend = "s3"\n'
+        's3_bucket = "b3"\n'
+        's3_index = "i3"\n'
+        f'embedding_model = "{EMBEDDING}"\n'
+        f'assistant_model = "{ASSISTANT}"\n'
+        f'classifier_model = "{CLASSIFIER}"\n'
+        'target_metric = "accuracy"\n'
+        "target_score = 0.9\n"
+    )
+
+
+async def test_pgvector_to_local_nulls_the_pg_fields(tmp_path, monkeypatch):
+    project = pg_project(tmp_path, monkeypatch, pg_auth="rds_iam")
+    make_corpus(project, "openai:text-embedding-3-large")
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#backend", Select).value = "local"
+        await pilot.pause()
+        app.screen.query_one("#corpus", Input).value = "corpus"
+        await pilot.pause()
+        await save_and_confirm(app, pilot)
+    assert (project / ".hunches" / "config.toml").read_text() == (
+        'backend = "local"\n'
+        'corpus_dir = "corpus"\n'
+        'embedding_model = "openai:text-embedding-3-large"\n'
+        f'assistant_model = "{ASSISTANT}"\n'
+        f'classifier_model = "{CLASSIFIER}"\n'
+        'target_metric = "accuracy"\n'
+        "target_score = 0.9\n"
+    )
+
+
+async def test_check_store_works_from_settings_with_the_stub(tmp_path, monkeypatch):
+    from test_new_project import StubCheck, canned
+
+    from hunches import search
+
+    system.write_system(
+        system.System(provider="anthropic", assistant_model="a", classifier_model="c")
+    )
+    pg_project(tmp_path, monkeypatch)
+    stub = StubCheck(canned())
+    monkeypatch.setattr(search, "check_store", stub)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#check-pg", Button).press()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = str(app.screen.query_one("#pg-status", Static).render())
+        assert "pgvector 0.8.1 in schema extensions" in text
+        assert "column type vector, dimension 3" in text
+    [config] = stub.configs
+    assert (config.backend, config.pg_table, config.pg_text_column) == (
+        "pgvector",
+        "public.docs",
+        "body",
+    )
+    assert (config.pg_search, config.embedding_model) == ("index", EMBEDDING)
+
+
+async def test_save_url_from_settings_goes_to_the_keyring_only(tmp_path, monkeypatch):
+    from hunches import keys
+
+    project = pg_project(tmp_path, monkeypatch)
+    monkeypatch.delenv("MY_PG", raising=False)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert str(app.screen.query_one("#pg-url-status", Static).render()) == "missing"
+        app.screen.query_one("#pg-url", Input).value = PG_URL
+        app.screen.query_one("#save-url", Button).press()
+        await pilot.pause()
+        assert keys.resolve("MY_PG") == PG_URL
+        assert str(app.screen.query_one("#pg-url-status", Static).render()) == "keyring"
+    assert "s3cr3t" not in (project / ".hunches" / "config.toml").read_text()
+
+
+@pytest.mark.parametrize("auth", ["url", "rds_iam"])
+async def test_pgvector_fits_80x24_with_save_cancel_and_error_visible(
+    tmp_path, monkeypatch, auth
+):
+    pg_project(tmp_path, monkeypatch, pg_auth=auth)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#error", Static).update("Required: x")
+        for id_ in ("save", "cancel", "error"):
+            assert app.screen.query_one(f"#{id_}").region.bottom <= 23, id_
+        await pilot.click("#cancel")
+        await pilot.pause()
+        assert not isinstance(app.screen, ProjectSettingsScreen)

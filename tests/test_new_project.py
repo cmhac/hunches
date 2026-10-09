@@ -610,6 +610,30 @@ async def test_create_writes_only_pgvector_fields_and_registers(tmp_path, monkey
     assert [p.path for p in system.projects_by_recent()] == [str(project.resolve())]
 
 
+async def test_create_opens_the_pgvector_project_without_connecting(
+    tmp_path, monkeypatch
+):
+    import sys
+    import types
+
+    calls = []
+    fake = types.ModuleType("psycopg")
+    fake.connect = lambda *a, **kw: calls.append((a, kw))  # ty: ignore[unresolved-attribute]
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    project = tmp_path / "proj"
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        await pick_embedding(form, pilot)
+        await submit(app, pilot, location=project, **{"pg-table": "items"})
+        assert app.stage == 1
+        assert Path.cwd() == project.resolve()
+    assert calls == []
+    os.chdir(tmp_path)
+
+
 async def test_secret_never_reaches_a_file(tmp_path, monkeypatch):
     from hunches import keys
 

@@ -278,6 +278,22 @@ async def test_new_project_pgvector(size, auth):
 
 
 @pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("auth", ["url", "rds_iam"])
+async def test_project_settings_pgvector(size, auth):
+    from textual.widgets import Select
+
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.push_screen(ProjectSettingsScreen())
+        await pilot.pause()
+        app.screen.query_one("#backend", Select).value = "pgvector"
+        app.screen.query_one("#pg-auth", Select).value = auth
+        await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
 @pytest.mark.parametrize("name", MODALS)
 async def test_modals(size, name):
     app = HunchesApp()
