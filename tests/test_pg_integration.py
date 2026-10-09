@@ -46,7 +46,12 @@ def version_of(conn) -> tuple[int, ...]:
 @pytest.fixture(scope="module")
 def admin():
     with psycopg.connect(URL, autocommit=True) as conn:
-        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        # pytest-xdist runs one module-scoped fixture per worker; IF NOT EXISTS alone races
+        conn.execute("SELECT pg_advisory_lock(5005)")
+        try:
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(5005)")
         print(
             "\nserver:",
             conn.execute("SHOW server_version").fetchone()[0],
