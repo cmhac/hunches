@@ -43,13 +43,26 @@ Hence:
   SELECT {id}, {text}, 1 - ({vec} <=> %s::vector) AS sim
   FROM {table}
   WHERE {vec} IS NOT NULL            -- NULL vectors are skipped; local has no NULLs
+    AND 1 - ({vec} <=> %s::vector) >= %s   -- the floor, so only hits cross the wire
   ORDER BY {vec} <=> %s::vector
   LIMIT %s
   ```
-  and the floor is applied in Python on `sim` (not in SQL, so the filter cannot interact with the planner). Cost is a full scan per seed; for the corpus sizes where that is too slow the user switches to `index`.
+  With the index scans disabled the planner cannot use an index, so putting the floor in SQL is safe here and keeps the transfer to the hits. Cost is a full scan per seed (see "Tables with no index").
 - **`index`:** same query, but `SET LOCAL hnsw.iterative_scan = relaxed_order` (results may be slightly out of order; we re-sort client-side) and `SET LOCAL hnsw.max_scan_tuples = <PG_MAX_SCAN>`, with `WHERE 1 - (vec <=> q) >= floor` pushed into SQL so the scan continues until `LIMIT` or `max_scan_tuples`. Always shows: `WARNING: APPROXIMATE pgvector search; the index may hide hits above the floor. Switch to exact in Project settings for a complete pool.` (The 1000 upper bound of `ef_search` I remember is **not** in the README; do not hard-code it. Set only the parameters named here.)
 
 **Implementation must verify, on a real Postgres with pgvector, before this is trusted:** that `enable_indexscan = off` really yields a sequential scan on an HNSW-indexed table (`EXPLAIN`), that exact and local results agree on the same data, and the exact `SET LOCAL` names against the installed pgvector. These are marked "Needs a human" below because they need a database.
+
+## Tables with no index (very large, rarely queried)
+
+Supported, and it is the case `exact` mode is built for: it needs no index and never looks for one, so a table with no index at all works the same as an indexed one. Nothing in Check store treats a missing index as a problem in `exact` mode (it only warns in `index` mode, where an index is the whole point). What changes is cost, so the spec adds these:
+
+- **Say it is slow, honestly.** Each seed is one full scan of the table. With S seeds that is S scans. Check store shows the planner's row estimate and, in `exact` mode with no usable index, a plain note: `No index: each seed scans the whole table (~N rows).` Informational, not a warning; the user chose this.
+- **Progress per seed, and Stop works.** `candidates.generate` already loops per seed and reports progress; the Search screen must show `seed i of S` while a query is running and let the user cancel. Cancelling a worker thread blocked in a driver call does not interrupt the query, so on Stop the code calls `connection.cancel()` (psycopg's way to ask the server to cancel the running statement; **verify in the psycopg docs**) and closes the connection. Otherwise an abandoned multi-minute scan keeps running on the server.
+- **Server timeouts are the user's, not ours.** We do not override `statement_timeout`; an admin may have set one on purpose. If a scan hits it, the error shown is Postgres's own (`canceling statement due to statement timeout`) plus `Fix: raise statement_timeout for this role, or set pg_statement_timeout_s in config.toml`. Optional field `pg_statement_timeout_s` (default unset = the server's setting); when set, `SET LOCAL statement_timeout` is issued. Setting it to `0` means no limit.
+- **One scan for all seeds (optional optimisation, task 06).** The seeds are known up front (tens of short phrases), so the per-seed loop could be replaced for pgvector by one query that reads each row once and computes its distance to every seed (`CROSS JOIN (VALUES …)` or an array of query vectors), reading the table once instead of S times. For a large table that is read-bound this is roughly an S-fold saving, but it changes the shape of `search()` (today: one seed in, hits out) and `candidates.generate`, so it is a separate task, to be done only if a measured run on a real large table shows it is needed. The per-seed version ships first. **ask.**
+- **Memory.** `ORDER BY … LIMIT 10000` on an unindexed table is a bounded top-N sort, not a sort of the whole table; I have not measured it. The integration test should include a table large enough to see it, and note `work_mem` if it spills.
+
+What this spec does **not** promise: speed. A table of tens of millions of 1,536-dimension vectors will take minutes per seed on typical hardware. That is inherent to exact search without an index; the product answer is the progress display, working Stop, and the honest note in Check store.
 
 ## Config
 
@@ -64,6 +77,7 @@ Hence:
 | `pg_vector_column` | `"embedding"` | `vector` or `halfvec` column |
 | `pg_url_var` | `"HUNCHES_PG_URL"` | name of the env var / keyring entry holding the URL |
 | `pg_search` | `"exact"` | `"exact"` or `"index"` |
+| `pg_statement_timeout_s` | unset | seconds; unset = the server's `statement_timeout`; `0` = no limit |
 | `embedding_model` | — | required, as for S3 |
 
 Switching backend in Project settings writes only the active backend's fields and sets the others to `None` (002 rule, unchanged). Old configs have none of these and load unchanged.
@@ -73,7 +87,7 @@ Switching backend in Project settings writes only the active backend's fields an
 - **New project** (`screens/new_project.py`): Backend Select gets a third option `PostgreSQL (pgvector)`. A `#pg` section (shown like `#s3`): table, id/text/vector column, URL variable (with a status word `env` / `keyring` / `missing` from `keys.status` and a **Save URL…** that stores it in the keyring via `keys.save`, input masked), search mode Select (Exact / Index), embedding model (picker). Required: location, table, embedding model. **Check store** runs in a thread worker like S3's `get_index` and is the only network call on the screen: it opens the connection read-only and shows
   - the vector column's type and dimension (`format_type(atttypid, atttypmod)` from `pg_attribute`), with a WARNING when the column is not `vector`/`halfvec`,
   - the planner row estimate (`pg_class.reltuples`; **not** `count(*)`, which is a full scan),
-  - the indexes on the column and their operator class, with a WARNING in `index` mode when none uses `vector_cosine_ops` (the index would not be used by `<=>`; the README says the operator class must match the operator),
+  - the indexes on the column and their operator class, with a WARNING in `index` mode when none uses `vector_cosine_ops` (the index would not be used by `<=>`; the README says the operator class must match the operator). In `exact` mode no index is required: with none, it shows the informational `No index: each seed scans the whole table (~N rows).`,
   - a one-row sample (id and the first 60 characters of text), proving the column mapping works.
   The exact catalog queries are to be verified against the PostgreSQL docs in the task; do not copy them from this spec.
 - **Project settings** (`screens/project_settings.py`): same section, same Check store, same consequence confirmation as S3 (changing table/columns/model says "Candidates were generated from the old corpus/model; re-run Search").
@@ -111,6 +125,7 @@ All default-run tests are offline.
 - **Stubbed connection (fast tier).** A fake `psycopg.connect` whose cursor records the SQL and parameters and returns canned rows, in the style of `FakeS3` in `tests/test_search.py`. Assert: results are `(id, text, similarity)` sorted best first with only `sim >= floor` kept (floor inclusive, hand-computed values); `capped` true only when exactly `PG_TOP_K` rows return with the last still above the floor; `exact` issues `SET LOCAL enable_indexscan = off` and `index` issues `hnsw.iterative_scan`; the connection is read-only; identifiers are quoted (a column named `"text"; DROP TABLE x` stays an identifier); the vector parameter is a text literal; missing `psycopg`, missing URL var, missing table each give the exact message in "Errors"; a connection error containing the URL does not leak the password.
 - **Config:** old configs load; a pgvector config round-trips; switching backend nulls the other backend's fields.
 - **Screens (Pilot):** New project with pgvector chosen (required fields, Check store with a stubbed connection showing dimension and the opclass warning, Create writes the expected `config.toml` and no URL anywhere in it); Project settings switch S3 → pgvector with the confirmation; Projects row shows `pgvector` and the table; Search shows the cap warning and the `APPROXIMATE` warning. Add to the size sweep.
+- **No-index table (stubbed + integration):** a config with `pg_search = "exact"` and a table with no index searches normally; Check store shows the no-index note and no WARNING; in `index` mode with no index it shows the WARNING. Stop calls `cancel()` on the stub connection and closes it; `pg_statement_timeout_s` issues `SET LOCAL statement_timeout` with the value, and `0` is passed through (not treated as unset). The integration test also runs `exact` against a table created with no index.
 - **Secret leak test:** after Create, grep `config.toml`, `system.json` and every `.hunches/` file for the password used in the test.
 - **Integration (optional, skipped unless `HUNCHES_TEST_PG_URL` is set):** against a real database with pgvector (CI service container using the `pgvector/pgvector` image): create a table with a few hundred random unit vectors and an HNSW `vector_cosine_ops` index, then assert `exact` equals the numpy result on the same vectors, and show what `index` mode returns under the default settings so the "hides hits" claim in this spec is measured, not assumed. This is the only way to resolve the verification list above; it needs no cloud account.
 
@@ -135,7 +150,8 @@ Same one-commit-per-task, red/green TDD process as 004.
 | 03 | New project: third backend, URL status/save, Check store | 01, 02 |
 | 04 | Project settings, Projects, status allow-list, Search warnings | 01 |
 | 05 | Integration test + optional CI job; size sweep | all |
-| 06 | README, AGENTS.md, 001/002 notes | all |
+| 06 | (optional, only if measured to be needed) single-scan-for-all-seeds query | 05 |
+| 07 | README, AGENTS.md, 001/002 notes | all |
 
 ## Open items
 
