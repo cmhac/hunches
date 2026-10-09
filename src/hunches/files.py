@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import tomllib
@@ -65,6 +66,8 @@ class State(BaseModel):
     dev_done: bool = False
     test_done: bool = False
     threshold_chosen: bool = False
+    # per approved flag, the components of its inputs at approval time (spec 004); absent = current
+    inputs: dict[str, dict[str, str]] = {}
 
 
 class Label(BaseModel):
@@ -108,6 +111,7 @@ def read_text(name: str) -> str | None:
 
 def write_text(name: str, text: str) -> None:
     ensure_root()
+    _MEMO.pop(root().absolute() / name, None)
     (root() / name).write_text(text)
 
 
@@ -140,6 +144,206 @@ def write_state(state: State) -> None:
     write_text("state.json", state.model_dump_json(indent=2) + "\n")
 
 
+# ---- recorded inputs (spec 004): the named components a stage's work depends on
+COMPONENTS = [  # most upstream first: the first one that differs is the reason shown
+    "seeds",
+    "embedding_model",
+    "candidates",
+    "prompt",
+    "taxonomy",
+    "classifier_model",
+    "gold_dev",
+    "gold_test",
+]
+INPUTS = {  # per approved flag; seeds_approved and taxonomy_approved record nothing
+    "dev_done": ["prompt", "taxonomy", "classifier_model", "gold_dev"],
+    "test_done": ["prompt", "taxonomy", "classifier_model", "gold_test"],
+    "threshold_chosen": ["prompt", "taxonomy", "classifier_model", "candidates"],
+}
+REASONS = {  # at most 24 characters each
+    "seeds": "seeds changed",
+    "embedding_model": "embedding model changed",
+    "candidates": "candidates changed",
+    "prompt": "prompt changed",
+    "taxonomy": "taxonomy changed",
+    "classifier_model": "classifier model changed",
+    "gold_dev": "gold rows changed",
+    "gold_test": "gold rows changed",
+    "classifier_input": "classifier input changed",
+}
+Status = Literal["current", "stale", "incomplete", "not_started"]
+
+# big files are parsed once per change: (path) -> (stat stamp, parsed). Writers in this module drop
+# their entry; a change from outside shows in the stamp.
+_MEMO: dict[Path, tuple[tuple[int, int, int], object]] = {}
+
+
+def _memo(name: str, parse):
+    path = root().absolute() / name
+    try:
+        st = path.stat()
+    except OSError:
+        return parse()  # missing file: parse() handles it and is cheap
+    stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+    hit = _MEMO.get(path)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    value = parse()
+    _MEMO[path] = (stamp, value)
+    return value
+
+
+def _sha(data) -> str:
+    return hashlib.sha256(json.dumps(data).encode()).hexdigest()
+
+
+def _candidates() -> tuple[str, list[tuple[str, float]]]:
+    """(digest of the sorted candidate ids, [(id, max_similarity)])."""
+
+    def parse():
+        rows = read_jsonl("candidates.jsonl")
+        sims = [(r["id"], r["max_similarity"]) for r in rows]
+        return _sha(sorted(i for i, _ in sims)), sims
+
+    return _memo("candidates.jsonl", parse)
+
+
+def _gold() -> tuple[int, int, str, str]:
+    """(labelled dev rows, labelled test rows, dev digest, test digest)."""
+
+    def parse():
+        by_split: dict[str, list] = {"dev": [], "test": []}
+        for r in read_jsonl("gold.jsonl"):
+            if r["labels"]:
+                by_split[r["split"]].append([r["id"], sorted(r["labels"])])
+        dev, test = (sorted(by_split[s]) for s in ("dev", "test"))
+        return len(dev), len(test), _sha(dev), _sha(test)
+
+    return _memo("gold.jsonl", parse)
+
+
+def _results() -> list[tuple[str, str | None]]:
+    """(id, run) of every successful row in results.jsonl; run is None on rows from before 004."""
+
+    def parse():
+        return [
+            (r["id"], r.get("run"))
+            for r in read_jsonl("results.jsonl")
+            if "error" not in r
+        ]
+
+    return _memo("results.jsonl", parse)
+
+
+def _config() -> Config | None:
+    try:
+        return read_config()
+    except (OSError, ValueError):  # no config.toml yet (tests, a project being created)
+        return None
+
+
+def _taxonomy() -> Taxonomy | None:
+    try:
+        return read_taxonomy()
+    except (OSError, ValueError, TypeError, yaml.YAMLError):
+        return None
+
+
+def components() -> dict[str, str]:
+    """Every component as it is now."""
+    from hunches import candidates  # candidates imports this module
+
+    config, taxonomy = _config(), _taxonomy()
+    stripped = (read_text("prompt.md") or "").strip()
+    return {
+        "seeds": candidates.seeds_digest(candidates.read_seeds()),
+        "embedding_model": config.embedding_model if config else "",
+        "candidates": _candidates()[0],
+        "prompt": hashlib.sha256(stripped.encode()).hexdigest(),
+        "taxonomy": _sha(
+            [taxonomy.mode, [[x.name, x.description] for x in taxonomy.labels]]
+            if taxonomy
+            else None
+        ),
+        "classifier_model": config.classifier_model if config else "",
+        "gold_dev": _gold()[2],
+        "gold_test": _gold()[3],
+    }
+
+
+def current_inputs(flag: str) -> dict[str, str]:
+    """The components `flag`'s stage depends on, as they are now."""
+    names = INPUTS.get(flag, [])
+    now = components() if names else {}
+    return {name: now[name] for name in names}
+
+
+def changed(recorded: dict[str, str], now: dict[str, str] | None = None) -> list[str]:
+    """The recorded components that differ from `now` (default: the current ones), upstream first."""
+    now = components() if now is None else now
+    return [c for c in COMPONENTS if c in recorded and recorded[c] != now.get(c)]
+
+
+def run_digest(prompt: str, taxonomy: Taxonomy, model: str) -> str:
+    """What the classifier cache key hashes minus the item text: equal digests mean cache hits."""
+    from hunches import classifier  # classifier imports this module
+
+    return _sha([model, classifier.system_prompt(prompt, taxonomy)])
+
+
+def current_run() -> str | None:
+    """run_digest of the project as it is now; None while there is no taxonomy or config."""
+    config, taxonomy = _config(), _taxonomy()
+    if config is None or taxonomy is None:
+        return None
+    return run_digest(read_text("prompt.md") or "", taxonomy, config.classifier_model)
+
+
+def legacy_prompt_hash() -> str:
+    """The 001-003 `test_result.json` hash; only used to compare a file that has no `inputs`."""
+    config = _config()
+    return _sha(
+        [read_text("prompt.md") or "", config.classifier_model if config else ""]
+    )
+
+
+def result_changes(result: dict, now: dict[str, str] | None = None) -> list[str]:
+    """Components a test_result.json was computed under that differ now. Legacy files compare `prompt_hash`."""
+    if "inputs" in result:
+        return changed(result["inputs"], now)
+    if "prompt_hash" in result and result["prompt_hash"] != legacy_prompt_hash():
+        return ["prompt"]
+    return []
+
+
+def done_result_ids() -> set[str]:
+    """Ids with a successful row classified under the current run (rows without `run` count)."""
+    run = current_run()
+    return {i for i, r in _results() if r is None or r == run}
+
+
+def above_threshold() -> list[dict]:
+    cutoff = json.loads(read_text("threshold.json") or "{}")["threshold"]
+    return [c for c in read_jsonl("candidates.jsonl") if c["max_similarity"] >= cutoff]
+
+
+def pending() -> list[dict]:
+    """Candidates at or above the threshold with no successful row of the current run yet."""
+    done = done_result_ids()
+    return [c for c in above_threshold() if c["id"] not in done]
+
+
+def approve(flag: str, stage: int, summary: str) -> None:
+    """Set a State flag, record the inputs it was approved under and log the approval."""
+    from hunches import history  # history imports this module
+
+    state = read_state()
+    setattr(state, flag, True)
+    state.inputs[flag] = current_inputs(flag)
+    write_state(state)
+    history.approval(stage, flag, state.inputs[flag], summary)
+
+
 def read_jsonl(name: str) -> list[dict]:
     path = root() / name
     if not path.exists():
@@ -153,6 +357,7 @@ def write_jsonl(name: str, rows: list[dict]) -> None:
 
 def append_jsonl(name: str, row: dict) -> None:
     ensure_root()
+    _MEMO.pop(root().absolute() / name, None)
     with (root() / name).open("a") as f:
         f.write(json.dumps(row) + "\n")
         f.flush()
@@ -164,8 +369,12 @@ def read_taxonomy() -> Taxonomy:
     )
 
 
+def taxonomy_yaml(taxonomy: Taxonomy) -> str:
+    return yaml.safe_dump(taxonomy.model_dump(), sort_keys=False)
+
+
 def write_taxonomy(taxonomy: Taxonomy) -> None:
-    write_text("taxonomy.yaml", yaml.safe_dump(taxonomy.model_dump(), sort_keys=False))
+    write_text("taxonomy.yaml", taxonomy_yaml(taxonomy))
 
 
 def all_labels(taxonomy: Taxonomy) -> list[str]:
@@ -185,12 +394,41 @@ def validate_labels(labels: list[str], taxonomy: Taxonomy) -> None:
         raise ValueError("single mode requires exactly one label")
 
 
+RESULT_FILE = "test_result.json"
+
+
 def read_gold() -> list[GoldRow]:
     return [GoldRow.model_validate(r) for r in read_jsonl("gold.jsonl")]
 
 
 def write_gold(rows: list[GoldRow]) -> None:
     write_jsonl("gold.jsonl", [r.model_dump() for r in rows])
+
+
+def orphaned_gold(split: str | None = None) -> list[GoldRow]:
+    """Gold rows whose id is not in candidates.jsonl (spec 004 D2); they keep their labels."""
+    pool = {r["id"] for r in read_jsonl("candidates.jsonl")}
+    return [r for r in read_gold() if r.id not in pool and split in (None, r.split)]
+
+
+def gold_coverage() -> dict:
+    """Per split: rows, labelled rows, orphaned rows, orphaned labelled rows and their label counts."""
+    out = {}
+    for split in ("dev", "test"):
+        rows = [r for r in read_gold() if r.split == split]
+        orphans = orphaned_gold(split)
+        by_label: dict[str, int] = {}
+        for r in orphans:
+            for label in r.labels:
+                by_label[label] = by_label.get(label, 0) + 1
+        out[split] = {
+            "rows": len(rows),
+            "labelled": sum(bool(r.labels) for r in rows),
+            "orphaned": len(orphans),
+            "orphaned_labelled": sum(bool(r.labels) for r in orphans),
+            "orphaned_by_label": by_label,
+        }
+    return out
 
 
 # ---- taxonomy versions (spec 003, D12): archives are only ever added to, never deleted
@@ -266,6 +504,8 @@ def start_new_version(new: Taxonomy) -> int:
     state = read_state()
     state.taxonomy_approved = state.dev_done = state.test_done = False
     state.threshold_chosen = False
+    for flag in ("taxonomy_approved", "dev_done", "test_done", "threshold_chosen"):
+        state.inputs.pop(flag, None)  # inputs only describe a flag that is set
     write_state(state)
     for (
         name
@@ -321,50 +561,185 @@ def load_chat(stage: str) -> list[ModelMessage]:
     )
 
 
-def first_incomplete_stage() -> int:
-    """Return the first incomplete stage, 1-9. Rules, checked in order:
+def _union(*lists: list[str]) -> list[str]:
+    return [c for c in COMPONENTS if any(c in x for x in lists)]
 
-    1 seeds.csv missing or `seeds_approved` false
-    2 candidates.jsonl missing or empty
-    3 taxonomy.yaml or prompt.md missing, or `taxonomy_approved` false
-    4 fewer than SAMPLE_SIZE labelled gold rows with split "dev" (sampled rows are persisted
-      with empty labels, so unlabelled rows do not count)
-    5 `dev_done` false (tuning not accepted)
-    6 fewer than SAMPLE_SIZE labelled gold rows with split "test", or `test_done` false
-    7 `threshold_chosen` false or threshold.json missing
-    8 some candidate with max_similarity >= threshold.json["threshold"] has no successful row in results.jsonl (rows with an "error" key don't count)
-    9 otherwise (browse)
+
+def _recorded_in(name: str) -> dict[str, str]:
+    """The `inputs` a derived file recorded, {} if it has none or is unreadable."""
+    try:
+        return json.loads(read_text(name) or "{}").get("inputs", {})
+    except (ValueError, AttributeError):
+        return {}
+
+
+def stage_status() -> dict[int, tuple[Status, str]]:
+    """Status and reason (at most 24 characters, "" if current) of stages 1-9.
+
+    Completion rules:
+    1 seeds.csv exists and `seeds_approved`
+    2 candidates.jsonl is not empty
+    3 taxonomy.yaml and prompt.md exist and `taxonomy_approved`
+    4 at least SAMPLE_SIZE labelled gold rows with split "dev"
+    5 `dev_done`
+    6 at least SAMPLE_SIZE labelled "test" gold rows and `test_done`
+    7 `threshold_chosen` and threshold.json exists
+    8 every candidate with max_similarity >= the threshold has a successful row in results.jsonl
+      classified under the current run (a row without `run` counts as current)
+    9 stage 8 is complete (browse)
+
+    A complete stage is `stale` when a component recorded for it differs now, else `current`. An
+    incomplete one is `incomplete` if it was complete before (its flag is set or a later stage is
+    complete), else `not_started`. Stage 8 is `stale` when it has rows made under another run.
     """
     state = read_state()
-    gold = read_jsonl("gold.jsonl")
-    if read_text("seeds.csv") is None or not state.seeds_approved:
-        return 1
-    if not read_jsonl("candidates.jsonl"):
-        return 2
-    if (
-        read_text("taxonomy.yaml") is None
-        or read_text("prompt.md") is None
-        or not state.taxonomy_approved
-    ):
-        return 3
-    if sum(r["split"] == "dev" and bool(r["labels"]) for r in gold) < SAMPLE_SIZE:
-        return 4
-    if not state.dev_done:
-        return 5
-    if (
-        sum(r["split"] == "test" and bool(r["labels"]) for r in gold) < SAMPLE_SIZE
-        or not state.test_done
-    ):
-        return 6
-    threshold_text = read_text("threshold.json")
-    if threshold_text is None or not state.threshold_chosen:
-        return 7
-    cutoff = json.loads(threshold_text)["threshold"]
-    # error rows (failed items, retried by the next run) do not count as done
-    done = {r["id"] for r in read_jsonl("results.jsonl") if "error" not in r}
-    if any(
-        c["max_similarity"] >= cutoff and c["id"] not in done
-        for c in read_jsonl("candidates.jsonl")
-    ):
-        return 8
-    return 9
+    now = components()
+    dev_n, test_n = _gold()[:2]
+    sims = _candidates()[1]
+    threshold = json.loads(read_text("threshold.json") or "{}").get("threshold")
+    above = {i for i, sim in sims if threshold is not None and sim >= threshold}
+    run = current_run()
+    rows = _results()
+    stale_rows = any(r is not None and r != run and i in above for i, r in rows)
+    done = {i for i, r in rows if r is None or r == run}
+    has_taxonomy = read_text("taxonomy.yaml") is not None
+    has_prompt = read_text("prompt.md") is not None
+    complete = {
+        1: read_text("seeds.csv") is not None and state.seeds_approved,
+        2: bool(sims),
+        3: has_taxonomy and has_prompt and state.taxonomy_approved,
+        4: dev_n >= SAMPLE_SIZE,
+        5: state.dev_done,
+        6: test_n >= SAMPLE_SIZE and state.test_done,
+        7: threshold is not None and state.threshold_chosen,
+        8: threshold is not None and above <= done,
+    }
+    complete[9] = complete[8]
+    flags = {
+        1: state.seeds_approved,
+        3: state.taxonomy_approved,
+        5: state.dev_done,
+        6: state.test_done,
+        7: state.threshold_chosen,
+    }
+    meta = json.loads(read_text("candidates.meta.json") or "{}")
+    recorded_meta = {}
+    if "seeds_digest" in meta:
+        recorded_meta["seeds"] = meta["seeds_digest"]
+    if "embedding_model" in meta:
+        recorded_meta["embedding_model"] = meta["embedding_model"]
+    try:
+        test_result = json.loads(read_text(RESULT_FILE) or "{}")
+    except ValueError:
+        test_result = {}
+    differs = {
+        2: changed(recorded_meta, now),
+        5: changed(state.inputs.get("dev_done", {}), now),
+        6: _union(
+            changed(state.inputs.get("test_done", {}), now),
+            result_changes(test_result, now),
+        ),
+        7: _union(
+            changed(state.inputs.get("threshold_chosen", {}), now),
+            changed(_recorded_in("threshold.json"), now),
+        ),
+    }
+    not_done = {
+        1: "not approved" if read_text("seeds.csv") is not None else "no seeds",
+        2: "no candidates",
+        3: "not approved" if has_taxonomy and has_prompt else "files missing",
+        4: f"{dev_n} of {SAMPLE_SIZE} rows",
+        5: "not accepted",
+        6: f"{test_n} of {SAMPLE_SIZE} rows"
+        if test_n < SAMPLE_SIZE
+        else "not accepted",
+        7: "not chosen",
+    }
+    status: dict[int, tuple[Status, str]] = {}
+    for n in range(1, 10):
+        if complete[n]:
+            why = differs.get(n, [])
+            status[n] = ("stale", REASONS[why[0]]) if why else ("current", "")
+        elif n == 8 and stale_rows:
+            upstream = status[7]
+            status[n] = (
+                "stale",
+                upstream[1] if upstream[0] == "stale" else REASONS["classifier_input"],
+            )
+        elif flags.get(n) or any(complete[m] for m in range(n + 1, 10)):
+            status[n] = ("incomplete", not_done[n])
+        else:
+            status[n] = ("not_started", "")
+    return status
+
+
+def embedding_change() -> tuple[str, str] | None:
+    """(embedding model now, the one the candidates were built with) when they differ, else None.
+    A candidates.meta.json that records no model (an old project) counts as unchanged."""
+    built = json.loads(read_text("candidates.meta.json") or "{}").get("embedding_model")
+    now = components()["embedding_model"]
+    return (now, built) if built and built != now else None
+
+
+STAGE_NAMES = [
+    "Brief and seeds",
+    "Search",
+    "Taxonomy and prompt",
+    "Gold dev set",
+    "Tuning loop",
+    "Gold test set",
+    "Threshold",
+    "Full run",
+    "Browse",
+]
+ORPHAN_LIST_CAP = 10
+
+
+def pipeline_status_text() -> str:
+    """The `# Pipeline status` section the assistants are told (spec 004)."""
+    lines = ["# Pipeline status"]
+    for n, (status, reason) in stage_status().items():
+        mark = {
+            "current": "current",
+            "stale": f"STALE: {reason}",
+            "incomplete": f"INCOMPLETE: {reason}",
+            "not_started": "not started",
+        }[status]
+        if reason == REASONS["embedding_model"]:
+            built = json.loads(read_text("candidates.meta.json") or "{}")
+            mark += (
+                f" (the project now uses {components()['embedding_model']}; "
+                f"the candidates were built with {built.get('embedding_model')})"
+            )
+        lines.append(f"{n} {STAGE_NAMES[n - 1]}: {mark}")
+    return "\n".join(lines)
+
+
+def gold_coverage_text(split: str | None = None) -> str:
+    """The `# Gold coverage` section: per split the counts and the capped list of orphaned rows."""
+    lines = ["# Gold coverage"]
+    for name, counts in gold_coverage().items():
+        if split not in (None, name):
+            continue
+        lines.append(
+            f"{name}: {counts['rows']} rows, {counts['labelled']} labelled, "
+            f"{counts['orphaned']} orphaned (no longer in the candidate pool)"
+        )
+        orphans = orphaned_gold(name)
+        for r in orphans[:ORPHAN_LIST_CAP]:
+            labels = ", ".join(r.labels) or "unlabelled"
+            lines.append(f'- {r.id} "{r.text[:80]}" [{labels}]')
+        if len(orphans) > ORPHAN_LIST_CAP:
+            lines.append(f"- ... and {len(orphans) - ORPHAN_LIST_CAP} more")
+    return "\n".join(lines)
+
+
+def assistant_context() -> str:
+    return f"{pipeline_status_text()}\n\n{gold_coverage_text()}"
+
+
+def first_incomplete_stage() -> int:
+    """The lowest stage, 1-9, that is not current (stale, incomplete or not started); 9 when all are
+    current. The completion rules are in `stage_status`."""
+    status = stage_status()
+    return next((n for n in range(1, 10) if status[n][0] != "current"), 9)

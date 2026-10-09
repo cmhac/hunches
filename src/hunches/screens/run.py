@@ -8,23 +8,11 @@ from textual.screen import Screen
 from textual.widgets import Button, Static
 
 from hunches import cost, files
-from hunches.app import AppFooter, StatusHeader
+from hunches.app import AppFooter, StageBanner, StatusHeader, current_status, plan_hint
 from hunches.classifier import classify_many
-from hunches.screens.final import RESULT, prompt_hash
+from hunches.files import above_threshold, pending
+from hunches.screens.final import RESULT
 from hunches.screens.progress import RunIndicator, eta_text, seconds_text
-
-
-def above_threshold() -> list[dict]:
-    cutoff = json.loads(files.read_text("threshold.json") or "{}")["threshold"]
-    return [
-        c for c in files.read_jsonl("candidates.jsonl") if c["max_similarity"] >= cutoff
-    ]
-
-
-def pending() -> list[dict]:
-    """Candidates at or above the threshold with no successful row in results.jsonl yet."""
-    done = {r["id"] for r in files.read_jsonl("results.jsonl") if "error" not in r}
-    return [c for c in above_threshold() if c["id"] not in done]
 
 
 def estimate(n: int, model: str) -> str:
@@ -35,13 +23,13 @@ def estimate(n: int, model: str) -> str:
         if rate
         else "no timing samples yet, so no time estimate"
     )
-    entry = cost.breakdown().get(model)
-    if not entry or not entry["calls"]:
+    per_call, sampled = cost.per_call_dollars(model)
+    if not sampled:
         cost_text = "no sample usage yet, so no cost estimate"
-    elif entry["dollars"] is None:
+    elif per_call is None:
         cost_text = "cost ? (WARNING: price unknown for this model)"
     else:
-        cost_text = f"~${entry['dollars'] / entry['calls'] * n:.4f}"
+        cost_text = f"~${per_call * n:.4f}"
     return f"{n} items to classify; time {time_text}; cost {cost_text}"
 
 
@@ -91,6 +79,7 @@ class RunScreen(Screen):
             )
             yield AppFooter()
             return
+        yield StageBanner(self.banner_text)
         yield RunIndicator()
         with Vertical(id="blocked"):
             yield Static(
@@ -104,9 +93,22 @@ class RunScreen(Screen):
             self.show()
 
     def blocked(self) -> bool:
-        """True unless test_result.json records the current prompt and classifier model."""
-        tested = json.loads(files.read_text(RESULT) or "{}").get("prompt_hash")
-        return tested != prompt_hash()
+        """True unless test_result.json was computed under the current prompt, taxonomy and classifier model."""
+        text = files.read_text(RESULT)
+        if text is None:
+            return True
+        return bool(set(files.result_changes(json.loads(text))) - {"gold_test"})
+
+    def banner_text(self) -> str:
+        """Rows from another prompt: a re-run replaces them. The untested block comes first."""
+        kind, reason = current_status()[8]
+        if not self.ready or self.running or kind != "stale" or self.blocked():
+            return ""
+        return (
+            f"STALE: {reason}. results.jsonl was made with an earlier prompt. Re-run "
+            "classifies those items again; items already cached cost nothing."
+            + plan_hint()
+        )
 
     def state(self, todo: list[dict]) -> str:
         if self.running:
@@ -115,7 +117,12 @@ class RunScreen(Screen):
             return "failed"
         if not todo:
             return "complete"
-        resumable = self.started or files.read_jsonl("results.jsonl")
+        # rows of another prompt are replaced, not resumed
+        resumable = (
+            self.started
+            or files.done_result_ids()
+            or any("error" in r for r in files.read_jsonl("results.jsonl"))
+        )
         return "stopped" if resumable else "idle"
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
@@ -128,6 +135,7 @@ class RunScreen(Screen):
         return not self.running and bool(pending())
 
     def show(self) -> None:
+        self.query_one(StageBanner).refresh_text()
         blocked = self.blocked()
         indicator = self.query_one(RunIndicator)
         indicator.display = not blocked
@@ -138,7 +146,13 @@ class RunScreen(Screen):
         failed = sum("error" in r for r in files.read_jsonl("results.jsonl"))
         indicator.set_title(TITLES[state])
         indicator.set_progress(total - len(todo), total)
-        indicator.set_button(None if blocked else BUTTON.get(state))
+        button = BUTTON.get(state)
+        if (
+            button in ("start", "resume")
+            and current_status(fresh=True)[8][0] == "stale"
+        ):
+            button = "rerun"
+        indicator.set_button(None if blocked else button)
         if state == "idle":
             indicator.set_status(estimate(len(todo), self.model))
         elif state == "failed":
@@ -179,15 +193,18 @@ class RunScreen(Screen):
 
     async def run_all(self) -> None:
         indicator = self.query_one(RunIndicator)
-        # failed rows from an earlier run are dropped; the items are retried now
-        old = files.read_jsonl("results.jsonl")
-        if any("error" in r for r in old):
-            files.write_jsonl("results.jsonl", [r for r in old if "error" not in r])
+        # failed rows and rows of another run are dropped; those items are classified now
         todo = pending()
+        redo = {c["id"] for c in todo}
+        old = files.read_jsonl("results.jsonl")
+        keep = [r for r in old if "error" not in r and r["id"] not in redo]
+        if len(keep) != len(old):
+            files.write_jsonl("results.jsonl", keep)
         taxonomy = files.read_taxonomy()
         prompt = files.read_text("prompt.md") or ""
         total = len(above_threshold())
         base = total - len(todo)
+        run = files.run_digest(prompt, taxonomy, self.model)
         start = time.monotonic()
         done = live = 0
         indicator.set_progress(base, total)
@@ -204,6 +221,8 @@ class RunScreen(Screen):
                 }
                 if p.labels is None:
                     row["error"] = p.error or "unknown error"
+                else:
+                    row["run"] = run
                 files.append_jsonl("results.jsonl", row)
                 done += 1
                 live += not p.cached

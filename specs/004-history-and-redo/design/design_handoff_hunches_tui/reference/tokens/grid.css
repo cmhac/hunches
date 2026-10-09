@@ -1,0 +1,19 @@
+:root {
+  /* Spacing is in terminal cells. Horizontal = ch, vertical = rows. */
+  --cell-x: 1ch;
+  --cell-y: var(--row);
+  --gx-1: 1ch;
+  --gx-2: 2ch;
+  --gx-4: 4ch;
+  --gy-1: var(--row);
+  --gy-2: calc(var(--row) * 2);
+  /* Borders are drawn through the middle of a 1-cell gutter, like box-drawing glyphs */
+  --border-w: 1px;
+  --half-x: 0.5ch;
+  --half-y: calc(var(--row) / 2);
+  --radius-round: 5px; /* Textual "round" border corners */
+  --radius-none: 0;
+  /* Reference terminal sizes */
+  --term-min-cols: 80;
+  --term-min-rows: 24;
+}

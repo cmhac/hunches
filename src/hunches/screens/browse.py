@@ -6,7 +6,16 @@ from textual.widgets import DataTable, Input, SelectionList, Static
 from textual.widgets.data_table import ColumnKey
 
 from hunches import files
-from hunches.app import RAIL_WIDTH, AppFooter, StatusHeader, panel, retitle, wide
+from hunches.app import (
+    RAIL_WIDTH,
+    AppFooter,
+    StageBanner,
+    StatusHeader,
+    current_status,
+    panel,
+    retitle,
+    wide,
+)
 from hunches.theme import label_text
 
 # Rendering 100k DataTable rows takes ~10 s, so only the first matches are drawn.
@@ -43,6 +52,7 @@ class BrowseScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
+        yield StageBanner(self.notice_text, warning=True)
         yield Input(placeholder="Search text (case-insensitive)", id="search")
         with Horizontal(id="body"):
             with panel(Vertical(id="labels-panel"), "labels"):
@@ -56,6 +66,14 @@ class BrowseScreen(Screen):
                 with panel(Vertical(id="detail-panel"), "item"):
                     yield Static("", id="detail", markup=False)
         yield AppFooter()
+
+    def notice_text(self) -> str:
+        kind, reason = current_status()[8]
+        if kind != "stale":
+            return ""
+        return (
+            f"Results are out of date: {reason}. Press p to go to Full run and re-run."
+        )
 
     def on_mount(self) -> None:
         table = self.query_one("#table", DataTable)

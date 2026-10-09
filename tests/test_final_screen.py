@@ -7,7 +7,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from textual.widgets import Button, DataTable, Static
 
-from hunches import files
+from hunches import files, history
 from hunches.app import HunchesApp
 from hunches.screens import final
 from hunches.screens.final import FinalScreen
@@ -119,7 +119,14 @@ async def test_run_metrics_staleness_and_accept():
         assert saved["metrics"]["exact_match"] == pytest.approx(0.9)
         assert saved["metrics"]["macro_f1"] == pytest.approx(9 / 19)
         assert saved["metrics"]["micro_f1"] == pytest.approx(0.9)
-        assert saved["prompt_hash"]
+        assert "prompt_hash" not in saved
+        assert set(saved["inputs"]) == {
+            "prompt",
+            "taxonomy",
+            "classifier_model",
+            "gold_test",
+        }
+        assert saved["inputs"]["classifier_model"] == "test"
         assert screen.query_one("#dis", DataTable).row_count == 1
         assert not screen.stale()
         files.write_text("prompt.md", "Classify differently.")
@@ -158,6 +165,12 @@ async def test_run_metrics_staleness_and_accept():
         await pilot.press("f2")
         await pilot.pause()
         assert files.read_state().test_done
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["stage"], entry["flag"], entry["summary"]) == (
+            6,
+            "test_done",
+            "Approved: Gold test (test accuracy 0.900)",
+        )
         assert app.stage == 7
 
 
@@ -261,7 +274,7 @@ def write_result(reasoning=None, **extra):
         "test_result.json",
         json.dumps(
             {
-                "prompt_hash": final.prompt_hash(),
+                "inputs": files.current_inputs("test_done"),
                 "timestamp": "2026-10-02T20:41:07+00:00",
                 "metrics": m,
                 "disagreements": [d],

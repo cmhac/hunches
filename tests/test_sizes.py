@@ -13,14 +13,18 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from textual.containers import ScrollableContainer
 from textual.screen import Screen
 from textual.scroll_view import ScrollView
+from textual.widgets import DataTable
 
-from hunches import classifier, files, metrics, system
+from hunches import classifier, files, history, metrics, system
 from hunches.app import ConfirmScreen, HunchesApp, StatusHeader
+from hunches.screens.gold import GoldRowsScreen, GoldScreen, RemoveGoldScreen
+from hunches.screens.history import HistoryScreen, NeedsVersionScreen
 from hunches.screens.model_picker import ModelPicker
 from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.paths import PathPicker
 from hunches.screens.project_settings import ProjectSettingsScreen
 from hunches.screens.projects import ProjectsScreen, RemoveModal
+from hunches.screens.redo_plan import RedoPlanScreen
 from hunches.screens.system import RecommendationModal, SystemSettingsScreen
 from hunches.screens.taxonomy import VersionsScreen
 from hunches.screens.tune import PromptEditScreen, ProposalScreen
@@ -160,12 +164,20 @@ MODALS = [
     "versions",
     "proposal",
     "prompt-edit",
+    "history",
+    "needs-version-restore",
+    "needs-version-new",
+    "gold-rows",
+    "remove-gold-dev",
+    "remove-gold-test",
+    "remove-gold-assistant",
 ]
 
 
 def modals():
     current = system.read_system()
     assert current
+    labels = files.read_taxonomy()
     return {
         "confirm": lambda: ConfirmScreen(LONG),
         "recommendation": lambda: RecommendationModal(current),
@@ -176,6 +188,20 @@ def modals():
         "versions": lambda: VersionsScreen(),
         "proposal": lambda: ProposalScreen(PROMPT, PROMPT + "\nMore.\n" * 3),
         "prompt-edit": lambda: PromptEditScreen(PROMPT),
+        "history": lambda: HistoryScreen(),
+        "needs-version-restore": lambda: NeedsVersionScreen(
+            history.NeedsVersion("restore", labels, 2), "restore"
+        ),
+        "needs-version-new": lambda: NeedsVersionScreen(
+            history.NeedsVersion("new_version", labels, 2), "undo"
+        ),
+        "gold-rows": lambda: GoldRowsScreen("dev"),
+        "remove-gold-dev": lambda: RemoveGoldScreen(files.read_gold()[:6]),
+        "remove-gold-test": lambda: RemoveGoldScreen(files.read_gold()[48:52]),
+        # the longest text: both splits, a reason, the held-out warning
+        "remove-gold-assistant": lambda: RemoveGoldScreen(
+            files.read_gold()[48:52], "seeds changed " * 6
+        ),
     }
 
 
@@ -243,4 +269,170 @@ async def test_modals(size, name):
         await pilot.pause()
         await app.push_screen(modals()[name]())
         await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("variant", ["text", "filter-open"])
+async def test_history_variants(size, variant):
+    files.write_text("prompt.md", PROMPT + "\nMore.")  # an outside edit for the log
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.push_screen(HistoryScreen())
+        await pilot.pause()
+        if variant == "text":
+            await pilot.press("v")
+        else:
+            app.screen.query_one("#file").focus()
+            await pilot.press("enter")
+        await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("stage", range(1, 10), ids=STAGE_NAMES)
+async def test_external_notice_on_every_stage_screen(size, stage):
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.goto_stage(stage)
+        await pilot.pause()
+        files.write_text("prompt.md", PROMPT + "\nEdited in an editor.")
+        app.check_history()
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert len(app.notices()) == 1
+        await check(app, pilot, size[0])
+
+
+def make_stale(incomplete: bool = False) -> None:
+    """Stages 5-8 were approved or run under PROMPT, then prompt.md changed (and the new prompt was
+    tested). With `incomplete`, a dev row is gone too: stage 4 is incomplete."""
+    for flag, stage in (("dev_done", 5), ("test_done", 6), ("threshold_chosen", 7)):
+        files.approve(flag, stage, "approved")
+    model = "anthropic:claude-haiku-4-5"
+    run = files.run_digest(PROMPT, files.read_taxonomy(), model)
+    files.write_jsonl(
+        "results.jsonl",
+        [
+            {**c, "labels": ["a"], "run": run}
+            for c in files.read_jsonl("candidates.jsonl")
+            if c["max_similarity"] >= 0.65
+        ],
+    )
+    history.save("prompt", PROMPT + "\nChanged.", "user", "Prompt: edited by the user")
+    result = json.loads(files.read_text("test_result.json") or "")
+    result.pop("prompt_hash")
+    result["inputs"] = files.current_inputs("test_done")
+    files.write_text("test_result.json", json.dumps(result))
+    if incomplete:
+        files.write_gold([r for r in files.read_gold() if r.id != "i0"])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("variant", ["plan", "incomplete", "progress", "done"])
+async def test_redo_plan_modal(size, variant):
+    if variant != "done":
+        make_stale(incomplete=variant == "incomplete")
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.push_screen(RedoPlanScreen([5] if variant == "progress" else []))
+        await pilot.pause()
+        await pilot.pause()
+        await check(app, pilot, size[0])
+        rows = app.screen.query_one("#plan", DataTable).row_count
+        assert rows == {"plan": 5, "incomplete": 6, "progress": 5, "done": 0}[variant]
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("stage", range(1, 10), ids=STAGE_NAMES)
+async def test_stage_screens_with_stale_and_incomplete_marks(size, stage):
+    make_stale(incomplete=True)
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await (
+            app.workers.wait_for_complete()
+        )  # the app opens on Tuning, which runs the dev set
+        app.goto_stage(stage)
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await check(app, pilot, size[0])
+        marks = "\n".join(str(h.render()) for h in app.screen.query(StatusHeader))
+        assert "↻" in marks and "◐" in marks
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("stage", range(5, 10), ids=STAGE_NAMES[4:])
+async def test_stale_banners_are_shown_and_fit(size, stage):
+    make_stale()
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await (
+            app.workers.wait_for_complete()
+        )  # the app opens on Tuning, which runs the dev set
+        app.goto_stage(stage)
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await check(app, pilot, size[0])
+        banners = [b for b in app.screen.query("StageBanner") if b.display]
+        assert len(banners) == 1, stage
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+async def test_search_with_the_embedding_warning(size):
+    files.write_text(
+        "candidates.meta.json",
+        json.dumps(
+            {"seeds_digest": "x", "embedding_model": "an-older-embedding-model"}
+        ),
+    )
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.goto_stage(2)
+        await pilot.pause()
+        await check(app, pilot, size[0])
+        assert app.screen.query_one("#embedding-warning").display
+
+
+def lose_gold_from_the_pool() -> None:
+    """Six dev rows and two test rows are no longer candidates."""
+    gone = {f"i{i}" for i in (0, 1, 2, 3, 4, 5, 50, 51)}
+    files.write_jsonl(
+        "candidates.jsonl",
+        [c for c in files.read_jsonl("candidates.jsonl") if c["id"] not in gone],
+    )
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("stage", [4, 6], ids=["gold-dev", "gold-test"])
+@pytest.mark.parametrize("variant", ["orphans", "removed"])
+async def test_gold_screens_with_orphans(size, stage, variant):
+    lose_gold_from_the_pool()
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        if stage == 4:
+            app.goto_stage(4)
+        else:  # stage 6 shows the evaluation once the test result exists
+            await app.push_screen(GoldScreen("test"))
+        await pilot.pause()
+        screen = app.screen
+        assert screen.query_one("#orphans").display
+        if variant == "removed":
+            await pilot.press("x")
+            await pilot.pause()
+            await check(app, pilot, size[0])  # the confirmation
+            await pilot.click("#remove")
+            await pilot.pause()
+            assert screen.query_one("#info").display
+            assert not screen.query_one("#orphans").display
         await check(app, pilot, size[0])

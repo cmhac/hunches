@@ -1,12 +1,11 @@
 import asyncio
 import dataclasses
-import difflib
 import hashlib
 import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.messages import ToolCallPart
@@ -18,23 +17,28 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Select, Static, TextArea
 
-from hunches import files, metrics
+from hunches import files, history, metrics
 from hunches.app import (
     AppFooter,
     ChatPanel,
+    StageBanner,
     StatusHeader,
     confirm_approve,
+    current_status,
     key_button,
     modal_box,
     panel,
+    plan_hint,
     retitle,
     say,
 )
 from hunches.classifier import classify_many
+from hunches.screens import gold as gold_screen
 from hunches.screens import report
+from hunches.screens.gold import RemoveGoldScreen
 from hunches.screens.progress import RunIndicator, eta_text
 from hunches.screens.taxonomy import prompt_change, taxonomy_text
-from hunches.theme import editor
+from hunches.theme import diff_markup, editor
 
 MAX_SHOWN = 20  # disagreements the assistant sees
 METRICS = ["accuracy", "macro_f1", "micro_f1", "exact_match"]
@@ -67,10 +71,19 @@ FIRST_REPLY = (
     "main pattern in the errors. Offer to propose a prompt edit. Call propose_prompt only "
     "when the user asks or agrees."
 )
+STATUS_REPLY = (
+    "Reply in one or two sentences: what changed in the pipeline status or the gold coverage "
+    "and what it means for tuning. Do not repeat the lists."
+)
 UPDATE_REPLY = (
     "Reply in two or three sentences: what changed since the last run and whether the target "
     "is met."
 )
+
+
+def status_digest() -> str:
+    """What the assistant was last told about the pipeline: the two context sections."""
+    return hashlib.sha256(files.assistant_context().encode()).hexdigest()
 
 
 def digest_of(prompt: str, model: str, rows: list, m: metrics.Metrics) -> str:
@@ -91,7 +104,12 @@ def read_meta() -> dict | None:
 def write_meta(meta: dict) -> None:
     path = files.root() / META
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({**meta, "sent_at": datetime.now(UTC).isoformat()}))
+    kept = (
+        read_meta() or {}
+    )  # the dev-run digest and the status digest are written separately
+    path.write_text(
+        json.dumps({**kept, **meta, "sent_at": datetime.now(UTC).isoformat()})
+    )
 
 
 def prompt_record(intro: str, old: str, new: str) -> str:
@@ -105,32 +123,6 @@ def diff_size(old: str, new: str) -> tuple[int, int]:
         sum(ln.startswith("+") for ln in lines),
         sum(ln.startswith("-") for ln in lines),
     )
-
-
-def diff(old: str, new: str) -> str:
-    return "\n".join(
-        difflib.unified_diff(
-            old.splitlines(), new.splitlines(), "current", "proposed", lineterm=""
-        )
-    )
-
-
-def diff_markup(old: str, new: str) -> str:
-    """The unified diff with + lines green, - lines red, @@ sand and the file headers muted."""
-    out = []
-    for line in diff(old, new).splitlines():
-        text = escape(line)
-        if line.startswith(("---", "+++")):
-            out.append(f"[$text-muted]{text}[/]")
-        elif line.startswith("+"):
-            out.append(f"[$success on #1C3322]{text}[/]")
-        elif line.startswith("-"):
-            out.append(f"[$error on #3E1826]{text}[/]")
-        elif line.startswith("@@"):
-            out.append(f"[$secondary]{text}[/]")
-        else:
-            out.append(text)
-    return "\n".join(out)
 
 
 class ProposalScreen(ModalScreen[str | None]):
@@ -190,19 +182,32 @@ class PromptEditScreen(ModalScreen[str | None]):
     """Edit prompt.md by hand. Dismisses with the new text (Save and re-run) or None."""
 
     AUTO_FOCUS = "#prompt"
-    BINDINGS: ClassVar = [("escape", "cancel", "Cancel"), ("f2", "save", "Save")]
+    # F6/F7 are priority bindings: a focused TextArea binds them itself (select line, select all)
+    BINDINGS: ClassVar = [
+        ("escape", "cancel", "Cancel"),
+        ("f2", "save", "Save"),
+        Binding("f6", "undo", "Undo", priority=True),
+        Binding("f7", "redo", "Redo", priority=True),
+    ]
     DEFAULT_CSS = """
     PromptEditScreen { align: center middle; }
     PromptEditScreen > Vertical { width: 1fr; height: 1fr; margin: 1 2; }
     PromptEditScreen .panel { height: 1fr; }
     PromptEditScreen TextArea { height: 1fr; border: none; padding: 0; }
     PromptEditScreen #note-line { height: auto; }
+    PromptEditScreen #history-row { height: 1; }
+    PromptEditScreen #history-row Button { margin-right: 1; }
+    PromptEditScreen #hist-note { width: 1fr; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; }
     PromptEditScreen #buttons { height: auto; align-horizontal: right; }
     """
 
     def __init__(self, current: str) -> None:
         super().__init__()
-        self.current = current
+        self.current = (
+            current  # the text of prompt.md: what the box shows when nothing is typed
+        )
+        self.moved = False  # undo or redo changed prompt.md while the box was open
+        self.last = ""  # the summary of the last undo or redo
 
     def compose(self) -> ComposeResult:
         with modal_box(Vertical(), "Edit prompt"):
@@ -219,6 +224,10 @@ class PromptEditScreen(ModalScreen[str | None]):
                         id="prompt",
                     )
                 )
+            with Horizontal(id="history-row"):
+                yield key_button("Undo", "F6", id="undo")
+                yield key_button("Redo", "F7", id="redo")
+                yield Static("", id="hist-note")
             yield Static(
                 "The dev set is classified again with the new prompt.",
                 id="note-line",
@@ -230,25 +239,84 @@ class PromptEditScreen(ModalScreen[str | None]):
                     "Save and re-run", "F2", id="save", variant="success", disabled=True
                 )
 
+    def on_mount(self) -> None:
+        self.sync()
+
+    def typed(self) -> bool:
+        """The box differs from prompt.md: a draft, which is not in the history."""
+        return self.query_one("#prompt", TextArea).text != self.current
+
     def changed(self) -> bool:
-        text = self.query_one("#prompt", TextArea).text
-        return bool(text.strip()) and text != self.current
+        return bool(self.query_one("#prompt", TextArea).text.strip()) and self.typed()
+
+    def sync(self) -> None:
+        typed = self.typed()
+        rerun = (
+            self.moved and not typed
+        )  # prompt.md already holds the text: only re-run
+        save = self.query_one("#save", Button)
+        save.label = "Re-run  F2" if rerun else "Save and re-run  F2"
+        save.disabled = not (self.changed() or rerun)
+        self.query_one("#undo", Button).disabled = typed or not history.can_undo(
+            "prompt"
+        )
+        self.query_one("#redo", Button).disabled = typed or not history.can_redo(
+            "prompt"
+        )
+        self.query_one("#hist-note", Static).update(
+            "Typing is undone with ctrl+z. Undo F6 is off until you save or discard."
+            if typed
+            else self.last or "F6 steps back through saved versions of prompt.md."
+        )
+        self.refresh_bindings()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in (
+            "undo",
+            "redo",
+        ):  # False: the text area gets the key (select line, select all)
+            can = history.can_undo if action == "undo" else history.can_redo
+            return not self.typed() and can("prompt")
+        return True
+
+    def step(self, redo: bool) -> None:
+        entry = (history.redo if redo else history.undo)("prompt")
+        if entry is None:
+            return
+        self.current = files.read_text("prompt.md") or ""
+        self.moved = True
+        self.last = entry["summary"]
+        self.query_one("#prompt", TextArea).text = self.current
+        self.sync()
+
+    def action_undo(self) -> None:
+        if not self.typed():
+            self.step(False)
+
+    def action_redo(self) -> None:
+        if not self.typed():
+            self.step(True)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        self.query_one("#save", Button).disabled = not self.changed()
+        self.sync()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def action_save(self) -> None:
-        if self.changed():
+        if self.changed() or (self.moved and not self.typed()):
             self.dismiss(self.query_one("#prompt", TextArea).text)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "save":
-            self.action_save()
-        else:
-            self.action_cancel()
+        match event.button.id:
+            case "save":
+                self.action_save()
+            case "undo":
+                self.action_undo()
+            case "redo":
+                self.action_redo()
+            case _:
+                self.action_cancel()
 
 
 KEY_LABELS = [  # (key, label under 120 columns, label from 120)
@@ -336,6 +404,7 @@ class TuneScreen(Screen):
         Binding("plus,equals_sign", "score(0.01)", "Target +", show=False),
         Binding("minus", "score(-0.01)", "Target -", show=False),
         ("f2", "done", "Done"),
+        ("r", "rerun", "Re-run"),
         ("x", "stop", "Stop"),
         ("s", "start", "Resume"),
     ]
@@ -389,6 +458,8 @@ class TuneScreen(Screen):
         self.errors: dict[int, str] = {}
         self.reasoning: dict[int, str] = {}
         self.metrics: metrics.Metrics | None = None
+        # the components the last finished dev run was made under; Done waits until they are current
+        self.ran: dict[str, str] | None = None
         self.running = self.stopped = False
         self.worker = None
         self.tab = "results"  # under 120 columns: "chat" or "results"
@@ -416,7 +487,8 @@ class TuneScreen(Screen):
                 target += f" (dev set now: {value:.3f})"
             return (
                 f"# Current prompt\n{self.prompt or 'None yet.'}\n\n"
-                f"# Current taxonomy\n{self.taxonomy_text()}\n\n# Target\n{target}"
+                f"# Current taxonomy\n{self.taxonomy_text()}\n\n# Target\n{target}\n\n"
+                f"{files.assistant_context()}"
             )
 
         @self.agent.tool_plain
@@ -425,6 +497,36 @@ class TuneScreen(Screen):
             if self.running or self.stopped:
                 return NOT_AVAILABLE
             return self.disagreements_text(label, limit)
+
+        @self.agent.tool_plain
+        async def get_gold_coverage(split: Literal["dev", "test"] | None = None) -> str:
+            """Read the gold coverage: rows, labelled rows and the rows no longer in the candidate pool (id, text, labels), optionally for one split."""
+            return files.gold_coverage_text(split)
+
+        @self.agent.tool_plain
+        async def remove_gold(ids: list[str], reason: str) -> str:
+            """Remove gold rows by id, for example rows that are no longer in the candidate pool. The user confirms; nothing is removed until they do. Their labels are kept in a log."""
+            wanted = set(ids)
+            rows = [r for r in files.read_gold() if r.id in wanted]
+            if not rows:
+                return "No gold row has those ids. Nothing removed."
+            if not await self.app.push_screen_wait(RemoveGoldScreen(rows, reason)):
+                return "The user rejected the removal."
+            n = gold_screen.remove(ids, reason)
+            self.run_worker(self.sync_status(), group="status")
+            return f"Removed {n} rows."
+
+        @self.agent.tool_plain
+        async def draw_gold(split: Literal["dev", "test"], n: int) -> str:
+            """Draw n more candidates into a gold split, for example after rows were removed. They start unlabelled; the user labels them, you cannot."""
+            if n < 1:
+                return "Nothing drawn: n must be at least 1."
+            rows = gold_screen.draw(split, n)
+            self.run_worker(self.sync_status(), group="status")
+            return (
+                f"Drew {len(rows)} unlabelled {split} rows. They are not labelled yet: "
+                "the user labels them on the gold screen."
+            )
 
         @self.agent.tool
         async def propose_prompt(
@@ -460,6 +562,7 @@ class TuneScreen(Screen):
             )
             yield AppFooter()
             return
+        yield StageBanner(self.banner_text, id="stale-banner")
         with Horizontal(id="tabs"):
             yield Tab("Chat", "chat")
             yield Tab("Results", "results")
@@ -494,6 +597,7 @@ class TuneScreen(Screen):
                         yield Button("−", id="score-down", compact=True)
                         yield Static("", id="score")
                         yield Button("+", id="score-up", compact=True)
+                        yield key_button("Re-run", "r", id="rerun", compact=True)
                     with Horizontal(id="action-row"):
                         yield key_button(
                             "Propose edit", "e", id="propose", compact=True
@@ -505,6 +609,30 @@ class TuneScreen(Screen):
                 yield Static("", id="note", markup=False)
                 yield RunIndicator()
         yield AppFooter()
+
+    def banner_text(self) -> str:
+        """The STALE banner: what changed and what to do about it."""
+        if self.running or self.stopped or self.metrics is None:
+            return ""
+        kind, reason = current_status()[5]
+        if not self.current:
+            if changed := files.changed(self.ran or {}):
+                reason = files.REASONS[changed[0]]
+            return (
+                f"STALE: {reason or 'inputs changed'}. These results are from before the "
+                "change. Press r to re-run, then approve again." + plan_hint()
+            )
+        if kind != "stale":
+            return ""
+        return (
+            f"STALE: {reason}. The results below are current. Approve again with F2."
+            + plan_hint()
+        )
+
+    @property
+    def current(self) -> bool:
+        """The metrics on screen were made with the prompt, taxonomy, model and gold rows as they are now."""
+        return self.ran is not None and not files.changed(self.ran)
 
     def on_mount(self) -> None:
         if not self.ready:
@@ -574,6 +702,18 @@ class TuneScreen(Screen):
         self.note = ""
         self.worker = self.run_worker(self.run_dev(), exclusive=True)
 
+    def action_rerun(self) -> None:
+        """r: classify the dev set again with the files as they are now (cached items are free)."""
+        if not self.ready or self.running or self.stopped:
+            return
+        rows = [r for r in files.read_gold() if r.split == "dev" and r.labels]
+        if [(r.id, r.labels) for r in rows] != [(r.id, r.labels) for r in self.rows]:
+            # other rows than the results on screen were made with: those results go
+            self.rows = rows
+            self.metrics, self.predicted = None, []
+            self.errors, self.reasoning = {}, {}
+        self.rerun()
+
     def action_start(self) -> None:
         if self.stopped:
             self.rerun()  # finished items come back from the classifier cache
@@ -596,6 +736,7 @@ class TuneScreen(Screen):
         )
         start = time.monotonic()
         finished = completed = False
+        snapshot = files.current_inputs("dev_done")
         indicator.set_button("stop")
         indicator.set_progress(0, total, detail=detail)
         self.show()
@@ -625,6 +766,7 @@ class TuneScreen(Screen):
                 files.all_labels(self.taxonomy),
             )
             self.history.append(self.target())
+            self.ran = snapshot
             completed = True
         except Exception as e:  # noqa: BLE001  auth/network errors must not kill the app
             finished = True  # failed, not stopped: the panels show again
@@ -641,7 +783,7 @@ class TuneScreen(Screen):
                         self.query_one("#dis").focus()
                 if completed:
                     self.run_worker(
-                        self.sync_context(), group="context", exclusive=True
+                        self.sync_context_and_status(), group="context", exclusive=True
                     )
 
     def target(self) -> float:
@@ -654,6 +796,7 @@ class TuneScreen(Screen):
     def show(self) -> None:
         m = self.metrics
         busy = self.running or self.stopped
+        self.query_one(StageBanner).refresh_text()
         for id_ in ("metrics-panel", "body", "controls"):
             self.query_one(f"#{id_}").display = not busy
         self.query_one(RunIndicator).display = busy
@@ -707,8 +850,9 @@ class TuneScreen(Screen):
             idle and m and m.disagreements
         )
         self.query_one("#edit-prompt", Button).disabled = not (not busy and m)
+        self.query_one("#rerun", Button).disabled = busy
         done = self.query_one("#done", Button)
-        done.disabled = busy or m is None
+        done.disabled = busy or m is None or not self.current
         done.variant = "success" if self.met() else "default"
         self.refresh_bindings()
 
@@ -763,6 +907,8 @@ class TuneScreen(Screen):
             self.action_propose()
         elif id_ == "edit-prompt":
             self.action_edit_prompt()
+        elif id_ == "rerun":
+            self.action_rerun()
         elif id_ == "done":
             self.action_done()
         elif "Stop" in str(event.button.label):
@@ -807,11 +953,22 @@ class TuneScreen(Screen):
     def action_edit_prompt(self) -> None:
         if not self.ready or self.running or self.stopped or not self.metrics:
             return
-        self.app.push_screen(PromptEditScreen(self.prompt), self.manual)
+        modal = PromptEditScreen(self.prompt)
+        self.app.push_screen(modal, lambda new: self.manual(new, modal.moved))
 
-    def manual(self, new: str | None) -> None:
-        """The Edit prompt modal closed: tell the assistant what the user changed, then re-run."""
-        if new is None or not new.strip() or new == self.prompt:
+    def manual(self, new: str | None, moved: bool = False) -> None:
+        """The Edit prompt modal closed: tell the assistant what the user changed, then re-run.
+
+        `moved`: undo or redo changed prompt.md inside the modal. The screen follows the file even if the
+        user cancelled, and re-runs only when they chose Re-run.
+        """
+        if moved:
+            self.history_changed(history.entries("prompt")[-1])
+        if new is None or not new.strip():
+            return
+        if new == self.prompt:
+            if moved:
+                self.rerun()
             return
         self.note_edit(
             "Prompt: edited by the user",
@@ -821,6 +978,20 @@ class TuneScreen(Screen):
         )
         self.accepted(new)
 
+    def history_changed(self, entry: dict, note: str | None = None) -> None:
+        """prompt.md moved (undo, redo, restore, an outside edit): follow it. Nothing is re-run."""
+        disk = files.read_text("prompt.md") or ""
+        if disk == self.prompt:
+            return
+        for pending in self.proposals:
+            if pending["status"] == "pending":  # its diff no longer applies
+                self.set_status(pending, "superseded")
+        old, self.prompt = self.prompt, disk
+        if entry["source"] in ("undo", "redo", "restore"):
+            self.note = note or entry["summary"]
+            self.note_edit(entry["summary"], prompt_record(entry["summary"], old, disk))
+        self.show()
+
     def accepted(self, new: str | None) -> None:
         """A new prompt text (accepted proposal or manual edit): write it, drop stale proposals, re-run."""
         if new is None or not new.strip() or new == self.prompt:
@@ -828,25 +999,32 @@ class TuneScreen(Screen):
         for entry in self.proposals:
             if entry["status"] == "pending":  # its diff no longer applies
                 self.set_status(entry, "superseded")
-        files.write_text("prompt.md", new)
+        history.save("prompt", new, "user", "Prompt: accepted")
         self.prompt = new
         self.rerun()
 
     def action_done(self) -> None:
-        if not self.ready or self.running or self.stopped or not self.metrics:
+        if (
+            not self.ready
+            or self.running
+            or self.stopped
+            or not self.metrics
+            or not self.current
+        ):
             return
         goto = lambda: self.app.goto_stage(self.app.stage + 1)  # ty: ignore[unresolved-attribute]
+        score = f"dev {self.config.target_metric} {self.target():.3f}"
         if self.met():
-            state = files.read_state()
-            state.dev_done = True
-            files.write_state(state)
+            files.approve("dev_done", 5, f"Approved: Tuning loop ({score})")
             goto()
             return
         confirm_approve(
             self,
             "dev_done",
+            5,
             f"{self.config.target_metric} {self.target():.3f} is below the target "
             f"{self.config.target_score:.2f}. Accept tuning anyway?",
+            f"Approved: Tuning loop ({score}, below target)",
             then=goto,
         )
 
@@ -928,6 +1106,7 @@ class TuneScreen(Screen):
         text += f"\n\n# Disagreements ({more})\n{self.describe(shown)}\n\n"
         if first:
             text += f"# Current prompt\n{self.prompt}\n\n# Taxonomy\n{self.taxonomy_text()}\n\n"
+        text += f"{files.assistant_context()}\n\n"
         text += f"# Instructions\n{FIRST_REPLY if first else UPDATE_REPLY}"
         n = len(m.disagreements)
         plural = "" if n == 1 else "s"
@@ -950,6 +1129,7 @@ class TuneScreen(Screen):
         if chat.history and old and old.get("context_digest") == digest:
             return
         first = not (chat.history and old)
+        told = status_digest()
         text, summary = self.run_context(first)
         if not first and old and old.get("metric") == self.config.target_metric:
             summary = (
@@ -962,10 +1142,38 @@ class TuneScreen(Screen):
             write_meta(
                 {
                     "context_digest": digest,
+                    "status_digest": told,
                     "metric": self.config.target_metric,
                     "value": self.target(),
                 }
             )
+
+    async def sync_context_and_status(self) -> None:
+        await self.sync_context()
+        await self.sync_status()
+
+    async def sync_status(self) -> None:
+        """Add an UPDATED line when the pipeline status or gold coverage is not what the assistant last
+        saw (spec 004 D9). Nothing is sent before a first context turn recorded what it saw."""
+        if not self.ready:
+            return
+        chat = self.query_one(ChatPanel)
+        while chat.running:
+            await asyncio.sleep(0.05)
+        await self.flush_records()
+        old = read_meta()
+        digest = status_digest()
+        if not (chat.history and old and old.get("status_digest")):
+            return
+        if old["status_digest"] == digest:
+            return
+        text = f"{files.assistant_context()}\n\n# Instructions\n{STATUS_REPLY}"
+        sent = len(chat.history)
+        await chat.send_context(
+            text, "update", "Pipeline status or gold coverage changed"
+        )
+        if len(chat.history) > sent:  # a failed turn must not claim to be sent
+            write_meta({"status_digest": digest})
 
     def note_edit(self, summary: str, body: str) -> None:
         """Queue a YOU EDITED line; it is written once no reply is streaming (a turn would overwrite it)."""

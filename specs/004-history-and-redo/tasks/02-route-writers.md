@@ -1,0 +1,3 @@
+# 02 — Route the three files' writers through `history.save`
+
+Spec: "Where `save` replaces existing writes", Taxonomy and gold (`NeedsVersion`, both kinds), Tests → Taxonomy. Seeds (`brief.write_seeds`), taxonomy (`commit_taxonomy`, `write_taxonomy` tool, `restore`) and prompt (`save_prompt`, Tuning prompt edits, agent writes) save through `history.save` with the right `source`. Edit recording to the agent is unchanged. Undo/redo that would change labels raises `NeedsVersion` with kind `restore` or `new_version`; link to `files.start_new_version`/`restore_version` and log `version` entries with summaries (D12 unchanged). `sync()` is called at startup and on `events.AppFocus` (verify the API in installed Textual).

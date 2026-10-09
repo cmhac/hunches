@@ -9,6 +9,7 @@ from pydantic_ai.usage import RunUsage
 from textual.widgets import Button, Static
 from textual.widgets._footer import FooterKey
 
+from hunches import classifier as classifier_mod
 from hunches import cost, files
 from hunches.app import HunchesApp
 from hunches.classifier import Prediction
@@ -107,6 +108,64 @@ def test_pending_skips_done_and_retries_errors():
     files.append_jsonl("results.jsonl", {"id": "0", "labels": ["a"]})
     files.append_jsonl("results.jsonl", {"id": "1", "labels": [], "error": "boom"})
     assert [c["id"] for c in run.pending()] == ["1", "2", "3", "4", "5"]
+
+
+def digest(prompt=PROMPT, model="test"):
+    taxonomy = files.read_taxonomy()
+    return hashlib.sha256(
+        json.dumps([model, classifier_mod.system_prompt(prompt, taxonomy)]).encode()
+    ).hexdigest()
+
+
+def test_pending_counts_only_rows_of_the_current_run():
+    now = digest()
+    files.append_jsonl("results.jsonl", {"id": "0", "labels": ["a"], "run": now})
+    files.append_jsonl("results.jsonl", {"id": "1", "labels": ["a"], "run": "old"})
+    files.append_jsonl("results.jsonl", {"id": "2", "labels": ["a"]})  # before 004
+    assert [c["id"] for c in run.pending()] == ["1", "3", "4", "5"]
+
+
+async def test_run_records_the_run_digest_and_replaces_stale_rows(monkeypatch):
+    use_function_model(monkeypatch)
+    files.append_jsonl(
+        "results.jsonl",
+        {
+            "id": "1",
+            "text": "old",
+            "labels": ["b"],
+            "max_similarity": 0.7,
+            "run": "old",
+        },
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("s")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    rows = files.read_jsonl("results.jsonl")
+    assert ids(rows) == ["0", "1", "2", "3", "4", "5"]  # no duplicate of 1
+    assert {r["run"] for r in rows} == {digest()}
+    assert [r["labels"] for r in rows if r["id"] == "1"] == [["a"]]
+    assert files.first_incomplete_stage() == 9
+
+
+async def test_test_result_inputs_decide_the_block(monkeypatch):
+    use_function_model(monkeypatch)
+    files.write_text(
+        "test_result.json", json.dumps({"inputs": files.current_inputs("test_done")})
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, RunScreen)
+        assert not screen.blocked()
+        # a gold change alone does not make the prompt untested
+        files.write_gold(files.read_gold()[:-1])
+        assert not screen.blocked()
+        files.write_text("prompt.md", "Changed.")
+        assert screen.blocked()
 
 
 def test_estimates_from_fixture_timings(monkeypatch):
@@ -232,12 +291,14 @@ def block(screen) -> tuple[str, str, str, str]:
 
 async def test_untested_prompt_is_a_hard_block(monkeypatch):
     use_function_model(monkeypatch)
-    files.write_text("prompt.md", "Changed.")
     app = HunchesApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, RunScreen)
+        files.write_text("prompt.md", "Changed.")
+        screen.show()
+        await pilot.pause()
         assert not screen.query_one(RunIndicator).display
         banner = screen.query_one("#blocked-text", Static)
         assert str(banner.render()) == (

@@ -67,6 +67,10 @@ class SearchScreen(Screen):
             yield Label("", id="status")
             yield LabelBar(0, 0, "", align="left", id="progress")
         yield Static("", id="pool", classes="banner -stale")
+        yield Static(
+            "", id="embedding-warning", classes="banner -warning", markup=False
+        )
+        yield Static("", id="gold-orphans", classes="warn", markup=False)
         yield Label("", id="warning", classes="warn")
         yield Label("", id="error", classes="error")
         with Vertical(id="results"):
@@ -103,7 +107,9 @@ class SearchScreen(Screen):
         """Button label, notes, dimming and the pool banner from the files and `searching`."""
         approved = files.read_state().seeds_approved
         exists = files.read_text("candidates.jsonl") is not None
-        changed = exists and candidates.seeds_changed()
+        seeds = exists and candidates.seeds_changed()
+        model = files.embedding_change() if exists else None
+        changed = seeds or bool(model)
         button = self.query_one("#run", Button)
         if self.searching:
             button.label = "Searching…"
@@ -116,13 +122,39 @@ class SearchScreen(Screen):
         if not approved:
             note = "Seeds are not approved yet."
         elif changed and not self.searching:
-            note = "Seeds changed, rerun needed"
+            note = (
+                "Seeds changed, rerun needed"
+                if seeds
+                else "Embedding model changed, rerun needed"
+            )
         status = self.query_one("#status", Label)
         status.update(note)
         status.set_class(bool(note), "warn")
         status.display = bool(note)
         self.query_one("#progress").display = self.searching
         self.query_one("#results").set_class(not approved or not exists, "-inactive")
+        say(
+            self.query_one("#embedding-warning", Static),
+            f"WARNING: this project now uses the embedding model {model[0]}, but the current "
+            f"candidates were built with {model[1]}. Run the search again. Expect gold rows to "
+            "be reported as no longer in the pool."
+            if model and not self.searching
+            else "",
+        )
+        coverage = files.gold_coverage()
+        lost = []
+        for split, stage in (("dev", 4), ("test", 6)):
+            c = coverage[split]
+            if not exists or not c["orphaned"]:
+                continue
+            what = f"{c['orphaned']} of your {c['rows']} {split} items are no longer in the"
+            if lost:
+                lost.append(f"{what} pool.")
+            else:
+                lost.append(
+                    f"{what} candidate pool. Review them on the Gold screen (stage {stage})."
+                )
+        say(self.query_one("#gold-orphans", Static), " ".join(lost))
         count = len(files.read_jsonl("candidates.jsonl")) if exists else 0
         need = 2 * files.SAMPLE_SIZE
         say(
@@ -140,7 +172,7 @@ class SearchScreen(Screen):
         if self.searching or not files.read_state().seeds_approved:
             return
         if files.read_text("candidates.jsonl") is not None and not (
-            candidates.seeds_changed()
+            candidates.seeds_changed() or files.embedding_change()
         ):
             self.app.push_screen(ConfirmScreen(RERUN), self.confirmed)
         else:

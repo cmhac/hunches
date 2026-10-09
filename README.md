@@ -57,6 +57,9 @@ Everything works at 80x24.
 | `f3` | Project settings of the open project |
 | `f4` | Projects |
 | `f5` | System settings |
+| `f6` / `f7` | Undo / redo the last change to the seeds, labels or prompt being edited |
+| `f8` | History: every change to seeds, labels and prompt, and every approval |
+| `f9` | Redo plan: what is out of date and what redoing it costs |
 | `n` / `p` | Next / previous stage (not on Projects, where `n` is New) |
 | `q` | Quit |
 | `ctrl+s` | Save the label or prompt being edited (Taxonomy) |
@@ -65,7 +68,10 @@ Everything works at 80x24.
 | `c` | Switch between Chat and Results on a narrow Tuning screen |
 | `x` / `s` | Stop / start or resume a classifier run (Tuning, Test, Threshold, Full run) |
 
-The F-keys work from every screen, even with a text field focused, but not on top of a dialog.
+The F-keys work from every screen, even with a text field focused, but not on top of a dialog. F6 and F7 act on
+the editor you are in (the seed list, the focused panel on Taxonomy, the prompt box on Tuning) and are off while
+a draft is open there. Some terminals and operating systems reserve function keys; every F-key action also has a
+button.
 
 ## System state vs project state
 
@@ -123,11 +129,54 @@ button on the Labels panel lists them; **Restore** makes one live again, after a
 new version first, so a restore can itself be undone. If the assistant's `write_taxonomy` would start a version, it
 asks you to confirm.
 
+## History, undo and redo
+
+Hunches keeps its own record of changes to the three files that define the analysis: `seeds.csv`, `taxonomy.yaml`
+and `prompt.md`. Every save (yours, the assistant's, or an edit made outside hunches, such as `git checkout`) is
+stored under `.hunches/history/` as a verbatim copy plus a line in an append-only log; nothing is ever deleted.
+Each file has its own undo stack, so undoing in the Prompt panel never reverts a seed edit. Gold labels are not in
+the history.
+
+- **Undo / redo (F6 / F7)** step the file you are editing back and forth. They change the file and nothing else:
+  no classifier call and no automatic re-run. The assistant is told about it, with no model call.
+- **History (F8)** lists every change and every approval, newest first, with who made it (you, the assistant,
+  outside, undo, redo, restore). Select an entry for a diff or the saved text, and **Restore this** to make the
+  file match that moment again. A restore is itself an edit you can undo.
+- If you undo or restore something that changes the set of label names while gold labels exist, hunches asks first
+  and archives the current state as a taxonomy version (see below); undoing the start of a version brings that
+  version's gold labels back.
+- If a file changes outside hunches, a notice appears once with Undo, History and Dismiss.
+
+### Stale work and the Redo plan
+
+Each stage remembers what it was computed from. When something upstream changes, the stage is marked `↻` (stale)
+in the rail with a reason such as `prompt changed`, `seeds changed`, `embedding model changed` or `gold rows
+changed`; `◐` marks a stage that lost work, such as a gold set that is now `44 of 50 rows`. Stages you have not
+reached get no mark. Marked stages keep their old files until you redo them, and the banner on each screen says
+why. Nothing is approved for you: after redoing a stage you approve it again.
+
+**Redo plan (F9)** lists the stale and incomplete stages in order with how many classifier calls each needs to be
+live and how many are already cached, and the cost (`?` when a model's price is unknown, never `$0`). Its button
+goes to the earliest stage; after each re-approval it reopens on the next. The classifier cache is keyed by
+content, so going back to an earlier prompt, or redoing a run whose inputs have not changed, costs nothing. A
+description-only edit to a label changes the system prompt and therefore re-classifies everything, which is
+correct. The prompt versions you see on Tuning are only a counter for that screen; the history does not number or
+name prompt versions.
+
+### Gold after the seeds change
+
+When a new search leaves some of your gold items outside the candidate pool, they stay labelled and counted. Search
+shows how many, and the Gold screen offers **Remove stale rows** (confirmed; the rows are kept in
+`gold_removed.jsonl` and never drawn again) and **Draw N replacements** to label. The Tuning assistant can look at
+this too (`get_gold_coverage`), ask to remove rows (you confirm) and draw new ones, but never sets a label.
+Removing test rows after you have seen the test result weakens it as held-out evidence; the confirmation says so.
+
 ## What to commit
 
 System state is outside the repository, so there is nothing of it to commit. Everything in `.hunches/` is plain files and the only state: config, seeds, candidates, taxonomy, prompt, gold labels,
-threshold, results, chat history, cost and the call cache. The tool never runs git; you commit. If `cache/` grows
-too large, gitignore it. Keep `.env` out of git.
+threshold, results, chat history, cost, the edit history and the call cache. The tool never runs git; you commit.
+`history/` is small text and should be committed; if `cache/` grows too large, gitignore it (the history still
+works, going back just costs the calls again). Keep `.env` out of git.
 
 ## Cost tracking
 

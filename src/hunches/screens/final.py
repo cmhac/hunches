@@ -1,5 +1,4 @@
 import dataclasses
-import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -11,13 +10,23 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Static
 
 from hunches import cost, files, metrics
-from hunches.app import AppFooter, StatusHeader, key_button, panel, retitle, say
+from hunches.app import (
+    AppFooter,
+    StageBanner,
+    StatusHeader,
+    current_status,
+    key_button,
+    panel,
+    plan_hint,
+    retitle,
+    say,
+)
 from hunches.classifier import classify_many
 from hunches.screens import report
 from hunches.screens.gold import GoldScreen
 from hunches.screens.progress import RunIndicator, eta_text
 
-RESULT = "test_result.json"
+RESULT = files.RESULT_FILE
 
 
 def test_stage() -> Screen:
@@ -26,12 +35,6 @@ def test_stage() -> Screen:
     if not rows or any(not r.labels for r in rows):
         return GoldScreen("test")
     return FinalScreen()
-
-
-def prompt_hash() -> str:
-    # JSON keeps ("ab", "c") and ("a", "bc") distinct
-    data = [files.read_text("prompt.md") or "", files.read_config().classifier_model]
-    return hashlib.sha256(json.dumps(data).encode()).hexdigest()
 
 
 class FinalScreen(Screen):
@@ -78,7 +81,7 @@ class FinalScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
-        yield Static("", id="banner", classes="banner -stale", markup=False)
+        yield StageBanner(self.banner_text, id="banner")
         with panel(Vertical(id="metrics-panel"), "test set · held out"):
             yield Static(
                 "Tuning against test disagreements weakens this held-out result.",
@@ -119,7 +122,20 @@ class FinalScreen(Screen):
         self.call_after_refresh(self.show)  # needs the laid-out table width
 
     def stale(self) -> bool:
-        return self.result is not None and self.result["prompt_hash"] != prompt_hash()
+        return self.result is not None and bool(files.result_changes(self.result))
+
+    def banner_text(self) -> str:
+        if self.running or self.stopped or self.result is None:
+            return ""
+        if self.stale():
+            return "STALE: prompt.md or classifier model changed since this result was computed. Press r to re-run."
+        kind, reason = current_status()[6]
+        if kind != "stale":
+            return ""
+        return (
+            f"STALE: {reason}. The result below is current. Accept again with F2."
+            + plan_hint()
+        )
 
     def action_rerun(self) -> None:
         if self.running:
@@ -192,7 +208,7 @@ class FinalScreen(Screen):
                 files.all_labels(self.taxonomy),
             )
             self.result = {
-                "prompt_hash": prompt_hash(),
+                "inputs": files.current_inputs("test_done"),
                 "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
                 "metrics": dataclasses.asdict(m),
                 "disagreements": [
@@ -220,16 +236,12 @@ class FinalScreen(Screen):
 
     def show(self) -> None:
         r = self.result
-        banner = self.query_one("#banner", Static)
         busy = self.running or self.stopped
-        banner.display = self.stale() and not busy
+        self.query_one(StageBanner).refresh_text()
         self.query_one("#metrics-panel").display = not busy
         self.query_one("#body").display = not busy
         self.query_one(RunIndicator).display = busy
         self.query_one("#accept", Button).disabled = busy or r is None or self.stale()
-        banner.update(
-            "STALE: prompt.md or classifier model changed since this result was computed. Press r to re-run."
-        )
         names = [lab.name for lab in self.taxonomy.labels]
         retitle(
             self.query_one("#metrics-panel"),
@@ -296,7 +308,13 @@ class FinalScreen(Screen):
             self.note = "The result is stale: re-run (r) before accepting."
             self.show()
             return
-        state = files.read_state()
-        state.test_done = True
-        files.write_state(state)
+        score = metrics.target_value(
+            metrics.Metrics.from_dict(self.result["metrics"]),
+            self.config.target_metric,
+        )
+        files.approve(
+            "test_done",
+            6,
+            f"Approved: Gold test (test {self.config.target_metric} {score:.3f})",
+        )
         self.app.goto_stage(self.app.stage + 1)  # ty: ignore[unresolved-attribute]

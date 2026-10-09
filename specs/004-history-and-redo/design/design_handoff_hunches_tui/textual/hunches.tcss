@@ -1,0 +1,50 @@
+/* hunches app stylesheet. Set CSS_PATH = "hunches.tcss" on HunchesApp. */
+
+Screen { background: $background; }
+
+StatusHeader {
+    dock: top; height: 1; padding: 0 1;
+    background: $panel; color: $foreground;
+}
+StatusHeader.-cost-unknown { background: $warning 20%; }
+
+/* Bordered regions. Titles name the file or thing shown: "seeds.csv · 14". */
+.panel {
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
+    padding: 0 1;
+}
+.panel:focus-within { border: round $border; border-title-color: $primary; }
+
+/* One-line messages under a panel. Always prefixed with a word, never colour alone. */
+.note    { height: auto; color: $text-muted; }
+.warn    { height: auto; color: $warning; }
+.error   { height: auto; color: $error; }
+.ok      { height: auto; color: $success; }
+.banner  { height: auto; padding: 0 1; text-style: bold; }
+.banner.-stale   { background: $error 25%; color: $error; }
+.banner.-warning { background: $warning 20%; color: $warning; }
+
+/* Badges: PASS FAIL STALE DIFFERS, reverse-video words */
+.badge         { width: auto; padding: 0 1; text-style: bold; }
+.badge.-pass   { background: $success; color: $background; }
+.badge.-fail   { background: $error; color: $background; }
+.badge.-stale  { background: $warning; color: $background; }
+
+DataTable { background: $background; }
+DataTable > .datatable--header { background: $surface; color: $text-muted; text-style: bold; }
+
+ChatPanel RichLog { background: $background; padding: 0 1; }
+ChatPanel #live   { color: $accent; padding: 0 1; }
+ChatPanel Input   { border: tall $border-blurred; }
+ChatPanel Input:focus { border: tall $border; }
+
+ModalScreen { background: $background 70%; align: center middle; }
+ModalScreen > Vertical {
+    width: 60; height: auto; max-height: 90%;
+    border: round $primary; background: $surface; padding: 1 2;
+}
+
+Footer { background: $footer-background; }

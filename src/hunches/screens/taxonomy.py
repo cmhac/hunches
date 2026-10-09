@@ -23,7 +23,7 @@ from textual.markup import escape
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, Markdown, Select, Static, TextArea
 
-from hunches import candidates, files, metrics
+from hunches import candidates, files, history, metrics
 from hunches.app import (
     AppFooter,
     ChatPanel,
@@ -37,6 +37,7 @@ from hunches.app import (
     say,
 )
 from hunches.screens.brief import numbered
+from hunches.screens.history import attempt
 from hunches.theme import editor, label_tag
 
 INSTRUCTIONS = """\
@@ -362,6 +363,8 @@ class TaxonomyScreen(Screen):
         ("e", "edit", "Edit"),
         ("m", "mode", "Mode"),
         ("f2", "approve", "Approve"),
+        ("f6", "undo", "Undo"),
+        ("f7", "redo", "Redo"),
         Binding("ctrl+s", "save", "Save"),
         Binding("escape", "discard", "Discard"),
         Binding("a", "add_label", "Add label", show=False),
@@ -385,6 +388,7 @@ class TaxonomyScreen(Screen):
     TaxonomyScreen .label-name { width: 16; margin-right: 1; }
     TaxonomyScreen .label-desc { width: 1fr; margin-right: 1; }
     TaxonomyScreen .label-delete { width: 3; }
+    TaxonomyScreen #labels-view-buttons, TaxonomyScreen #prompt-view-buttons { height: auto; }
     TaxonomyScreen .buttons-row { height: auto; }
     TaxonomyScreen .buttons-row Button { margin-right: 1; }
     TaxonomyScreen .edit-error { width: 1fr; height: auto; color: $error; }
@@ -432,7 +436,7 @@ class TaxonomyScreen(Screen):
             text += "\n\n# Current prompt\n" + (self.prompt or "None yet.")
             if mode:
                 text += f"\n\nThe user chose mode {mode}; do not ask about it again."
-            return text
+            return f"{text}\n\n{files.assistant_context()}"
 
         @self.agent.tool_plain
         async def write_taxonomy(
@@ -471,7 +475,7 @@ class TaxonomyScreen(Screen):
             """Write prompt.md, the classifier prompt."""
             if self.edit == "prompt":
                 return "Not written: the user is editing the prompt. Ask them to save or discard first."
-            files.write_text("prompt.md", prompt)
+            history.save("prompt", prompt, "assistant", "Prompt written by assistant")
             self.prompt = prompt
             self.updated.add("prompt")
             self.show_prompt()
@@ -504,9 +508,13 @@ class TaxonomyScreen(Screen):
                         )
                     yield VerticalScroll(id="labels-body")
                     yield Static(EMPTY_LABELS, id="empty-labels", classes="empty")
-                    with Horizontal(id="labels-view-buttons", classes="buttons-row"):
-                        yield key_button("Edit labels", "e", id="edit-labels")
-                        yield Button("Versions", id="versions")
+                    with Vertical(id="labels-view-buttons"):
+                        with Horizontal(classes="buttons-row"):
+                            yield key_button("Edit labels", "e", id="edit-labels")
+                            yield Button("Versions", id="versions")
+                        with Horizontal(classes="buttons-row"):
+                            yield key_button("Undo", "F6", id="undo-labels")
+                            yield key_button("Redo", "F7", id="redo-labels")
                     with Vertical(id="labels-edit-buttons"):
                         with Horizontal(classes="buttons-row"):
                             yield key_button("Add label", "a", id="add-label")
@@ -520,8 +528,12 @@ class TaxonomyScreen(Screen):
                     with VerticalScroll(id="prompt-scroll"):
                         yield Markdown("", id="prompt-view")
                     yield Static(EMPTY_PROMPT, id="empty-prompt", classes="empty")
-                    with Horizontal(id="prompt-view-buttons", classes="buttons-row"):
-                        yield key_button("Edit prompt", "e", id="edit-prompt")
+                    with Vertical(id="prompt-view-buttons"):
+                        with Horizontal(classes="buttons-row"):
+                            yield key_button("Edit prompt", "e", id="edit-prompt")
+                        with Horizontal(classes="buttons-row"):
+                            yield key_button("Undo", "F6", id="undo-prompt")
+                            yield key_button("Redo", "F7", id="redo-prompt")
                     with Horizontal(id="prompt-edit-buttons", classes="buttons-row"):
                         yield key_button(
                             "Save", "^s", id="save-prompt", variant="success"
@@ -676,6 +688,13 @@ class TaxonomyScreen(Screen):
             sub += f" · version {len(files.list_versions()) + 1}" if t else ""
         retitle(self.query_one("#labels-panel"), subtitle=sub)
         self.query_one("#versions", Button).disabled = not files.version_numbers()
+        for artifact, suffix in (("taxonomy", "labels"), ("prompt", "prompt")):
+            self.query_one(f"#undo-{suffix}", Button).disabled = (
+                editing is not None or not history.can_undo(artifact)
+            )
+            self.query_one(f"#redo-{suffix}", Button).disabled = (
+                editing is not None or not history.can_redo(artifact)
+            )
         if prompt:
             sub = badge("UNSAVED" if self.prompt_dirty() else "EDITING")
         elif "prompt" in self.updated:
@@ -692,7 +711,29 @@ class TaxonomyScreen(Screen):
             return self.edit == "labels"
         if action in ("edit", "mode", "approve"):
             return self.edit is None
+        if action in (
+            "undo",
+            "redo",
+        ):  # dimmed, not hidden, when there is nothing to do
+            target = self.history_target()
+            can = history.can_undo if action == "undo" else history.can_redo
+            return True if self.edit is None and target and can(target) else None
         return True
+
+    @property
+    def editing(self) -> bool:
+        return self.edit is not None
+
+    def history_target(self) -> str | None:
+        """The file whose stack F6/F7 step: the focused panel's (None when the chat has focus)."""
+        focused = self.focused
+        if focused is None:
+            return None
+        if self.query_one("#labels-panel") in focused.ancestors_with_self:
+            return "taxonomy"
+        if self.query_one("#prompt-panel") in focused.ancestors_with_self:
+            return "prompt"
+        return None
 
     # ---- labels
 
@@ -763,7 +804,11 @@ class TaxonomyScreen(Screen):
         if self.needs_version(
             new
         ):  # the callers have asked the user (version_question)
-            archived = files.start_new_version(new)
+            archived = history.start_new_version(
+                new,
+                f"Taxonomy version {len(files.list_versions()) + 2} started",
+                "user" if by_user else "assistant",
+            )
             self.taxonomy = new
             if by_user:
                 summary = f"Taxonomy version {archived + 1} started"
@@ -783,7 +828,21 @@ class TaxonomyScreen(Screen):
                 f"Version {archived} archived. Approve to relabel the dev set.",
             )
             return
-        files.write_taxonomy(new)
+        mode = old and old.mode != new.mode
+        change = labels_change(old, new)
+        summary = (
+            f"Mode: {MODE_WORDS[old.mode]} → {MODE_WORDS[new.mode]}"
+            if mode
+            else change[0]
+            if change
+            else "Taxonomy written"
+        )
+        history.save(
+            "taxonomy",
+            files.taxonomy_yaml(new),
+            "user" if by_user else "assistant",
+            summary,
+        )
         self.taxonomy = new
         if by_user:
             self.record_taxonomy(old, new)
@@ -857,8 +916,8 @@ class TaxonomyScreen(Screen):
             decided,
         )
 
-    def restore(self, n: int, made: int) -> None:
-        files.restore_version(n)
+    def reload(self) -> str:
+        """Read taxonomy and prompt from the files again and redraw; returns the record body for the agent."""
         self.taxonomy = None
         try:
             self.taxonomy = files.read_taxonomy()
@@ -877,15 +936,50 @@ class TaxonomyScreen(Screen):
             if self.taxonomy
             else "None yet."
         )
+        return f"{current}\n\n# Current prompt\n{self.prompt or 'None yet.'}"
+
+    def restore(self, n: int, made: int) -> None:
+        history.restore_version(n, f"Restored taxonomy version {n}")
+        current = self.reload()
         self.query_one(ChatPanel).record(
             f"Restored taxonomy version {n}",
             f"Restored taxonomy version {n}; the previous state is archived as version {made}\n\n"
-            f"{current}\n\n# Current prompt\n{self.prompt or 'None yet.'}",
+            f"{current}",
         )
         say(
             self.query_one("#note", Static),
             f"Restored version {n}; the previous state is version {made}.",
         )
+
+    # ---- undo, redo (spec 004)
+
+    def step(self, artifact: str, redo: bool) -> None:
+        if self.edit is not None:
+            return
+        move = history.redo if redo else history.undo
+        attempt(
+            self,
+            "redo" if redo else "undo",
+            lambda confirmed: move(artifact, confirmed),
+            self.history_changed,
+        )
+
+    def action_undo(self) -> None:
+        if target := self.history_target():
+            self.step(target, False)
+
+    def action_redo(self) -> None:
+        if target := self.history_target():
+            self.step(target, True)
+
+    def history_changed(self, entry: dict, note: str | None = None) -> None:
+        """A file moved (undo, redo, restore, an outside edit): show it. Undo, redo and restore are told to the agent."""
+        current = self.reload()
+        if entry["source"] in ("undo", "redo", "restore"):
+            say(self.query_one("#note", Static), note or entry["summary"])
+            self.query_one(ChatPanel).record(
+                entry["summary"], f"{entry['summary']}\n\n{current}"
+            )
 
     # ---- prompt
 
@@ -912,7 +1006,7 @@ class TaxonomyScreen(Screen):
             return
         new = self.query_one("#prompt-text", TextArea).text
         summary, diff = prompt_change(self.prompt, new)
-        files.write_text("prompt.md", new)
+        history.save("prompt", new, "user", summary)
         self.prompt = new
         self.query_one(ChatPanel).record(summary, f"{diff}\n\n# Current prompt\n{new}")
         self.end_edit("#edit-prompt")
@@ -960,6 +1054,10 @@ class TaxonomyScreen(Screen):
             "discard-prompt": self.action_discard,
             "approve": self.action_approve,
             "versions": self.action_versions,
+            "undo-labels": lambda: self.step("taxonomy", False),
+            "redo-labels": lambda: self.step("taxonomy", True),
+            "undo-prompt": lambda: self.step("prompt", False),
+            "redo-prompt": lambda: self.step("prompt", True),
         }.get(button.id or "")
         if action:
             action()
@@ -969,6 +1067,7 @@ class TaxonomyScreen(Screen):
         self.sync()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
+        self.refresh_bindings()  # F6/F7 follow the focused panel
         for name in ("labels", "prompt"):
             if (
                 name in self.updated
@@ -993,6 +1092,8 @@ class TaxonomyScreen(Screen):
         confirm_approve(
             self,
             "taxonomy_approved",
+            3,
             f"Approve taxonomy ({taxonomy.mode}, {len(taxonomy.labels)} labels) and prompt, and start labelling?",
+            f"Approved: Taxonomy and prompt ({taxonomy.mode}, {len(taxonomy.labels)} labels)",
             then=save_target,
         )

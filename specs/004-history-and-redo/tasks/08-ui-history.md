@@ -1,0 +1,3 @@
+# 08 — UI: undo/redo, History modal, external notice
+
+Spec: UI surfaces 1-3, 6. F6 Undo, F7 Redo, F8 History modal (timeline newest first, source badges, file filter, diff/text preview via `history.text`, Restore this, restore allowed on BASELINE rows), undo/redo buttons for seeds, Labels, Prompt and Tuning prompt modal (disabled when unavailable or a draft is open; note "Undid: ..."); two-case NeedsVersion confirm modal per spec change 3; external-change notice with Undo/History/Dismiss. Undo on the prompt does not re-run. Every key has a button; one Pilot smoke test per new screen/modal; add modals to `tests/test_sizes.py`.

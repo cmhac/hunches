@@ -1,6 +1,7 @@
 import csv
 import io
 from typing import ClassVar
+from uuid import uuid4
 
 from pydantic_ai import Agent
 from textual.app import ComposeResult
@@ -9,7 +10,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Input, Static
 
-from hunches import candidates, files
+from hunches import candidates, files, history
 from hunches.app import (
     AppFooter,
     ChatPanel,
@@ -18,6 +19,7 @@ from hunches.app import (
     key_button,
     panel,
     retitle,
+    say,
 )
 
 INSTRUCTIONS = """\
@@ -29,11 +31,16 @@ seeds already proposed.
 """
 
 
-def write_seeds(seeds: list[str]) -> None:
+def write_seeds(
+    seeds: list[str],
+    source: str = "user",
+    summary: str = "",
+    group: str | None = None,
+) -> None:
     """Write seeds.csv in the format candidates.read_seeds() reads: a `seed` header, one per row."""
     out = io.StringIO()
     csv.writer(out, lineterminator="\n").writerows([["seed"], *([s] for s in seeds)])
-    files.write_text("seeds.csv", out.getvalue())
+    history.save("seeds", out.getvalue(), source, summary, group)
 
 
 class SeedInput(Input):
@@ -74,6 +81,8 @@ class BriefScreen(Screen):
         ("e", "edit", "Edit seed"),
         ("d", "delete", "Delete seed"),
         ("f2", "approve", "Approve seeds"),
+        ("f6", "undo", "Undo"),
+        ("f7", "redo", "Redo"),
         Binding("escape", "discard", "Discard"),
     ]
     DEFAULT_CSS = """
@@ -99,6 +108,7 @@ class BriefScreen(Screen):
     BriefScreen #seed-buttons Button { margin: 0 1; }
     BriefScreen #seed-buttons.-narrow { layout: grid; grid-size: 2; grid-gutter: 0 1; grid-rows: 1; }
     BriefScreen #seed-buttons.-narrow Button { width: 1fr; margin: 0; }
+    BriefScreen #hist-note { margin-top: 1; }
     """
 
     def __init__(self) -> None:
@@ -116,12 +126,17 @@ class BriefScreen(Screen):
 
         @self.agent.instructions
         def current_seeds() -> str:
-            return "# Current seeds\n" + (numbered(self.seeds) or "None yet.")
+            return (
+                "# Current seeds\n"
+                + (numbered(self.seeds) or "None yet.")
+                + "\n\n"
+                + files.assistant_context()
+            )
 
         @self.agent.tool_plain
         async def propose_seeds(seeds: list[str]) -> str:
             """Append seed phrases to the user's seed table."""
-            self.add_seeds(seeds)
+            self.add_seeds(seeds, "assistant", uuid4().hex)
             return f"Added {len(seeds)} seeds."
 
     def compose(self) -> ComposeResult:
@@ -150,26 +165,40 @@ class BriefScreen(Screen):
                     yield key_button("Add seed", "a", id="add")
                     yield key_button("Edit", "e", id="edit")
                     yield key_button("Delete", "d", id="delete")
+                    yield key_button("Undo", "F6", id="undo")
+                    yield key_button("Redo", "F7", id="redo")
                     yield key_button(
                         "Approve seeds", "F2", id="approve", variant="success"
                     )
+                yield Static("", id="hist-note", classes="note")
         yield AppFooter()
 
     def on_mount(self) -> None:
         self.seeds = candidates.read_seeds()
+        say(self.query_one("#hist-note", Static), "")
         self.show()
 
     def on_resize(self) -> None:
-        # the four buttons need about 56 columns on one row; below that, two rows of two
+        # the six buttons need about 90 columns on one row; below that, two columns
         self.query_one("#seed-buttons").set_class(
-            self.query_one("#seeds-pane").size.width < 58, "-narrow"
+            self.query_one("#seeds-pane").size.width < 90, "-narrow"
         )
+
+    @property
+    def editing(self) -> bool:
+        return self.editor is not None
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "discard":
             return self.editor is not None
         if action in ("add", "edit", "delete", "approve"):
             return self.editor is None
+        if action in (
+            "undo",
+            "redo",
+        ):  # dimmed, not hidden, when there is nothing to do
+            can = history.can_undo if action == "undo" else history.can_redo
+            return True if self.editor is None and can("seeds") else None
         return True
 
     def show(self, start: tuple[int | None, str] | None = None) -> None:
@@ -209,6 +238,8 @@ class BriefScreen(Screen):
             ("#edit", not self.seeds),
             ("#delete", not self.seeds),
             ("#approve", not self.seeds),
+            ("#undo", self.editor is not None or not history.can_undo("seeds")),
+            ("#redo", self.editor is not None or not history.can_redo("seeds")),
         ):
             self.query_one(button, Button).disabled = off
         self.refresh_bindings()
@@ -241,17 +272,22 @@ class BriefScreen(Screen):
         if event.input is self.editor:
             self.sync_editor()
 
-    def save(self) -> None:
-        write_seeds(self.seeds)
+    def save(
+        self, summary: str = "", source: str = "user", group: str | None = None
+    ) -> None:
+        write_seeds(self.seeds, source, summary, group)
+        say(self.query_one("#hist-note", Static), "")
         self.show()
 
     def record(self, summary: str, change: str) -> None:
         body = f"{change}\n\n# Current seeds\n{numbered(self.seeds) or 'None.'}"
         self.query_one(ChatPanel).record(summary, body)
 
-    def add_seeds(self, new: list[str]) -> None:
+    def add_seeds(
+        self, new: list[str], source: str = "assistant", group: str | None = None
+    ) -> None:
         self.seeds += [s.strip() for s in new if s.strip()]
-        self.save()
+        self.save(f"Seeds added: {len(new)}", source, group)
 
     def move_cursor(self, step: int) -> None:
         if self.editor is None and self.seeds:
@@ -270,7 +306,7 @@ class BriefScreen(Screen):
             return
         gone = self.seeds.pop(self.cursor)
         number = self.cursor + 1
-        self.save()
+        self.save(f"Seed {number} deleted")
         self.record(f"Seed {number} deleted", f"- {number}  {gone}")
 
     def action_discard(self) -> None:
@@ -286,17 +322,38 @@ class BriefScreen(Screen):
             self.seeds.append(text)
             number = len(self.seeds)
             self.editor = None
-            self.save()
+            self.save("Seed added")
             self.record("Seed added", f"+ {number}  {text}")
         else:
             number = editor.seed_index + 1
             self.seeds[editor.seed_index] = text
             self.editor = None
-            self.save()
+            self.save(f"Seed {number} edited")
             self.record(
                 f"Seed {number} edited",
                 f"~ {number}\n  was: {editor.was}\n  now: {text}",
             )
+
+    def action_undo(self) -> None:
+        if self.check_action("undo", ()):
+            self.step(history.undo)
+
+    def action_redo(self) -> None:
+        if self.check_action("redo", ()):
+            self.step(history.redo)
+
+    def step(self, move) -> None:
+        entry = move("seeds")
+        if entry:
+            self.history_changed(entry)
+
+    def history_changed(self, entry: dict, note: str | None = None) -> None:
+        """seeds.csv moved (undo, redo, restore, an outside edit): show it. Undo, redo and restore are told to the agent."""
+        self.seeds = candidates.read_seeds()
+        self.show()
+        if entry["source"] in ("undo", "redo", "restore"):
+            say(self.query_one("#hist-note", Static), note or entry["summary"])
+            self.record(entry["summary"], entry["summary"])
 
     def action_approve(self) -> None:
         if not self.seeds or self.editor is not None:
@@ -304,7 +361,9 @@ class BriefScreen(Screen):
         confirm_approve(
             self,
             "seeds_approved",
+            1,
             f"Approve {len(self.seeds)} seeds and start searching?",
+            f"Approved: {len(self.seeds)} seeds",
             then=lambda: self.app.goto_stage(2),  # ty: ignore[unresolved-attribute]
         )
 
@@ -313,6 +372,8 @@ class BriefScreen(Screen):
             "add": self.action_add,
             "edit": self.action_edit,
             "delete": self.action_delete,
+            "undo": self.action_undo,
+            "redo": self.action_redo,
             "approve": self.action_approve,
             "save": self.action_commit,
             "discard": self.action_discard,

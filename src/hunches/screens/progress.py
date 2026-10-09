@@ -80,6 +80,7 @@ BUTTONS = {
     "stop": ("Stop", "x", "error"),
     "resume": ("Resume", "s", "primary"),
     "start": ("Start", "s", "primary"),
+    "rerun": ("Re-run", "s", "primary"),
 }
 
 

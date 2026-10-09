@@ -121,6 +121,7 @@ async def test_build_writes_meta_and_progress_per_seed():
     meta = json.loads(files.read_text("candidates.meta.json") or "")
     assert meta["seeds_digest"] == candidates.seeds_digest(["alpha", "beta"])
     assert meta["floor"] == 0.6
+    assert meta["embedding_model"] == "m"  # config.toml's embedding_model
     assert meta["written_at"].endswith("+00:00")
 
 

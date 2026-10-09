@@ -384,3 +384,72 @@ async def test_pool_warning_banner():
         await pilot.pause()
         # the stub corpus yields 4 candidates: shown again with that number
         assert pool.display and "Only 4 candidates found." in str(pool.render())
+
+
+def gold_rows(split, ids):
+    return [
+        files.GoldRow(id=i, text=f"row {i}", labels=["a"], split=split) for i in ids
+    ]
+
+
+async def test_search_counts_gold_rows_that_left_the_pool():
+    files.write_jsonl(
+        "candidates.jsonl",
+        [
+            {
+                "id": f"i{i}",
+                "text": f"t{i}",
+                "max_similarity": 0.7,
+                "best_seed": "alpha",
+            }
+            for i in range(5)
+        ],
+    )
+    files.write_gold(gold_rows("dev", ["i0", "i1", "gone1", "gone2", "gone3"]))
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await open_search(pilot, app)
+        note = app.screen.query_one("#gold-orphans", Static)
+        assert note.display
+        assert str(note.render()) == (
+            "3 of your 5 dev items are no longer in the candidate pool. "
+            "Review them on the Gold screen (stage 4)."
+        )
+
+
+async def test_search_adds_a_sentence_for_the_test_split_and_stays_quiet_without_orphans():
+    files.write_jsonl(
+        "candidates.jsonl",
+        [
+            {
+                "id": f"i{i}",
+                "text": f"t{i}",
+                "max_similarity": 0.7,
+                "best_seed": "alpha",
+            }
+            for i in range(5)
+        ],
+    )
+    files.write_gold(
+        gold_rows("dev", ["i0", "gone1"]) + gold_rows("test", ["i1", "i2", "gone2"])
+    )
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await open_search(pilot, app)
+        note = app.screen.query_one("#gold-orphans", Static)
+        assert str(note.render()) == (
+            "1 of your 2 dev items are no longer in the candidate pool. "
+            "Review them on the Gold screen (stage 4). "
+            "1 of your 3 test items are no longer in the pool."
+        )
+        files.write_gold(gold_rows("dev", ["i0"]) + gold_rows("test", ["i1", "gone"]))
+        assert isinstance(app.screen, SearchScreen)
+        app.screen.refresh_state()
+        assert str(note.render()) == (
+            "1 of your 2 test items are no longer in the candidate pool. "
+            "Review them on the Gold screen (stage 6)."
+        )
+        files.write_gold(gold_rows("dev", ["i0"]))
+        assert isinstance(app.screen, SearchScreen)
+        app.screen.refresh_state()
+        assert not note.display

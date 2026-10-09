@@ -15,7 +15,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import Button, Input, Select, TextArea
 
-from hunches import files
+from hunches import candidates, files, history
 from hunches.app import ChatPanel, ConfirmScreen, HunchesApp
 from hunches.screens import taxonomy as tx
 from hunches.screens.taxonomy import TaxonomyScreen
@@ -390,6 +390,36 @@ async def test_instructions_carry_seeds_taxonomy_prompt_and_the_mode_sentence(
         await pilot.press("enter")
         await pilot.pause(0.3)
     assert calls.instructions[-1] == text
+
+
+async def test_instructions_carry_status_and_gold_coverage_and_the_embedding_change(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    files.write_text(
+        "candidates.meta.json",
+        json.dumps(
+            {
+                "seeds_digest": candidates.seeds_digest(["x", "y"]),
+                "embedding_model": "old-model",
+            }
+        ),
+    )
+    files.write_gold(
+        [files.GoldRow(id="g", text="gold text", labels=["a"], split="test")]
+    )
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert isinstance(pilot.app, HunchesApp)
+        pilot.app.goto_stage(3)  # startup resumes at the stale stage 2
+        await start(pilot.app, pilot)
+    text = calls.instructions[-1] or ""
+    assert "# Pipeline status\n1 Brief and seeds:" in text
+    assert "2 Search: STALE: embedding model changed (the project now uses" in text
+    assert "the candidates were built with old-model)" in text
+    assert "# Gold coverage\ndev: 0 rows" in text
+    assert "test: 1 rows, 1 labelled, 1 orphaned" in text
 
 
 async def test_instructions_without_files_say_none_yet(tmp_path, monkeypatch, calls):
@@ -834,6 +864,12 @@ async def test_approve_is_disabled_without_a_prompt_and_confirm_text_is_exact(
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().taxonomy_approved
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["stage"], entry["flag"], entry["summary"]) == (
+            3,
+            "taxonomy_approved",
+            "Approved: Taxonomy and prompt (single, 2 labels)",
+        )
         assert files.read_config().target_metric == "accuracy"
         assert app.stage == 4
 
@@ -1170,3 +1206,66 @@ async def test_agent_edit_rule_still_wins_over_the_confirm(
         await agent_write(pilot, screen, None)
         assert calls.returns[-1].startswith("Not written: the user is editing")
         assert files.list_versions() == []
+
+
+def logged(artifact):
+    from hunches import history
+
+    return [(e["source"], e["summary"]) for e in history.entries(artifact)]
+
+
+async def test_user_edits_and_agent_writes_are_saved_through_history(
+    tmp_path, monkeypatch, calls
+):
+    setup(tmp_path, monkeypatch)
+    with_files()
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        screen = await start(pilot.app, pilot)
+        await edit_labels(pilot, screen)
+        screen.query(".label-desc").last(Input).value = "worried they will"
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert ("user", "Labels: fear description") in logged("taxonomy")
+        calls.tool = ("write_taxonomy", GOOD)
+        await send(pilot, screen, "write it")
+        assert logged("taxonomy")[-1][0] == "assistant"
+        calls.tool = ("write_prompt", {"prompt": "Classify the item."})
+        await send(pilot, screen, "write it")
+        assert logged("prompt")[-1][0] == "assistant"
+        screen.query_one("#edit-prompt", Button).focus()
+        await pilot.press("e")
+        await pilot.pause()
+        screen.query_one("#prompt-text", TextArea).text = "Classify the item.\nMore."
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert logged("prompt")[-1] == ("user", "Prompt: 1 line changed")
+
+
+async def test_new_version_and_restore_are_logged(tmp_path, monkeypatch, calls):
+    from hunches import history
+
+    setup(tmp_path, monkeypatch)
+    with_files()
+    gold_in_use()
+    async with HunchesApp().run_test(size=(120, 40)) as pilot:
+        app = pilot.app
+        screen = await start(app, pilot)
+        await rename_fear(pilot, screen)
+        await pilot.click("#yes")
+        await pilot.pause()
+        edit = history.entries("taxonomy")[-1]
+        assert (edit["source"], edit["snapshot"]) == ("user", 1)
+        assert history.entries()[-1]["kind"] == "version"
+        await pilot.click("#versions")
+        await pilot.pause()
+        await pilot.click("#restore-1")
+        await pilot.pause()
+        await pilot.click("#yes")
+        await pilot.pause()
+        assert logged("taxonomy")[-1] == ("restore", "Restored taxonomy version 1")
+        assert (
+            history.entries("taxonomy")[-1]["after"]
+            == history.entries("taxonomy")[0]["after"]
+        )

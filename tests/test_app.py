@@ -8,7 +8,7 @@ from pydantic_ai.usage import RunUsage
 from textual.containers import Vertical
 from textual.widgets import Button, Input
 
-from hunches import cost, files
+from hunches import cost, files, history
 from hunches.app import ChatPanel, HunchesApp, StatusHeader, confirm_approve
 
 
@@ -231,12 +231,21 @@ async def test_confirm_approve_sets_flag(tmp_path, monkeypatch):
     app = HunchesApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        confirm_approve(app.screen, "seeds_approved", "Approve seeds?")
+        confirm_approve(
+            app.screen, "seeds_approved", 1, "Approve seeds?", "Approved: 3 seeds"
+        )
         await pilot.pause()
         assert not files.read_state().seeds_approved
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().seeds_approved
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["kind"], entry["stage"], entry["flag"], entry["summary"]) == (
+            "approval",
+            1,
+            "seeds_approved",
+            "Approved: 3 seeds",
+        )
 
 
 async def test_quit(tmp_path, monkeypatch):
@@ -284,7 +293,9 @@ async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
     app = HunchesApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        confirm_approve(app.screen, "seeds_approved", "Approve seeds?")
+        confirm_approve(
+            app.screen, "seeds_approved", 1, "Approve seeds?", "Approved: 3 seeds"
+        )
         await pilot.pause()
         modal = app.screen
         assert [b.id for b in modal.query(Button)] == ["no", "yes"]  # Cancel, Approve
@@ -472,3 +483,24 @@ def test_main_loads_keyring_keys_into_the_environment(monkeypatch):
     keys.save("ANTHROPIC_API_KEY", "sk-sentinel")
     app_module.main()
     assert seen["key"] == "sk-sentinel"
+
+
+async def test_opening_a_project_and_regaining_focus_sync_history(
+    tmp_path, monkeypatch
+):
+    from textual import events
+
+    from hunches import history
+
+    make_project(tmp_path, monkeypatch)
+    app = HunchesApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert [e["source"] for e in history.entries("seeds")] == ["baseline"]
+        files.write_text("seeds.csv", "seed\nbar\n")  # an editor, a git checkout
+        app.post_message(events.AppFocus())
+        await pilot.pause()
+        assert [e["source"] for e in history.entries("seeds")] == [
+            "baseline",
+            "external",
+        ]

@@ -31,6 +31,7 @@ PanelTitle { height: 1; width: 1fr; }
 .banner  { height: auto; padding: 0 2; text-style: bold; border-left: outer $warning; }
 .banner.-stale   { background: $error 25%; color: $error; border-left: outer $error; }
 .banner.-warning { background: $warning 20%; color: $warning; }
+.banner.-info    { background: $primary 20%; color: $primary; border-left: outer $primary; }
 
 /* A "not ready" message fills the content area; the footer stays below. */
 .not-ready { width: 1fr; height: 1fr; content-align: center middle; text-align: center; color: $warning; }

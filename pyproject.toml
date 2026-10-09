@@ -35,6 +35,7 @@ build-backend = "uv_build"
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-xdist",
     "pytest-textual-snapshot",
     "ruff",
     "ty",
@@ -44,4 +45,6 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "-n auto"
+markers = ["ui: drives a Textual app with Pilot (slow); pre-commit skips these, CI runs them"]
 testpaths = ["tests"]

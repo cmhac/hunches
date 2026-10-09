@@ -1,10 +1,12 @@
+import json
+
 import pytest
 from conftest import panel_title
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import Button, Input, Static
 
-from hunches import candidates, files
+from hunches import candidates, files, history
 from hunches.app import ChatPanel, HunchesApp, StatusHeader
 from hunches.screens.brief import BriefScreen, SeedInput
 
@@ -243,6 +245,12 @@ async def test_buttons_follow_seeds_and_approve_confirm_text(tmp_path, monkeypat
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().seeds_approved
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["stage"], entry["flag"], entry["summary"]) == (
+            1,
+            "seeds_approved",
+            "Approved: 2 seeds",
+        )
         assert app.stage == 2
 
 
@@ -394,3 +402,87 @@ async def test_removed_pieces_are_gone(tmp_path, monkeypatch):
         assert not screen.query("#seed-input")
         assert not screen.query("#status")
         assert not any("seeds.csv" in str(s.render()) for s in screen.query(Static))
+
+
+async def test_seed_edits_are_saved_through_history(tmp_path, monkeypatch):
+    from hunches import history
+
+    setup(tmp_path, monkeypatch, ["alpha"])
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.query_one("#seed-list").focus()
+        await pilot.press("a")
+        await pilot.pause()
+        screen.query_one(SeedInput).value = "beta"
+        await pilot.press("enter")
+        await pilot.pause()
+        last = history.entries("seeds")[-1]
+        assert (last["source"], last["summary"]) == ("user", "Seed added")
+        assert history.text(last["after"]) == "seed\nalpha\nbeta\n"
+        assert history.can_undo("seeds")
+
+
+async def test_proposed_seeds_are_one_assistant_group(tmp_path, monkeypatch):
+    from hunches import history
+
+    setup(tmp_path, monkeypatch, ["alpha"])
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.add_seeds(["gamma", "delta"], source="assistant", group="turn-1")
+        last = history.entries("seeds")[-1]
+        assert (last["source"], last["group"]) == ("assistant", "turn-1")
+        assert candidates.read_seeds() == ["alpha", "gamma", "delta"]
+        assert history.undo("seeds") is not None
+        assert candidates.read_seeds() == ["alpha"]
+
+
+async def test_instructions_carry_status_and_gold_coverage_and_the_embedding_change(
+    tmp_path, monkeypatch
+):
+    setup(tmp_path, monkeypatch, ["alpha"])
+    files.write_jsonl(
+        "candidates.jsonl",
+        [{"id": "c", "text": "t", "max_similarity": 0.7, "best_seed": "alpha"}],
+    )
+    files.write_text(
+        "candidates.meta.json",
+        json.dumps(
+            {
+                "seeds_digest": candidates.seeds_digest(["alpha"]),
+                "embedding_model": "old-model",
+            }
+        ),
+    )
+    files.write_gold(
+        [files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev")]
+    )
+    seen: list[str | None] = []
+
+    async def spy(messages, info: AgentInfo):
+        seen.append(info.instructions)
+        yield "ok"
+
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, BriefScreen)
+        screen.agent.model = FunctionModel(stream_function=spy)
+        box = screen.query_one("#chat-input", Input)
+        box.focus()
+        box.value = "hi"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        await app.workers.wait_for_complete()
+    text = seen[0] or ""
+    assert "# Pipeline status\n1 Brief and seeds:" in text
+    assert "2 Search: STALE: embedding model changed (the project now uses" in text
+    assert "the candidates were built with old-model)" in text
+    assert "# Gold coverage\ndev: 1 rows, 1 labelled, 1 orphaned" in text
+    assert '- gone "lost row" [a]' in text

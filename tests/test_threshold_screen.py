@@ -7,7 +7,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from textual.widgets import Button, DataTable, Static
 
-from hunches import files
+from hunches import files, history
 from hunches.app import HunchesApp
 from hunches.screens import threshold
 from hunches.screens.progress import RunIndicator
@@ -85,6 +85,14 @@ def test_band_sampling_counts_and_persistence():
     ids = threshold.sample_bands(cands)
     assert [len(x) for x in ids] == [30, 0, 0, 0, 0, 0, 10]
     assert threshold.sample_bands([]) == ids  # reopening reads the saved sample
+    saved = json.loads(files.read_text(threshold.SAMPLE) or "")
+    assert saved["inputs"] == files.current_inputs("threshold_chosen")
+    assert set(saved["inputs"]) == {
+        "prompt",
+        "taxonomy",
+        "classifier_model",
+        "candidates",
+    }
 
 
 def test_rate_calculation_and_empty_band():
@@ -151,7 +159,15 @@ async def test_screen_classifies_and_saves_chosen_band(monkeypatch):
     # items at 0.80 are the only ones at or above 0.650
     assert data["threshold"] == 0.65 and data["n_candidates"] == 10
     assert len(data["bands"]) == 7
+    assert data["inputs"] == files.current_inputs("threshold_chosen")
+    assert files.read_state().inputs["threshold_chosen"] == data["inputs"]
     assert files.read_state().threshold_chosen
+    (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+    assert (entry["stage"], entry["flag"], entry["summary"]) == (
+        7,
+        "threshold_chosen",
+        "Approved: Cutoff 0.650 (10 candidates)",
+    )
     assert files.first_incomplete_stage() == 8
 
 
@@ -213,6 +229,7 @@ async def test_sampling_shows_indicator_stop_and_resume(monkeypatch):
         await wait_for(pilot, lambda: screen.stopped)
         saved = json.loads(files.read_text(threshold.SAMPLE) or "")
         assert len(saved["predictions"]) == 5  # finished items kept
+        assert saved["inputs"] == files.current_inputs("threshold_chosen")
         assert ind.display and not screen.query_one("#bands-panel").display
         assert str(ind.query_one("#run-button", Button).label) == "Resume  s"
         await pilot.press("s")

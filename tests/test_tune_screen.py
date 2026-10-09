@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -9,9 +10,10 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Select, Static, TextArea
 
-from hunches import files, metrics
+from hunches import files, history, metrics
 from hunches.app import ChatLine, ChatPanel, FoldLine, HunchesApp
 from hunches.screens import tune
+from hunches.screens.gold import RemoveGoldScreen
 from hunches.screens.progress import RunIndicator
 from hunches.screens.tune import (
     PromptEditScreen,
@@ -141,6 +143,12 @@ async def test_disagreements_listed_then_accepted_prompt_improves_and_cache_hold
         await pilot.press("f2")
         await pilot.pause()
         assert files.read_state().dev_done
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["stage"], entry["flag"], entry["summary"]) == (
+            5,
+            "dev_done",
+            "Approved: Tuning loop (dev accuracy 1.000)",
+        )
         assert app.stage == 6
 
 
@@ -175,6 +183,11 @@ async def test_target_metric_flips_pass_fail():
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().dev_done and app.stage == 6
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (
+            entry["summary"]
+            == "Approved: Tuning loop (dev micro_f1 0.500, below target)"
+        )
 
 
 async def test_redesigned_panels_summary_and_tables():
@@ -351,6 +364,7 @@ async def test_controls_mirror_actions_and_enabled_states():
             "score-up": "+",
             "propose": "Propose edit  e",
             "edit-prompt": "Edit prompt  o",
+            "rerun": "Re-run  r",
             "done": "Done  F2",
         }
         assert str(screen.query_one("#score", Static).render()) == "0.90"
@@ -976,6 +990,28 @@ async def test_instructions_carry_the_current_prompt_taxonomy_and_target(assista
         )
 
 
+async def test_instructions_carry_status_and_gold_coverage_and_the_embedding_change(
+    assistant,
+):
+    files.write_text(
+        "candidates.meta.json", json.dumps({"embedding_model": "old-model"})
+    )
+    files.write_gold(
+        files.read_gold()
+        + [files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev")]
+    )
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await start(app, pilot)
+        await quiesce(app, pilot)
+    text = assistant.instructions[0] or ""
+    assert "# Pipeline status\n1 Brief and seeds:" in text
+    assert "2 Search: STALE: embedding model changed (the project now uses m;" in text
+    assert "the candidates were built with old-model)" in text
+    assert "# Gold coverage\ndev: 9 rows, 9 labelled, 1 orphaned" in text
+    assert '- gone "lost row" [a]' in text
+
+
 async def test_propose_is_disabled_while_a_reply_streams(assistant):
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -1090,3 +1126,504 @@ async def test_chat_and_tabs_are_hidden_during_a_run_and_come_back(
         await quiesce(app, pilot)
         assert screen.query_one("#tabs").display
         assert screen.query_one(ChatPanel).display  # the tab the user was on
+
+
+async def test_accepted_prompt_is_saved_through_history():
+    from hunches import history
+
+    files.write_state(files.State(seeds_approved=True, taxonomy_approved=True))
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.goto_stage(5)
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, TuneScreen)
+        screen.model = FunctionModel(classifier)  # ty: ignore[invalid-assignment]
+        screen.accepted("Classify. BETTER!")
+        await settle(app, pilot)
+        last = history.entries("prompt")[-1]
+        assert last["source"] == "user"
+        assert history.text(last["after"]) == "Classify. BETTER!"
+
+
+# ---- spec 004 task 07: status, gold coverage and the gold tools
+
+
+def meta_now() -> dict:
+    return json.loads(files.read_text("chat/tuning.meta.json") or "{}")
+
+
+async def say(app, pilot, screen, text):
+    box = screen.query_one("#chat-input")
+    box.focus()
+    box.value = text
+    await pilot.press("enter")
+    await quiesce(app, pilot)
+
+
+async def test_context_turn_carries_both_sections_and_records_what_was_told(assistant):
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await start(app, pilot)
+        await quiesce(app, pilot)
+    assert "# Pipeline status\n1 Brief and seeds:" in assistant.prompts[0]
+    assert (
+        "# Gold coverage\ndev: 8 rows, 8 labelled, 0 orphaned" in assistant.prompts[0]
+    )
+    assert meta_now()["status_digest"]
+    assert meta_now()["context_digest"]  # the dev-run digest is kept beside it
+
+
+async def test_updated_message_is_added_once_per_change_and_never_repeated(assistant):
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 1
+        await screen.sync_status()  # nothing changed
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 1
+
+        files.write_gold(
+            files.read_gold()
+            + [files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev")]
+        )
+        await screen.sync_status()
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 2
+        update = assistant.prompts[1]
+        assert "# Pipeline status" in update
+        assert "dev: 9 rows, 9 labelled, 1 orphaned" in update
+        assert '- gone "lost row" [a]' in update
+        assert "# Instructions" in update
+        assert len(history_requests("update")) == 1
+
+        await screen.sync_status()  # same state: not again
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 2
+
+        files.write_text(
+            "candidates.meta.json", json.dumps({"embedding_model": "old-model"})
+        )
+        await screen.sync_status()  # the stale set changed
+        await quiesce(app, pilot)
+        assert len(assistant.prompts) == 3
+        assert "STALE: embedding model changed" in assistant.prompts[2]
+        assert len(history_requests("update")) == 2
+        assert meta_now()["context_digest"]  # the context digest survives the merge
+
+
+async def test_failed_status_turn_is_not_recorded_as_sent(assistant):
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        told = meta_now()["status_digest"]
+        files.write_gold(
+            files.read_gold()
+            + [files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev")]
+        )
+        assistant.fail = True
+        await screen.sync_status()
+        await quiesce(app, pilot)
+        assert meta_now()["status_digest"] == told
+        assistant.fail = False
+        await screen.sync_status()  # so the next try sends it
+        await quiesce(app, pilot)
+        assert meta_now()["status_digest"] != told
+
+
+async def test_get_gold_coverage_tool_returns_the_section_for_a_split(assistant):
+    files.write_gold(
+        files.read_gold()
+        + [
+            files.GoldRow(id="gone", text="lost row", labels=["a"], split="dev"),
+            files.GoldRow(id="t", text="test row", labels=["b"], split="test"),
+        ]
+    )
+    assistant.tools["coverage"] = ("get_gold_coverage", {"split": "dev"})
+    assistant.tools["all"] = ("get_gold_coverage", {})
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        await say(app, pilot, screen, "coverage")
+        await say(app, pilot, screen, "all")
+    dev_only, both = tool_returns("get_gold_coverage")
+    assert dev_only == files.gold_coverage_text("dev")
+    assert "dev: 9 rows" in dev_only and "test:" not in dev_only
+    assert both == files.gold_coverage_text()
+    assert "test: 1 rows, 1 labelled, 1 orphaned" in both
+
+
+def question(app) -> str:
+    screen = app.screen
+    assert isinstance(screen, RemoveGoldScreen)
+    return screen.heading + "\n" + screen.text
+
+
+def screen_title(app) -> str:
+    screen = app.screen
+    assert isinstance(screen, RemoveGoldScreen)
+    return screen.heading
+
+
+def removal_args(*ids):
+    return ("remove_gold", {"ids": list(ids), "reason": "seeds changed"})
+
+
+async def test_remove_gold_writes_nothing_until_confirmed_and_returns_the_answer(
+    assistant,
+):
+    assistant.tools["remove"] = removal_args("0", "1")
+    before = files.read_text("gold.jsonl")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        box = screen.query_one("#chat-input")
+        box.focus()
+        box.value = "remove"
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, RemoveGoldScreen))
+        assert screen_title(app) == "The assistant wants to remove 2 dev rows"
+        assert "Reason: seeds changed" in question(app)
+        assert str(app.screen.query_one("#cancel", Button).label) == "Reject  Esc"
+        assert str(app.screen.query_one("#remove", Button).label) == "Remove 2 rows"
+        assert files.read_text("gold.jsonl") == before  # still nothing written
+        assert files.read_text("gold_removed.jsonl") is None
+        await pilot.click("#cancel")
+        await quiesce(app, pilot)
+        assert tool_returns("remove_gold") == ["The user rejected the removal."]
+        assert files.read_text("gold.jsonl") == before
+        assert files.read_text("gold_removed.jsonl") is None
+
+        box.focus()
+        box.value = "remove"
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, RemoveGoldScreen))
+        await pilot.click("#remove")
+        await quiesce(app, pilot)
+    assert tool_returns("remove_gold")[-1] == "Removed 2 rows."
+    assert [r.id for r in files.read_gold()] == ["2", "3", "4", "5", "6", "7"]
+    removed = files.read_jsonl("gold_removed.jsonl")
+    assert [(r["id"], r["reason"], r["labels"]) for r in removed] == [
+        ("0", "seeds changed", ["a"]),
+        ("1", "seeds changed", ["b"]),
+    ]
+
+
+async def test_remove_gold_names_the_split_in_the_question(assistant):
+    files.write_gold(
+        files.read_gold()
+        + [files.GoldRow(id="t", text="test row", labels=["b"], split="test")]
+    )
+    assistant.tools["remove"] = removal_args("t")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        box = screen.query_one("#chat-input")
+        box.focus()
+        box.value = "remove"
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, RemoveGoldScreen))
+        assert "1 test row" in question(app)
+        assert "held out" in question(app)
+        await pilot.click("#cancel")
+        await quiesce(app, pilot)
+
+
+async def test_remove_gold_with_unknown_ids_asks_nothing(assistant):
+    assistant.tools["remove"] = removal_args("nope")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        await say(app, pilot, screen, "remove")
+    assert tool_returns("remove_gold") == [
+        "No gold row has those ids. Nothing removed."
+    ]
+
+
+async def test_draw_gold_adds_unlabelled_rows_and_the_user_labels_them(assistant):
+    files.write_jsonl(
+        "candidates.jsonl",
+        [
+            {"id": str(i), "text": f"item {i}", "max_similarity": 0.7, "best_seed": "x"}
+            for i in range(12)
+        ],
+    )
+    assistant.tools["draw"] = ("draw_gold", {"split": "dev", "n": 3})
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        await say(app, pilot, screen, "draw")
+    (result,) = tool_returns("draw_gold")
+    new = [r for r in files.read_gold() if r.id not in {str(i) for i in range(8)}]
+    assert len(new) == 3 and all(r.labels == [] and r.split == "dev" for r in new)
+    assert result.startswith("Drew 3 unlabelled dev rows")
+    assert "the user labels them" in result
+
+
+async def test_no_assistant_tool_sets_a_gold_label(assistant):
+    names = set()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        names = set(screen.agent._function_toolset.tools)
+    assert names == {
+        "get_disagreements",
+        "propose_prompt",
+        "get_gold_coverage",
+        "remove_gold",
+        "draw_gold",
+    }
+    import inspect
+
+    for name in ("remove_gold", "draw_gold", "get_gold_coverage"):
+        params = inspect.signature(
+            screen.agent._function_toolset.tools[name].function
+        ).parameters
+        assert "labels" not in params and "label" not in params
+
+
+# ---- undo and redo in the Edit prompt modal (spec 004, task 08) ---------------------------
+
+
+def prompt_versions():
+    """prompt.md saved twice on top of the baseline 'Classify.'"""
+    history.save("prompt", "Classify. v1", "user", "Prompt: one")
+    history.save("prompt", "Classify. v2", "user", "Prompt: two")
+
+
+async def open_prompt_modal(app, pilot, screen):
+    await pilot.press("o")
+    await pilot.pause()
+    modal = app.screen
+    assert isinstance(modal, PromptEditScreen)
+    return modal
+
+
+async def test_edit_prompt_undo_steps_back_without_a_rerun_and_rerun_button_runs_it(
+    assistant,
+):
+    prompt_versions()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        screen.rerun()
+        await quiesce(app, pilot)
+        assert len(calls) == 8 and screen.prompt == "Classify. v2"
+        modal = await open_prompt_modal(app, pilot, screen)
+        undo, redo = (modal.query_one(i, Button) for i in ("#undo", "#redo"))
+        assert (str(undo.label), str(redo.label)) == ("Undo  F6", "Redo  F7")
+        assert not undo.disabled and redo.disabled
+        before = len(assistant.prompts)
+        await pilot.click("#undo", offset=(2, 0))
+        await pilot.pause()
+        area = modal.query_one("#prompt", TextArea)
+        assert area.text == "Classify. v1"
+        assert files.read_text("prompt.md") == "Classify. v1"
+        assert "Undid: Prompt: two" in str(
+            modal.query_one("#hist-note", Static).render()
+        )
+        assert not redo.disabled
+        save = modal.query_one("#save", Button)
+        assert str(save.label) == "Re-run  F2" and not save.disabled
+        assert len(calls) == 8 and len(assistant.prompts) == before  # nothing ran
+
+        await pilot.press("f7")  # F6/F7 work with the text area focused
+        await pilot.pause()
+        assert area.text == "Classify. v2" and redo.disabled
+        await pilot.press("f6")
+        await pilot.pause()
+        assert area.text == "Classify. v1"
+
+        await pilot.press("f2")  # Re-run
+        await quiesce(app, pilot)
+        assert app.screen is screen
+        assert screen.prompt == "Classify. v1"
+        assert len(calls) == 16  # the dev set classified again with the earlier prompt
+        edit = history_requests("edit")[-1]
+        assert edit.metadata["summary"] == "Undid: Prompt: two"
+        assert "# Current prompt\nClassify. v1" in str(edit.parts[0].content)
+
+
+async def test_edit_prompt_undo_then_cancel_still_updates_the_screen_and_runs_nothing(
+    assistant,
+):
+    prompt_versions()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        screen.rerun()
+        await quiesce(app, pilot)
+        modal = await open_prompt_modal(app, pilot, screen)
+        await pilot.click("#undo", offset=(2, 0))
+        await pilot.pause()
+        await pilot.press("escape")
+        await quiesce(app, pilot)
+        assert app.screen is screen
+        assert files.read_text("prompt.md") == "Classify. v1"
+        assert screen.prompt == "Classify. v1"
+        assert len(calls) == 8  # no re-run
+        assert history_requests("edit")[-1].metadata["summary"] == "Undid: Prompt: two"
+        assert modal.is_attached is False
+
+
+async def test_edit_prompt_undo_is_off_while_the_text_differs_from_the_file(assistant):
+    prompt_versions()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        screen.rerun()
+        await quiesce(app, pilot)
+        modal = await open_prompt_modal(app, pilot, screen)
+        area = modal.query_one("#prompt", TextArea)
+        area.text = "Classify. typed"
+        await pilot.pause()
+        assert modal.query_one("#undo", Button).disabled
+        assert "ctrl+z" in str(modal.query_one("#hist-note", Static).render())
+        await pilot.press("f6")  # the text area's own select-line
+        await pilot.pause()
+        assert files.read_text("prompt.md") == "Classify. v2"
+        assert area.text == "Classify. typed"
+
+
+async def test_an_outside_edit_of_the_prompt_is_followed_and_nothing_is_re_run(
+    assistant,
+):
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        screen.rerun()
+        await quiesce(app, pilot)
+        before = len(assistant.prompts)
+        files.write_text("prompt.md", "Classify. Edited in an editor.")
+        app.check_history()
+        await quiesce(app, pilot)
+        assert screen.prompt == "Classify. Edited in an editor."
+        assert len(calls) == 8 and len(assistant.prompts) == before
+        assert len(app.notices()) == 1
+
+
+# ---- spec 004 task 09: r re-runs the dev set; Done waits for a run that is current ----------
+
+
+async def test_r_and_the_rerun_button_run_the_dev_set_again_from_the_cache():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)  # the mount run failed (no classifier)
+        screen.rerun()
+        await settle(app, pilot)
+        assert len(calls) == 8 and len(screen.history) == 1
+        button = screen.query_one("#rerun", Button)
+        assert str(button.label) == "Re-run  r" and not button.disabled
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert len(screen.history) == 2  # it ran again
+        assert len(calls) == 8  # unchanged inputs: every item came from the cache
+        await pilot.click("#rerun", offset=(2, 0))
+        await settle(app, pilot)
+        assert len(screen.history) == 3 and len(calls) == 8
+
+
+async def test_r_does_nothing_while_the_dev_set_is_running():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)
+        before = (screen.worker, len(screen.history))
+        screen.running = True  # a run is in progress
+        screen.action_rerun()
+        screen.running = False
+        assert (screen.worker, len(screen.history)) == before  # nothing was started
+
+
+async def test_done_is_disabled_until_a_run_is_current_after_an_outside_edit():
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)
+        screen.rerun()
+        await settle(app, pilot)
+        done = screen.query_one("#done", Button)
+        assert not done.disabled
+        files.write_text("prompt.md", "Classify. BETTER!")  # edited in an editor
+        app.check_history()
+        await settle(app, pilot)
+        assert done.disabled and screen.prompt == "Classify. BETTER!"
+        banner = screen.query_one("#stale-banner")
+        assert banner.display
+        assert str(banner.render()) == (
+            "STALE: prompt changed. These results are from before the change. "
+            "Press r to re-run, then approve again."
+        )
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app.stage == 5 and not files.read_state().dev_done  # F2 did nothing
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert len(calls) == 16  # the new prompt: every item is a live call
+        assert not done.disabled and not banner.display
+        await pilot.press("f2")
+        await pilot.pause()
+        assert files.read_state().dev_done and app.stage == 6
+
+
+async def test_removing_gold_through_the_assistant_makes_the_run_not_current(assistant):
+    assistant.tools["remove"] = removal_args("0", "1")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        assert len(calls) == 8 and len(screen.rows) == 8
+        done = screen.query_one("#done", Button)
+        assert not done.disabled
+        box = screen.query_one("#chat-input")
+        box.focus()
+        box.value = "remove"
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, RemoveGoldScreen))
+        await pilot.click("#remove")
+        await quiesce(app, pilot)
+        assert (
+            done.disabled and len(screen.rows) == 8
+        )  # the table shows the run that was made
+        banner = screen.query_one("#stale-banner")
+        assert str(banner.render()).startswith("STALE: gold rows changed. ")
+        screen.set_focus(screen.query_one("#dis"))
+        await pilot.press("r")
+        await quiesce(app, pilot)
+        assert [r.id for r in screen.rows] == ["2", "3", "4", "5", "6", "7"]
+        assert len(calls) == 8  # the six remaining rows were all cached
+        assert not done.disabled and not banner.display
+
+
+async def test_a_prompt_edited_while_the_dev_set_runs_leaves_the_results_not_current(
+    monkeypatch,
+):
+    class EditsOnFirstCall(list):
+        def append(self, item):
+            super().append(item)
+            if len(self) == 1:  # an editor saves prompt.md mid-run
+                files.write_text("prompt.md", "Classify. BETTER!")
+
+    monkeypatch.setattr(sys.modules[__name__], "calls", EditsOnFirstCall())
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await settle(app, pilot)
+        screen.rerun()
+        await settle(app, pilot)
+        assert screen.metrics is not None
+        assert not screen.current  # the run began under the old prompt
+        assert screen.query_one("#done", Button).disabled

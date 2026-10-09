@@ -163,6 +163,10 @@ async def label_all(app, pilot, count):
 
 
 async def test_all_nine_stages_with_resume():
+    await run_all_stages()
+
+
+async def run_all_stages():
     # setup, then stage 1: brief and seeds
     app = HunchesApp()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -294,6 +298,132 @@ async def test_all_nine_stages_with_resume():
 
     # the stand-in model has no known price, so cost is unknown, never $0
     assert cost.total()[1]
+
+
+def stage_counts(screen) -> dict[int, tuple[int, int]]:
+    """(live, cached) per stage from the Redo plan table."""
+    out = {}
+    for key in screen.query_one("#plan", DataTable).rows:
+        row = [str(c) for c in screen.query_one("#plan", DataTable).get_row(key)]
+        stage = row[0].split()[1] if row[0][0] in "▸↻◐✓" else None
+        if stage:
+            out[int(stage)] = (int(row[2]), int(row[3]))
+    return out
+
+
+async def test_prompt_edit_after_a_full_run_plan_matches_the_rerun_and_undo_restores_current():
+    from hunches import history
+    from hunches.screens.redo_plan import RedoPlanScreen
+
+    await run_all_stages()
+    assert all(kind == "current" for kind, _ in files.stage_status().values())
+    old_prompt = files.read_text("prompt.md")
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app.stage == 9
+        CALLS.clear()
+
+        # a new prompt: stages 5-8 are stale, 1-4 stay current, nothing was called or removed
+        history.save("prompt", "Label the item, carefully.", "user", "Prompt: edited")
+        status = files.stage_status()
+        assert [status[n][0] for n in range(1, 5)] == ["current"] * 4
+        assert [status[n] for n in range(5, 9)] == [("stale", "prompt changed")] * 4
+        assert len(files.read_jsonl("results.jsonl")) == 70  # stays until overwritten
+
+        # undo puts the old prompt back and everything is current again, with no model call;
+        # redo makes it stale again
+        history.undo("prompt")
+        assert files.read_text("prompt.md") == old_prompt
+        assert all(k == "current" for k, _ in files.stage_status().values())
+        history.redo("prompt")
+        assert files.stage_status()[5] == ("stale", "prompt changed")
+        assert CALLS == []
+
+        # the plan: every item text is new, except those that several stages share (the cache key is
+        # the text), which the later stage finds already cached
+        dev = {r.text for r in files.read_gold() if r.split == "dev"}
+        test = {r.text for r in files.read_gold() if r.split == "test"}
+        by_id = {c["id"]: c["text"] for c in files.read_jsonl("candidates.jsonl")}
+        sample = {
+            by_id[i]
+            for band in json.loads(files.read_text("threshold_sample.json") or "")[
+                "ids"
+            ]
+            for i in band
+        }
+        full = {
+            c["text"]
+            for c in files.read_jsonl("candidates.jsonl")
+            if c["max_similarity"] >= CUTOFF
+        }
+        assert (len(dev), len(test), len(full)) == (50, 50, 70)
+        live7 = len(sample - dev - test)
+        live8 = len(full - dev - test - sample)
+        want = {
+            5: (50, 0),
+            6: (50, 0),
+            7: (live7, len(sample) - live7),
+            8: (live8, 70 - live8),
+        }
+        await pilot.press("f9")
+        await pilot.pause()
+        assert isinstance(app.screen, RedoPlanScreen)
+        assert stage_counts(app.screen) == want
+        assert CALLS == []  # the plan classifies nothing
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # redoing each stage calls the model exactly as often as the plan said
+        got = {}
+        app.goto_stage(5)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        got[5] = len(CALLS)
+        assert files.stage_status()[5][0] == "stale"  # recomputed, not yet approved
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app.stage == 6 and files.stage_status()[5][0] == "current"
+        CALLS.clear()
+        assert app.stage == 6
+        await pilot.press("r")  # the stale result is only re-run on request
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        got[6] = len(CALLS)
+        CALLS.clear()
+        await pilot.press("f2")
+        await pilot.pause()
+        app.goto_stage(7)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        got[7] = len(CALLS)
+        CALLS.clear()
+        app.screen.query_one("#bands", DataTable).focus()
+        await pilot.press("down", "down", "enter", "f2")
+        await pilot.pause()
+        assert app.stage == 8
+        await pilot.click("#run-button")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        got[8] = len(CALLS)
+        assert got == {n: want[n][0] for n in want}
+        assert all(kind == "current" for kind, _ in files.stage_status().values())
+        results = files.read_jsonl("results.jsonl")
+        assert len(results) == 70
+
+        # the re-run was cache-correct: nothing is left to redo, and a second pass calls nothing
+        assert classifier.redo_plan() == []
+
+        # going back to the old prompt marks 5-8 stale again, but every call is a cache hit
+        CALLS.clear()
+        history.undo("prompt")
+        assert files.read_text("prompt.md") == old_prompt
+        plan = classifier.redo_plan()
+        assert [r["stage"] for r in plan] == [5, 6, 7, 8]
+        assert [r["live_calls"] for r in plan] == [0, 0, 0, 0]
+        assert [r["cached_calls"] for r in plan] == [50, 50, len(sample), 70]
+        assert CALLS == []
 
 
 async def test_first_run_new_project_then_open_another_from_projects(

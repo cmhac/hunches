@@ -1,0 +1,3 @@
+# 01 — `history.py` core
+
+Spec: Data (history files, log entries), Backend → `history.py`, Tests → History. Create `src/hunches/history.py` with `save`, `sync`, `entries`, `text`, `is_current`, `can_undo`/`can_redo`, `undo`/`redo`, `restore`, per-artifact stacks derived by replaying the append-only log, content-addressed blobs in `.hunches/history/`, baseline entries for a project with no log, `external` entries from `sync()` (including crash recovery between file write and log append), `group` undo. `approval(...)` and `NeedsVersion` may be stubbed to the API in the spec but are wired in tasks 02-03. Tests per the spec History list.

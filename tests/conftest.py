@@ -126,3 +126,26 @@ def panel_title(widget) -> tuple[str, str]:
         str(widget.query(".panel-title").first().content),
         str(widget.query(".panel-subtitle").first().content),
     )
+
+
+def pytest_collection_modifyitems(items):
+    """Mark every test in a module that drives a Textual app (Pilot) as `ui`.
+
+    Pre-commit runs `-m "not ui"`; CI runs everything.
+    """
+    sources = {}
+    for item in items:
+        path = item.path
+        if path not in sources:
+            sources[path] = "run_test(" in path.read_text()
+        if sources[path]:
+            item.add_marker(pytest.mark.ui)
+
+
+@pytest.fixture(autouse=True)
+def fresh_status(monkeypatch):
+    """The rail and the stage banners reuse `stage_status` for half a second; tests that edit files
+    and look at the screen straight away need every look to be a fresh one."""
+    import hunches.app
+
+    monkeypatch.setattr(hunches.app, "STATUS_AGE", 0, raising=False)

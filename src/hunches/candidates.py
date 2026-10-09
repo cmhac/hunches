@@ -107,6 +107,7 @@ async def build_candidates(
         "seeds_digest": seeds_digest(seeds),
         "written_at": datetime.now(UTC).isoformat(),
         "floor": FLOOR,
+        "embedding_model": read_config().embedding_model,
     }
     write_text("candidates.meta.json", json.dumps(meta))
     return capped

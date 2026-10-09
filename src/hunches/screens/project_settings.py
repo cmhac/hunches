@@ -311,6 +311,13 @@ class ProjectSettingsScreen(Screen):
         def done(approved: bool | None) -> None:
             if approved:
                 files.write_config(new)
+                if change := files.embedding_change():  # None without candidates
+                    self.app.notify(
+                        f"Embedding model changed to {change[0]}; the candidates were built "
+                        f"with {change[1]}. Run the search again (stage 2); gold rows may no "
+                        "longer be in the pool.",
+                        severity="warning",
+                    )
                 # stage screens read the config once: rebuild the one underneath
                 self.app.pop_screen()
                 self.app.goto_stage(self.app.stage)  # ty: ignore[unresolved-attribute]
