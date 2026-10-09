@@ -190,7 +190,7 @@ PostgreSQL 16 + pgvector **0.8.1** with the extension in schema `extensions`, ps
 - **Row estimate:** `SELECT reltuples FROM pg_class WHERE oid = %s::regclass`: `-1` for a table never analysed or vacuumed (PostgreSQL 14+; older servers report 0, which is treated as an estimate of 0 rows), `50` after `ANALYZE`. Negative means unknown (`None`).
 - **Average width:** `SELECT max(s.avg_width) FROM pg_stats s JOIN pg_class c ON c.relname = s.tablename JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.schemaname WHERE c.oid = %s::regclass AND s.attname = %s`. View `pg_stats`, columns `schemaname, tablename, attname, inherited, avg_width`; `avg_width` is the average stored width in bytes (a 100-character text gave 101). It returns no row (NULL from `max`) before `ANALYZE`; a column the role cannot read is also absent from the view. `max` merges the `inherited = true/false` rows of partitioned or inherited tables.
 
-**Not verified:** any managed service; a transaction-mode pooler; TLS; tables larger than memory (the I/O saving, and the temp-file spill at scale); `index` mode's `max_scan_tuples` plateau (why raising it to 1,000,000 added nothing; maybe `hnsw.scan_mem_multiplier`, untested); IVFFlat; partitioned tables and views as `pg_table` (the id join in step 2 should work, untested); integer and uuid id columns; pgvector versions other than 0.6.0 and 0.8.1.
+**Not verified:** any managed service; a transaction-mode pooler; TLS; tables larger than memory (the I/O saving, and the temp-file spill at scale); IVFFlat; partitioned tables and views as `pg_table` (the id join in step 2 should work, untested); integer and uuid id columns; pgvector versions other than 0.6.0 and 0.8.1.
 
 ### Verified in task 04 (`search_pg_exact`, 2026-10-09)
 
@@ -216,6 +216,17 @@ PostgreSQL 16 + pgvector 0.8.1, psycopg 3.3.6, a 2,000,000-row table (1 KB text,
 - **Streaming guard:** counted per row over both steps (step 1 rows: id; step 2 rows: id and text). Real run: limit 1 MB with the pre-flight bypassed stopped after 7,953 rows of a result of about 1M rows, message `Search has already received 1.0 MB (7,953 rows), which exceeds the result limit of 1 MB. ...`.
 - **Progress:** `progress(received, 0, "")` is called for every row received (steps 1 and 2 share the counter). A caller that updates a widget should throttle; task 07 owns that.
 - **Stop (real run):** `Stop.stop()` from a timer thread 1.0 s into a 2M x 20-seed scan: `SearchCancelled` raised after 1.0 s, no active query left on the server.
+
+### Verified in task 06 (`index` mode, 2026-10-09)
+
+PostgreSQL 16 + pgvector **0.8.1**, psycopg 3.3.6; README read at the `v0.8.1` tag ([Iterative Index Scans](https://github.com/pgvector/pgvector/blob/v0.8.1/README.md#iterative-index-scans)).
+
+- **API:** `search.search()` has a third branch for `backend == "pgvector"`; `pg_search = "exact"` through it raises `search() runs pg_search = 'index' only; exact search is search_pg_exact` (an internal error, no connection opened). `search.is_approximate(config)` is true for pgvector + `index`; task 07 shows the permanent warning.
+- **Statements, in order:** version probe, `require_index_mode_version` (before any `SET`), column type, `SET LOCAL hnsw.iterative_scan = relaxed_order`, `SET LOCAL hnsw.max_scan_tuples = <PG_MAX_SCAN>`, then `SELECT id, text, 1 - (vec OPERATOR(s.<=>) q) AS sim FROM t WHERE 1 - (...) >= floor AND 1 - (...) <> 'NaN' ORDER BY vec OPERATOR(s.<=>) q LIMIT PG_TOP_K`. The `ORDER BY` is the bare distance operator, the shape the HNSW index needs. Rows are re-sorted client-side by similarity (relaxed order). Nothing else is set.
+- **README facts:** `hnsw.iterative_scan` takes `strict_order` or `relaxed_order`; `hnsw.max_scan_tuples` is "the max number of tuples to visit (20,000 by default)" and "approximate and does not affect the initial scan"; `hnsw.scan_mem_multiplier` ("the max amount of memory to use, as a multiple of `work_mem` (1 by default)") comes with the note "Try increasing this if increasing `hnsw.max_scan_tuples` does not improve recall".
+- **`PG_MAX_SCAN = 20_000`**, the pgvector default, set explicitly so the result does not depend on the server's configuration. Reason: raising it alone did not add hits here or in the 300,000-row measurement above. Re-measured on a 100,000-row x 32-dim table with an HNSW index (random unit vectors, one seed, floor 0.3, true hit count 4,456, `enable_seqscan = off` so the planner used the index; with it on, the planner chose a sequential scan and returned all 4,456): default settings 40 hits; `relaxed_order` 4,148; `relaxed_order` + `max_scan_tuples` 20,000 / 100,000 / 1,000,000 all 4,148; `relaxed_order` + `max_scan_tuples` 1,000,000 + `scan_mem_multiplier = 8` **4,456 (all)**. So the plateau in "Why exact is the default" is the scan's memory budget, not the tuple limit. One table and one seed, indicative only.
+- **Not done, flagged:** task 06 sets only the parameters its text names, so `hnsw.scan_mem_multiplier` is not set. Setting it would make `index` mode recall more, but the mode stays approximate and keeps the permanent warning either way; whether to add it (and the memory it implies per query) is Chris's call.
+- Not tested: IVFFlat (`ivfflat.iterative_scan` / `ivfflat.max_probes` are not set), pgvector 0.8.0 exactly, a managed service.
 
 ## Tables with no index (very large, rarely queried)
 
@@ -370,5 +381,5 @@ Task files: `tasks/README.md` and `tasks/NN-*.md`.
 ## Open items
 
 - **ask:** saved Postgres stores in `system.json` (D8). My recommendation is defer.
-- `index` mode needs pgvector 0.8+ for iterative scans; the build container only had 0.6.0, so that mode's `SET LOCAL` names and its recall are unverified. Task 05 runs them against the `pgvector/pgvector` image.
+- `index` mode needs pgvector 0.8+ for iterative scans; the build container only had 0.6.0, so that mode's `SET LOCAL` names and its recall were unverified; task 06 checked them on 0.8.1 ("Verified in task 06").
 - **Needs a human:** a PostgreSQL instance with pgvector and an embedded table for the manual end-to-end check, and the "Not verified" list above, above all every managed service (RDS, Aurora, Supabase, each with and without its pooler) and tables larger than memory. Agents cannot fake these.

@@ -12,6 +12,10 @@ from hunches.files import Config, pg_setting, read_config
 # Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-limitations.html
 S3_TOP_K = 10_000
 PG_TOP_K = 10_000
+# hnsw.max_scan_tuples for index mode: the pgvector default (20,000; README, "Iterative Scan
+# Options"), set explicitly so the result does not depend on the server's configuration.
+# Raising it alone did not help (specs/005-pgvector/spec.md, "Verified in task 06").
+PG_MAX_SCAN = 20_000
 PG_BATCH = 5_000  # rows per round trip of the server-side cursors
 # bytes added to every received row (id + text) when sizing a result: Python's tuple, float
 # and str headers; a deliberately round estimate, not a measurement
@@ -346,6 +350,59 @@ def search_pg_exact(
         conn.close()
 
 
+def is_approximate(config: Config) -> bool:
+    """True when the pgvector search may hide hits above the floor (index mode)."""
+    return config.backend == "pgvector" and pg_setting(config, "pg_search") == "index"
+
+
+def _search_pg_index(
+    config: Config, query_vector: list[float], floor: float
+) -> tuple[list[tuple[str, str, float]], bool]:
+    """One ANN-index query for one seed; the caller (search) has checked the mode."""
+    conn = pg_connect(config)
+    try:
+        from psycopg import sql
+
+        version, _ = extension_version(conn)
+        require_index_mode_version(version, "index")  # before any SET
+        table_name = config.pg_table or ""  # pg_connect has checked it
+        vec_name = pg_setting(config, "pg_vector_column")
+        typename, type_schema, _ = column_type(conn, table_name, vec_name)
+        dist = sql.SQL("1 - ({vec} OPERATOR({schema}.<=>) %s::{vtype})").format(
+            vec=sql.Identifier(vec_name),
+            schema=sql.Identifier(type_schema),
+            vtype=sql.Identifier(type_schema, typename),
+        )
+        query = sql.SQL(
+            "SELECT {id}, {text}, {dist} AS sim FROM {table} "
+            "WHERE {dist} >= %s AND {dist} <> 'NaN' "
+            "ORDER BY {vec} OPERATOR({schema}.<=>) %s::{vtype} LIMIT %s"
+        ).format(
+            id=sql.Identifier(pg_setting(config, "pg_id_column")),
+            text=sql.Identifier(pg_setting(config, "pg_text_column")),
+            dist=dist,
+            table=sql.Identifier(*table_name.split(".", 1)),
+            vec=sql.Identifier(vec_name),
+            schema=sql.Identifier(type_schema),
+            vtype=sql.Identifier(type_schema, typename),
+        )
+        literal = "[" + ",".join(repr(float(x)) for x in query_vector) + "]"
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+            cur.execute(f"SET LOCAL hnsw.max_scan_tuples = {int(PG_MAX_SCAN)}")
+            cur.execute(query, (literal, literal, floor, literal, literal, PG_TOP_K))
+            rows = cur.fetchall()
+        # relaxed order: the index may return rows slightly out of order
+        hits = sorted(
+            ((str(i), t, float(sim)) for i, t, sim in rows), key=lambda h: -h[2]
+        )
+        return hits, len(rows) == PG_TOP_K
+    except Exception as e:  # noqa: BLE001  the driver's own classes are not imported here
+        raise RuntimeError(pg_message(e, config)) from None
+    finally:
+        conn.close()
+
+
 def search(
     query_vector: list[float], floor: float
 ) -> tuple[list[tuple[str, str, float]], bool]:
@@ -387,6 +444,13 @@ def search(
             for i in order
             if sims[i] >= floor
         ], False
+
+    if config.backend == "pgvector":
+        if pg_setting(config, "pg_search") != "index":
+            raise RuntimeError(
+                "search() runs pg_search = 'index' only; exact search is search_pg_exact"
+            )
+        return _search_pg_index(config, query_vector, floor)
 
     try:
         import boto3
