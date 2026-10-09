@@ -1,8 +1,8 @@
 # 004 — Edit history, undo/redo, and redoing downstream work
 
-Status: draft; revised 2026-10-08 after the design agent's response (`design/design_handoff_hunches_tui/PLAN_004_INTEGRATION.md`). Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md` and `../003-tui-redesign/spec.md`, all implemented. Written against `main` at `b2d63ce` (merge of PR 5).
+Status: implemented (tasks 01-11, `tasks/`); revised 2026-10-08 after the design agent's response (`design/design_handoff_hunches_tui/PLAN_004_INTEGRATION.md`). Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md` and `../003-tui-redesign/spec.md`, all implemented. Written against `main` at `b2d63ce` (merge of PR 5).
 
-**Read order for an implementer:** this spec → your task file (not written yet; see "Tasks") → the design handoff passages the task names (`design/design_handoff_hunches_tui/PLAN_004_INTEGRATION.md`, `BACKEND_CHANGES.md` §13–16, and the mock state ids in `reference/ui_kits/tui-rail/*.jsx`, group "History and redo plan") → the code named in each section. Where the design handoff and this spec disagree, this spec wins; the places where they differ are listed under "Design handoff: what this spec changes".
+**Read order for an implementer:** this spec → your task file (`tasks/NN-….md`; see "Tasks") → the design handoff passages the task names (`design/design_handoff_hunches_tui/PLAN_004_INTEGRATION.md`, `BACKEND_CHANGES.md` §13–16, and the mock state ids in `reference/ui_kits/tui-rail/*.jsx`, group "History and redo plan") → the code named in each section. Where the design handoff and this spec disagree, this spec wins; the places where they differ are listed under "Design handoff: what this spec changes".
 
 ## What this is, in one paragraph
 
@@ -320,7 +320,7 @@ Clarifications made while implementing the gold UI (task 10):
 
 ## Tasks
 
-Task files are written after this revision is accepted. The planned order:
+One file per task in `tasks/` (see `tasks/README.md`). The order:
 
 | # | Task | Depends on |
 |---|------|-----------|
