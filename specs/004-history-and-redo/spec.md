@@ -250,7 +250,7 @@ Unchanged, apart from the `classifier.is_cached` helper above. Notes for the REA
 
 ## Design handoff: what this spec changes
 
-The design agent answered the open questions in `PLAN_004_INTEGRATION.md` §0 and designed the surfaces listed in the next section. This spec accepts those answers: **F6 Undo, F7 Redo, F8 History, F9 Redo plan** (F-keys because `TextArea` and `Input` do not bind them; `ctrl+z`/`ctrl+y` keep their typing meaning), the Redo plan as a modal that reopens after each re-approval, rail glyphs `↻` stale and `◐` incomplete with reasons on the stage banner and in the plan, the held-out warning wording, `gold_removed.jsonl`, and the gold tools on the Tuning assistant only.
+The design agent answered the open questions in `PLAN_004_INTEGRATION.md` §0 and designed the surfaces listed in the next section. This spec accepts those answers: **F6 Undo, F7 Redo, F8 History, F9 Redo plan** (F-keys so that `ctrl+z`/`ctrl+y` keep their typing meaning; `Input` binds none of them, but **`TextArea` binds F6 (select line) and F7 (select all) in Textual 8.2.8**, so the Tuning prompt modal declares F6/F7 as priority bindings that are active only while the text equals the file, and elsewhere an open editor leaves them to the text area), the Redo plan as a modal that reopens after each re-approval, rail glyphs `↻` stale and `◐` incomplete with reasons on the stage banner and in the plan, the held-out warning wording, `gold_removed.jsonl`, and the gold tools on the Tuning assistant only.
 
 Where this spec differs, the design handoff needs these changes (to be sent to the design agent):
 
@@ -278,6 +278,13 @@ The backend above exposes data; these are the places it must show up. Keys follo
 7. **Gold after a seeds change:** a count on Search; on the Gold screen an orphan banner, a Rows modal, confirmed removal (with the number of labels discarded and, for test rows, the held-out warning) and "Draw N replacements".
 8. **Assistant:** the status and coverage sections arrive as a context line (UPDATED, with a short reply); the tools render as tool lines; `remove_gold` opens the confirmation.
 9. **Embedding model change (not yet designed):** a warning on Search, a one-line note after saving Project settings, a stage 2 mark with the reason `embedding model changed`.
+
+Clarifications made while implementing the history UI (task 08):
+
+- **Keys.** F6/F7 are screen bindings on Brief, Taxonomy (the focused panel's file; dimmed when the chat has focus) and the Tuning prompt modal; the app has a hidden F6 fallback that undoes the outside edit a notice announces on any other screen. F8 is an app binding (a rail row, hidden from the wide footer, dimmed while an editor is open or over a modal). F3/F4/F5 are unchanged.
+- **Restore** from the History modal dismisses it and the screen underneath shows `Restored <file> to <time>. Undo with F6.` A restore that changes labels with gold present asks first with the same two-case modal (button `Archive as version N and restore`); the modal's title and button name the action (undo, redo or restore).
+- **External notice** is announced by `HunchesApp.check_history` (project open, every stage entry, app focus): it compares the log with the highest seq already checked, so an outside edit that a later `save()` logged first is still announced once. The screen underneath reloads from the files without recording anything for the assistant (its instructions are read fresh). Undo on the notice is enabled only while that outside edit is the newest entry of its file.
+- **Tuning prompt modal.** Undo/Redo step `prompt.md` and put the text in the box. The primary button becomes `Re-run  F2` (the file already changed). Closing the modal after an undo, even with Cancel, makes the Tuning screen follow the file and tell the assistant; only `Re-run` re-runs the dev set.
 
 ## Behaviour that changes in 001–003
 

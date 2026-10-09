@@ -16,6 +16,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.markup import escape
@@ -89,6 +90,7 @@ DESTINATIONS = [
     ("Projects", "F4"),
     ("Project settings", "F3"),
     ("System settings", "F5"),
+    ("History", "F8"),
 ]
 # which destination the open screen is, by its stage_name
 DESTINATION_OF = {
@@ -97,7 +99,14 @@ DESTINATION_OF = {
     "Settings": "Project settings",
     "System settings": "System settings",
 }
-RAIL_ACTIONS = {"quit", "goto", "settings", "projects", "system_settings"}
+RAIL_ACTIONS = {
+    "quit",
+    "goto",
+    "settings",
+    "projects",
+    "system_settings",
+    "history",
+}
 
 
 def wide(app) -> bool:
@@ -193,7 +202,13 @@ class StatusHeader(Static):
             if label == here:
                 lines.append(row("▸", "$primary", label, "b #EEF1F5", on=True, key=key))
             else:
-                lines.append(row(" ", "$text-muted", label, "$text-muted", key=key))
+                # History is unavailable while an editor draft is open
+                tone = (
+                    "$text-disabled"
+                    if label == "History" and getattr(self.screen, "editing", False)
+                    else "$text-muted"
+                )
+                lines.append(row(" ", tone, label, tone, key=key))
         bottom = [
             plain("n/p stage · q quit", "$text-disabled"),
             "",
@@ -632,6 +647,7 @@ from hunches.screens.brief import BriefScreen
 from hunches.screens.browse import BrowseScreen
 from hunches.screens.final import test_stage
 from hunches.screens.gold import GoldScreen
+from hunches.screens.history import ExternalNotice, HistoryScreen
 from hunches.screens.project_settings import ProjectSettingsScreen
 from hunches.screens.projects import ProjectsScreen
 from hunches.screens.run import RunScreen
@@ -665,10 +681,15 @@ class HunchesApp(App):
         ("f3", "settings", "Project settings"),
         ("f4", "projects", "Projects"),
         ("f5", "system_settings", "System settings"),
+        ("f8", "history", "History"),
+        # the screens bind F6 and F7 themselves; this one undoes an outside edit announced on any other screen
+        Binding("f6", "undo_notice", "Undo", show=False),
+        Binding("escape", "dismiss_notice", "Dismiss", show=False),
     ]
 
     stage = 0  # 1-9 once running
     stage_shown = False
+    seen = 0  # the highest history seq already checked for outside edits
 
     @property
     def rail(self) -> bool:
@@ -714,6 +735,7 @@ class HunchesApp(App):
         else:
             self.stage_shown = True
             self.push_screen(screen)
+        self.call_later(self.check_history)
 
     def open_project(self, path: str | Path) -> None:
         """Switch to the project at `path`. The only place that changes the working directory."""
@@ -737,7 +759,7 @@ class HunchesApp(App):
             self.notify(f"Cannot open {path.name}: {e}", severity="error")
             return
         self.workers.cancel_all()
-        history.sync()
+        self.seen = len(history.entries())  # what the sync below finds is news
         self.stage = 0
         while len(self.screen_stack) > 1:
             self.pop_screen()
@@ -748,7 +770,47 @@ class HunchesApp(App):
     def on_app_focus(self) -> None:
         """An editor or git may have changed the three files while the terminal was in the background."""
         if self.stage:
-            history.sync()
+            self.check_history()
+
+    def base_screen(self) -> Screen:
+        """The topmost screen that is not a modal."""
+        return next(
+            s for s in reversed(self.screen_stack) if not isinstance(s, ModalScreen)
+        )
+
+    def check_history(self) -> None:
+        """Log outside edits (history.sync) and announce each new one once, on the screen the user is on."""
+        history.sync()
+        new = [e for e in history.entries() if e["seq"] > self.seen]
+        self.seen = max([self.seen, *(e["seq"] for e in new)])
+        screen = self.base_screen()
+        for entry in new:
+            if entry["kind"] == "edit" and entry["source"] == "external":
+                if moved := getattr(screen, "history_changed", None):
+                    moved(entry)
+                if screen.query(StatusHeader):
+                    screen.mount(ExternalNotice(entry), before=0)
+
+    def notices(self) -> list[ExternalNotice]:
+        return list(self.base_screen().query(ExternalNotice))
+
+    def action_undo_notice(self) -> None:
+        self.notices()[0].undo()
+
+    def action_dismiss_notice(self) -> None:
+        for notice in self.notices():
+            notice.remove()
+
+    def action_history(self) -> None:
+        """The History modal; not while an editor is open (its draft is not in the history)."""
+        if self.check_action("history", ()):
+            self.push_screen(HistoryScreen(), self.restored)
+
+    def restored(self, result: tuple[dict, str] | None) -> None:
+        """History restored a file: the screen underneath follows it."""
+        screen = self.base_screen()
+        if result and (moved := getattr(screen, "history_changed", None)):
+            moved(*result)
 
     def action_settings(self) -> None:
         """Project settings of the open project (not on top of a modal or itself)."""
@@ -773,6 +835,15 @@ class HunchesApp(App):
             self.push_screen(SystemSettingsScreen())
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in ("history", "undo_notice", "dismiss_notice"):
+            if isinstance(self.screen, ModalScreen) or not self.stage:
+                return False
+            if action == "history":
+                return None if getattr(self.screen, "editing", False) else True
+            notices = self.notices()
+            return bool(notices) and (
+                action == "dismiss_notice" or notices[0].can_undo()
+            )
         if (
             action == "goto"
         ):  # n/p mean nothing outside a project (Projects uses n for New)

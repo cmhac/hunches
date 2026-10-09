@@ -1,6 +1,8 @@
 """The hunches Textual theme and label colours. Every key in `variables` was checked against
 textual 8.2.8 (textual/design.py)."""
 
+import difflib
+
 from rich.style import Style
 from rich.text import Text
 from textual.markup import escape
@@ -110,3 +112,33 @@ def label_text(names: list[str], name: str) -> Text:
     color = label_color(names.index(name), name) if name in names else OFF_TOPIC_COLOR
     muted = "#8C96A6" if name == "off_topic" else ""
     return Text.assemble(("■", color), " ", (name, muted))
+
+
+def diff(
+    old: str, new: str, old_name: str = "current", new_name: str = "proposed"
+) -> str:
+    return "\n".join(
+        difflib.unified_diff(
+            old.splitlines(), new.splitlines(), old_name, new_name, lineterm=""
+        )
+    )
+
+
+def diff_markup(
+    old: str, new: str, old_name: str = "current", new_name: str = "proposed"
+) -> str:
+    """The unified diff with + lines green, - lines red, @@ sand and the file headers muted."""
+    out = []
+    for line in diff(old, new, old_name, new_name).splitlines():
+        text = escape(line)
+        if line.startswith(("---", "+++")):
+            out.append(f"[$text-muted]{text}[/]")
+        elif line.startswith("+"):
+            out.append(f"[$success on #1C3322]{text}[/]")
+        elif line.startswith("-"):
+            out.append(f"[$error on #3E1826]{text}[/]")
+        elif line.startswith("@@"):
+            out.append(f"[$secondary]{text}[/]")
+        else:
+            out.append(text)
+    return "\n".join(out)

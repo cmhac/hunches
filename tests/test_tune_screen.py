@@ -1376,3 +1376,127 @@ async def test_no_assistant_tool_sets_a_gold_label(assistant):
             screen.agent._function_toolset.tools[name].function
         ).parameters
         assert "labels" not in params and "label" not in params
+
+
+# ---- undo and redo in the Edit prompt modal (spec 004, task 08) ---------------------------
+
+
+def prompt_versions():
+    """prompt.md saved twice on top of the baseline 'Classify.'"""
+    history.save("prompt", "Classify. v1", "user", "Prompt: one")
+    history.save("prompt", "Classify. v2", "user", "Prompt: two")
+
+
+async def open_prompt_modal(app, pilot, screen):
+    await pilot.press("o")
+    await pilot.pause()
+    modal = app.screen
+    assert isinstance(modal, PromptEditScreen)
+    return modal
+
+
+async def test_edit_prompt_undo_steps_back_without_a_rerun_and_rerun_button_runs_it(
+    assistant,
+):
+    prompt_versions()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        screen.rerun()
+        await quiesce(app, pilot)
+        assert len(calls) == 8 and screen.prompt == "Classify. v2"
+        modal = await open_prompt_modal(app, pilot, screen)
+        undo, redo = (modal.query_one(i, Button) for i in ("#undo", "#redo"))
+        assert (str(undo.label), str(redo.label)) == ("Undo  F6", "Redo  F7")
+        assert not undo.disabled and redo.disabled
+        before = len(assistant.prompts)
+        await pilot.click("#undo", offset=(2, 0))
+        await pilot.pause()
+        area = modal.query_one("#prompt", TextArea)
+        assert area.text == "Classify. v1"
+        assert files.read_text("prompt.md") == "Classify. v1"
+        assert "Undid: Prompt: two" in str(
+            modal.query_one("#hist-note", Static).render()
+        )
+        assert not redo.disabled
+        save = modal.query_one("#save", Button)
+        assert str(save.label) == "Re-run  F2" and not save.disabled
+        assert len(calls) == 8 and len(assistant.prompts) == before  # nothing ran
+
+        await pilot.press("f7")  # F6/F7 work with the text area focused
+        await pilot.pause()
+        assert area.text == "Classify. v2" and redo.disabled
+        await pilot.press("f6")
+        await pilot.pause()
+        assert area.text == "Classify. v1"
+
+        await pilot.press("f2")  # Re-run
+        await quiesce(app, pilot)
+        assert app.screen is screen
+        assert screen.prompt == "Classify. v1"
+        assert len(calls) == 16  # the dev set classified again with the earlier prompt
+        edit = history_requests("edit")[-1]
+        assert edit.metadata["summary"] == "Undid: Prompt: two"
+        assert "# Current prompt\nClassify. v1" in str(edit.parts[0].content)
+
+
+async def test_edit_prompt_undo_then_cancel_still_updates_the_screen_and_runs_nothing(
+    assistant,
+):
+    prompt_versions()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        screen.rerun()
+        await quiesce(app, pilot)
+        modal = await open_prompt_modal(app, pilot, screen)
+        await pilot.click("#undo", offset=(2, 0))
+        await pilot.pause()
+        await pilot.press("escape")
+        await quiesce(app, pilot)
+        assert app.screen is screen
+        assert files.read_text("prompt.md") == "Classify. v1"
+        assert screen.prompt == "Classify. v1"
+        assert len(calls) == 8  # no re-run
+        assert history_requests("edit")[-1].metadata["summary"] == "Undid: Prompt: two"
+        assert modal.is_attached is False
+
+
+async def test_edit_prompt_undo_is_off_while_the_text_differs_from_the_file(assistant):
+    prompt_versions()
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        screen.rerun()
+        await quiesce(app, pilot)
+        modal = await open_prompt_modal(app, pilot, screen)
+        area = modal.query_one("#prompt", TextArea)
+        area.text = "Classify. typed"
+        await pilot.pause()
+        assert modal.query_one("#undo", Button).disabled
+        assert "ctrl+z" in str(modal.query_one("#hist-note", Static).render())
+        await pilot.press("f6")  # the text area's own select-line
+        await pilot.pause()
+        assert files.read_text("prompt.md") == "Classify. v2"
+        assert area.text == "Classify. typed"
+
+
+async def test_an_outside_edit_of_the_prompt_is_followed_and_nothing_is_re_run(
+    assistant,
+):
+    app = HunchesApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await start(app, pilot)
+        await quiesce(app, pilot)
+        screen.rerun()
+        await quiesce(app, pilot)
+        before = len(assistant.prompts)
+        files.write_text("prompt.md", "Classify. Edited in an editor.")
+        app.check_history()
+        await quiesce(app, pilot)
+        assert screen.prompt == "Classify. Edited in an editor."
+        assert len(calls) == 8 and len(assistant.prompts) == before
+        assert len(app.notices()) == 1

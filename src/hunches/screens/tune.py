@@ -1,6 +1,5 @@
 import asyncio
 import dataclasses
-import difflib
 import hashlib
 import json
 import time
@@ -36,7 +35,7 @@ from hunches.screens import gold as gold_screen
 from hunches.screens import report
 from hunches.screens.progress import RunIndicator, eta_text
 from hunches.screens.taxonomy import prompt_change, taxonomy_text
-from hunches.theme import editor
+from hunches.theme import diff_markup, editor
 
 MAX_SHOWN = 20  # disagreements the assistant sees
 METRICS = ["accuracy", "macro_f1", "micro_f1", "exact_match"]
@@ -146,32 +145,6 @@ def diff_size(old: str, new: str) -> tuple[int, int]:
     )
 
 
-def diff(old: str, new: str) -> str:
-    return "\n".join(
-        difflib.unified_diff(
-            old.splitlines(), new.splitlines(), "current", "proposed", lineterm=""
-        )
-    )
-
-
-def diff_markup(old: str, new: str) -> str:
-    """The unified diff with + lines green, - lines red, @@ sand and the file headers muted."""
-    out = []
-    for line in diff(old, new).splitlines():
-        text = escape(line)
-        if line.startswith(("---", "+++")):
-            out.append(f"[$text-muted]{text}[/]")
-        elif line.startswith("+"):
-            out.append(f"[$success on #1C3322]{text}[/]")
-        elif line.startswith("-"):
-            out.append(f"[$error on #3E1826]{text}[/]")
-        elif line.startswith("@@"):
-            out.append(f"[$secondary]{text}[/]")
-        else:
-            out.append(text)
-    return "\n".join(out)
-
-
 class ProposalScreen(ModalScreen[str | None]):
     """Shows a diff against the current prompt; the proposal is editable.
 
@@ -229,19 +202,32 @@ class PromptEditScreen(ModalScreen[str | None]):
     """Edit prompt.md by hand. Dismisses with the new text (Save and re-run) or None."""
 
     AUTO_FOCUS = "#prompt"
-    BINDINGS: ClassVar = [("escape", "cancel", "Cancel"), ("f2", "save", "Save")]
+    # F6/F7 are priority bindings: a focused TextArea binds them itself (select line, select all)
+    BINDINGS: ClassVar = [
+        ("escape", "cancel", "Cancel"),
+        ("f2", "save", "Save"),
+        Binding("f6", "undo", "Undo", priority=True),
+        Binding("f7", "redo", "Redo", priority=True),
+    ]
     DEFAULT_CSS = """
     PromptEditScreen { align: center middle; }
     PromptEditScreen > Vertical { width: 1fr; height: 1fr; margin: 1 2; }
     PromptEditScreen .panel { height: 1fr; }
     PromptEditScreen TextArea { height: 1fr; border: none; padding: 0; }
     PromptEditScreen #note-line { height: auto; }
+    PromptEditScreen #history-row { height: 1; }
+    PromptEditScreen #history-row Button { margin-right: 1; }
+    PromptEditScreen #hist-note { width: 1fr; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; }
     PromptEditScreen #buttons { height: auto; align-horizontal: right; }
     """
 
     def __init__(self, current: str) -> None:
         super().__init__()
-        self.current = current
+        self.current = (
+            current  # the text of prompt.md: what the box shows when nothing is typed
+        )
+        self.moved = False  # undo or redo changed prompt.md while the box was open
+        self.last = ""  # the summary of the last undo or redo
 
     def compose(self) -> ComposeResult:
         with modal_box(Vertical(), "Edit prompt"):
@@ -258,6 +244,10 @@ class PromptEditScreen(ModalScreen[str | None]):
                         id="prompt",
                     )
                 )
+            with Horizontal(id="history-row"):
+                yield key_button("Undo", "F6", id="undo")
+                yield key_button("Redo", "F7", id="redo")
+                yield Static("", id="hist-note")
             yield Static(
                 "The dev set is classified again with the new prompt.",
                 id="note-line",
@@ -269,25 +259,84 @@ class PromptEditScreen(ModalScreen[str | None]):
                     "Save and re-run", "F2", id="save", variant="success", disabled=True
                 )
 
+    def on_mount(self) -> None:
+        self.sync()
+
+    def typed(self) -> bool:
+        """The box differs from prompt.md: a draft, which is not in the history."""
+        return self.query_one("#prompt", TextArea).text != self.current
+
     def changed(self) -> bool:
-        text = self.query_one("#prompt", TextArea).text
-        return bool(text.strip()) and text != self.current
+        return bool(self.query_one("#prompt", TextArea).text.strip()) and self.typed()
+
+    def sync(self) -> None:
+        typed = self.typed()
+        rerun = (
+            self.moved and not typed
+        )  # prompt.md already holds the text: only re-run
+        save = self.query_one("#save", Button)
+        save.label = "Re-run  F2" if rerun else "Save and re-run  F2"
+        save.disabled = not (self.changed() or rerun)
+        self.query_one("#undo", Button).disabled = typed or not history.can_undo(
+            "prompt"
+        )
+        self.query_one("#redo", Button).disabled = typed or not history.can_redo(
+            "prompt"
+        )
+        self.query_one("#hist-note", Static).update(
+            "Typing is undone with ctrl+z. Undo F6 is off until you save or discard."
+            if typed
+            else self.last or "F6 steps back through saved versions of prompt.md."
+        )
+        self.refresh_bindings()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in (
+            "undo",
+            "redo",
+        ):  # False: the text area gets the key (select line, select all)
+            can = history.can_undo if action == "undo" else history.can_redo
+            return not self.typed() and can("prompt")
+        return True
+
+    def step(self, redo: bool) -> None:
+        entry = (history.redo if redo else history.undo)("prompt")
+        if entry is None:
+            return
+        self.current = files.read_text("prompt.md") or ""
+        self.moved = True
+        self.last = entry["summary"]
+        self.query_one("#prompt", TextArea).text = self.current
+        self.sync()
+
+    def action_undo(self) -> None:
+        if not self.typed():
+            self.step(False)
+
+    def action_redo(self) -> None:
+        if not self.typed():
+            self.step(True)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        self.query_one("#save", Button).disabled = not self.changed()
+        self.sync()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def action_save(self) -> None:
-        if self.changed():
+        if self.changed() or (self.moved and not self.typed()):
             self.dismiss(self.query_one("#prompt", TextArea).text)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "save":
-            self.action_save()
-        else:
-            self.action_cancel()
+        match event.button.id:
+            case "save":
+                self.action_save()
+            case "undo":
+                self.action_undo()
+            case "redo":
+                self.action_redo()
+            case _:
+                self.action_cancel()
 
 
 KEY_LABELS = [  # (key, label under 120 columns, label from 120)
@@ -879,11 +928,22 @@ class TuneScreen(Screen):
     def action_edit_prompt(self) -> None:
         if not self.ready or self.running or self.stopped or not self.metrics:
             return
-        self.app.push_screen(PromptEditScreen(self.prompt), self.manual)
+        modal = PromptEditScreen(self.prompt)
+        self.app.push_screen(modal, lambda new: self.manual(new, modal.moved))
 
-    def manual(self, new: str | None) -> None:
-        """The Edit prompt modal closed: tell the assistant what the user changed, then re-run."""
-        if new is None or not new.strip() or new == self.prompt:
+    def manual(self, new: str | None, moved: bool = False) -> None:
+        """The Edit prompt modal closed: tell the assistant what the user changed, then re-run.
+
+        `moved`: undo or redo changed prompt.md inside the modal. The screen follows the file even if the
+        user cancelled, and re-runs only when they chose Re-run.
+        """
+        if moved:
+            self.history_changed(history.entries("prompt")[-1])
+        if new is None or not new.strip():
+            return
+        if new == self.prompt:
+            if moved:
+                self.rerun()
             return
         self.note_edit(
             "Prompt: edited by the user",
@@ -892,6 +952,20 @@ class TuneScreen(Screen):
             ),
         )
         self.accepted(new)
+
+    def history_changed(self, entry: dict, note: str | None = None) -> None:
+        """prompt.md moved (undo, redo, restore, an outside edit): follow it. Nothing is re-run."""
+        disk = files.read_text("prompt.md") or ""
+        if disk == self.prompt:
+            return
+        for pending in self.proposals:
+            if pending["status"] == "pending":  # its diff no longer applies
+                self.set_status(pending, "superseded")
+        old, self.prompt = self.prompt, disk
+        if entry["source"] in ("undo", "redo", "restore"):
+            self.note = note or entry["summary"]
+            self.note_edit(entry["summary"], prompt_record(entry["summary"], old, disk))
+        self.show()
 
     def accepted(self, new: str | None) -> None:
         """A new prompt text (accepted proposal or manual edit): write it, drop stale proposals, re-run."""

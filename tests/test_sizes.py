@@ -14,8 +14,9 @@ from textual.containers import ScrollableContainer
 from textual.screen import Screen
 from textual.scroll_view import ScrollView
 
-from hunches import classifier, files, metrics, system
+from hunches import classifier, files, history, metrics, system
 from hunches.app import ConfirmScreen, HunchesApp, StatusHeader
+from hunches.screens.history import HistoryScreen, NeedsVersionScreen
 from hunches.screens.model_picker import ModelPicker
 from hunches.screens.new_project import NewProjectScreen
 from hunches.screens.paths import PathPicker
@@ -160,12 +161,16 @@ MODALS = [
     "versions",
     "proposal",
     "prompt-edit",
+    "history",
+    "needs-version-restore",
+    "needs-version-new",
 ]
 
 
 def modals():
     current = system.read_system()
     assert current
+    labels = files.read_taxonomy()
     return {
         "confirm": lambda: ConfirmScreen(LONG),
         "recommendation": lambda: RecommendationModal(current),
@@ -176,6 +181,13 @@ def modals():
         "versions": lambda: VersionsScreen(),
         "proposal": lambda: ProposalScreen(PROMPT, PROMPT + "\nMore.\n" * 3),
         "prompt-edit": lambda: PromptEditScreen(PROMPT),
+        "history": lambda: HistoryScreen(),
+        "needs-version-restore": lambda: NeedsVersionScreen(
+            history.NeedsVersion("restore", labels, 2), "restore"
+        ),
+        "needs-version-new": lambda: NeedsVersionScreen(
+            history.NeedsVersion("new_version", labels, 2), "undo"
+        ),
     }
 
 
@@ -243,4 +255,39 @@ async def test_modals(size, name):
         await pilot.pause()
         await app.push_screen(modals()[name]())
         await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("variant", ["text", "filter-open"])
+async def test_history_variants(size, variant):
+    files.write_text("prompt.md", PROMPT + "\nMore.")  # an outside edit for the log
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.push_screen(HistoryScreen())
+        await pilot.pause()
+        if variant == "text":
+            await pilot.press("v")
+        else:
+            app.screen.query_one("#file").focus()
+            await pilot.press("enter")
+        await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("stage", range(1, 10), ids=STAGE_NAMES)
+async def test_external_notice_on_every_stage_screen(size, stage):
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.goto_stage(stage)
+        await pilot.pause()
+        files.write_text("prompt.md", PROMPT + "\nEdited in an editor.")
+        app.check_history()
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert len(app.notices()) == 1
         await check(app, pilot, size[0])
