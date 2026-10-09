@@ -126,3 +126,17 @@ def panel_title(widget) -> tuple[str, str]:
         str(widget.query(".panel-title").first().content),
         str(widget.query(".panel-subtitle").first().content),
     )
+
+
+def pytest_collection_modifyitems(items):
+    """Mark every test in a module that drives a Textual app (Pilot) as `ui`.
+
+    Pre-commit runs `-m "not ui"`; CI runs everything.
+    """
+    sources = {}
+    for item in items:
+        path = item.path
+        if path not in sources:
+            sources[path] = "run_test(" in path.read_text()
+        if sources[path]:
+            item.add_marker(pytest.mark.ui)

@@ -33,11 +33,13 @@ uv sync --all-extras
 uv run ruff check
 uv run ruff format --check
 uv run ty check
-uv run pytest
+uv run pytest                 # everything (CI runs this); parallel via pytest-xdist
+uv run pytest -m "not ui"     # fast tier; this is what pre-commit runs
+uv run pytest tests/test_x.py # targeted UI tests
 uv run hunches          # run from a directory containing (or to create) .hunches/
 ```
 
-All of ruff, ty and pytest must pass before every commit. If these commands don't exist yet, task 01 hasn't been done; do it first.
+Ruff, ty and the fast tests (`pytest -m "not ui"`) must pass before every commit (pre-commit enforces this). The slow Pilot UI tests (marked `ui` automatically in `tests/conftest.py` for any module that calls `run_test(`) are a CI requirement in GitHub Actions, not a pre-commit one. Locally, whenever a change touches a screen, modal, `app.py`, `theme.py`, `hunches.tcss` or anything a screen reads, run the relevant UI test files (targeted, e.g. `uv run pytest tests/test_tune_screen.py tests/test_sizes.py`) during development; run the full suite only when the change is broad. Do not wait on the full suite for every small change. If these commands don't exist yet, task 01 hasn't been done; do it first.
 
 ## Layout (target)
 
