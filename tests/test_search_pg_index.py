@@ -203,3 +203,52 @@ def test_is_approximate():
     assert not search.is_approximate(cfg(backend="pgvector"))
     assert not search.is_approximate(cfg(backend="s3"))
     assert not search.is_approximate(cfg())
+
+
+def test_two_tables_reads_the_text_in_a_second_query(monkeypatch):
+    conn = Conn(
+        [("0.8.1", "extensions")],
+        [("vector", "extensions", 3)],
+        [],
+        [],
+        [(2, None, 0.5), (1, None, 0.9)],
+        [(1, "one"), (2, "two")],
+    )
+    setup(
+        monkeypatch,
+        conn,
+        pg_id_column="item_id",
+        pg_text_table="public.items",
+        pg_text_column="body",
+    )
+    hits, capped = search.search([1.0, 2.0, 3.0], 0.3)
+    assert conn.executed[4][0].startswith('SELECT "item_id", NULL, 1 - (')
+    assert 'FROM "public"."docs"' in conn.executed[4][0]
+    assert conn.executed[5] == (
+        'SELECT "item_id", "body" FROM "public"."items" WHERE "item_id" = ANY(%s)',
+        ([2, 1],),
+    )
+    assert hits == [("1", "one", 0.9), ("2", "two", 0.5)]
+    assert capped is False
+
+
+def test_two_tables_missing_text_row_is_an_error(monkeypatch):
+    conn = Conn(
+        [("0.8.1", "extensions")],
+        [("vector", "extensions", 3)],
+        [],
+        [],
+        [(1, None, 0.9)],
+        [],
+    )
+    setup(monkeypatch, conn, pg_text_table="items")
+    with pytest.raises(RuntimeError, match="no text row for id '1'"):
+        search.search([1.0, 2.0, 3.0], 0.3)
+    assert conn.closed
+
+
+def test_two_tables_no_hits_skips_the_text_query(monkeypatch):
+    conn = conn_for([])
+    setup(monkeypatch, conn, pg_text_table="items")
+    assert search.search([1.0, 2.0, 3.0], 0.3) == ([], False)
+    assert len(conn.executed) == 5

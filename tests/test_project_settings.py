@@ -631,12 +631,11 @@ async def test_pgvector_settings_open_with_the_stored_values(tmp_path, monkeypat
                 "pg-id",
                 "pg-text",
                 "pg-vector",
-                "pg-url-var",
                 "pg-timeout",
                 "pg-region",
                 "pg-profile",
             )
-        ] == ["public.docs", "", "body", "", "MY_PG", "30", "eu-west-1", "dev"]
+        ] == ["public.docs", "", "body", "", "30", "eu-west-1", "dev"]
         assert screen.query_one("#pg-search", Select).value == "index"
         assert screen.query_one("#pg-auth", Select).value == "rds_iam"
         assert screen.query_one("#pg-region-row").display
@@ -645,6 +644,50 @@ async def test_pgvector_settings_open_with_the_stored_values(tmp_path, monkeypat
         screen.query_one("#save", Button).press()  # untouched: nothing to confirm
         await pilot.pause()
         assert not isinstance(app.screen, (ProjectSettingsScreen, ConfirmScreen))
+
+
+async def test_two_table_settings_open_with_the_stored_values(tmp_path, monkeypatch):
+    pg_project(
+        tmp_path, monkeypatch, pg_text_table="public.items", pg_text_id_column="id"
+    )
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert screen.query_one("#pg-layout", Select).value == "two"
+        assert screen.query_one("#pg-text-table-row").display
+        assert value(screen, "pg-text-table") == "public.items"
+        assert value(screen, "pg-text-id") == "id"
+        screen.query_one("#save", Button).press()  # untouched: nothing to confirm
+        await pilot.pause()
+        assert not isinstance(app.screen, (ProjectSettingsScreen, ConfirmScreen))
+
+
+async def test_one_table_project_opens_with_the_one_table_layout(tmp_path, monkeypatch):
+    pg_project(tmp_path, monkeypatch)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.screen.query_one("#pg-layout", Select).value == "one"
+        assert not app.screen.query_one("#pg-text-table-row").display
+
+
+async def test_switching_to_two_tables_confirms_and_saves(tmp_path, monkeypatch):
+    project = pg_project(tmp_path, monkeypatch)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#pg-layout", Select).value = "two"
+        await pilot.pause()
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert "Required: text table" in str(
+            app.screen.query_one("#error", Static).render()
+        )
+        app.screen.query_one("#pg-text-table", Input).value = "public.items"
+        question = await save_and_confirm(app, pilot)
+        assert "candidates.jsonl" in question
+    assert files.read_config(project).pg_text_table == "public.items"
 
 
 @pytest.mark.parametrize(
@@ -820,7 +863,7 @@ async def test_check_store_works_from_settings_with_the_stub(tmp_path, monkeypat
 
 
 async def test_save_url_from_settings_goes_to_the_keyring_only(tmp_path, monkeypatch):
-    from hunches import keys
+    from hunches import keys, search
 
     project = pg_project(tmp_path, monkeypatch)
     monkeypatch.delenv("MY_PG", raising=False)
@@ -829,11 +872,29 @@ async def test_save_url_from_settings_goes_to_the_keyring_only(tmp_path, monkeyp
         await pilot.pause()
         assert str(app.screen.query_one("#pg-url-status", Static).render()) == "missing"
         app.screen.query_one("#pg-url", Input).value = PG_URL
-        app.screen.query_one("#save-url", Button).press()
-        await pilot.pause()
-        assert keys.resolve("MY_PG") == PG_URL
-        assert str(app.screen.query_one("#pg-url-status", Static).render()) == "keyring"
+        question = await save_and_confirm(app, pilot)  # a new database: re-run Search
+        assert "candidates.jsonl" in question
+    url_id = search.pg_url_id(PG_URL)
+    assert keys.resolve(search.pg_url_name(url_id, None)) == PG_URL
+    saved = files.read_config(project)
+    assert (saved.pg_url_id, saved.pg_url_var) == (url_id, None)  # MY_PG is replaced
     assert "s3cr3t" not in (project / ".hunches" / "config.toml").read_text()
+
+
+async def test_settings_show_the_saved_url_of_the_project(tmp_path, monkeypatch):
+    from hunches import keys, search
+
+    url_id = search.pg_url_id(PG_URL)
+    keys.save(search.pg_url_name(url_id, None), PG_URL)
+    pg_project(tmp_path, monkeypatch, pg_url_var=None, pg_url_id=url_id)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert str(app.screen.query_one("#pg-url-status", Static).render()) == "keyring"
+        app.screen.query_one("#pg-url", Input).value = PG_URL  # same URL: no change
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+        assert not isinstance(app.screen, (ProjectSettingsScreen, ConfirmScreen))
 
 
 @pytest.mark.parametrize("auth", ["url", "rds_iam"])

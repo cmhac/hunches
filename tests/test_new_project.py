@@ -610,6 +610,81 @@ async def test_create_writes_only_pgvector_fields_and_registers(tmp_path, monkey
     assert [p.path for p in system.projects_by_recent()] == [str(project.resolve())]
 
 
+async def test_two_tables_layout_shows_text_table_rows_and_requires_one(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    from textual.widgets import Select
+
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        await pick_embedding(form, pilot)
+        form.query_one("#location", Input).value = str(tmp_path / "proj")
+        form.query_one("#pg-table", Input).value = "item_embeddings"
+        await pilot.pause()
+        assert not form.query_one("#pg-text-table-row").display
+        assert not form.query_one("#pg-text-id-row").display
+        assert "One table" in shown(form, "pg-layout-help")
+        assert shown(form, "error") == ""
+        form.query_one("#pg-layout", Select).value = "two"
+        await pilot.pause()
+        assert form.query_one("#pg-text-table-row").display
+        assert form.query_one("#pg-text-id-row").display
+        assert "text table" in shown(form, "pg-layout-help")
+        assert shown(form, "error") == "Required: text table"
+        assert form.query_one("#create", Button).disabled
+
+
+async def test_create_writes_the_two_table_fields(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    project = tmp_path / "proj"
+    from textual.widgets import Select
+
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        await pick_embedding(form, pilot)
+        form.query_one("#pg-layout", Select).value = "two"
+        await submit(
+            app,
+            pilot,
+            location=project,
+            **{
+                "pg-table": "public.item_embeddings",
+                "pg-id": "item_id",
+                "pg-text-table": "public.items",
+            },
+        )
+    config = files.read_config(project)
+    assert (config.pg_table, config.pg_id_column) == (
+        "public.item_embeddings",
+        "item_id",
+    )
+    assert (config.pg_text_table, config.pg_text_id_column) == ("public.items", None)
+
+
+async def test_one_table_layout_drops_a_typed_text_table(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    project = tmp_path / "proj"
+    from textual.widgets import Select
+
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        await pick_embedding(form, pilot)
+        form.query_one("#pg-layout", Select).value = "two"
+        form.query_one("#pg-text-table", Input).value = "items"
+        form.query_one("#pg-text-id", Input).value = "id"
+        form.query_one("#pg-layout", Select).value = "one"
+        await submit(app, pilot, location=project, **{"pg-table": "docs"})
+    config = files.read_config(project)
+    assert (config.pg_text_table, config.pg_text_id_column) == (None, None)
+
+
 async def test_create_opens_the_pgvector_project_without_connecting(
     tmp_path, monkeypatch
 ):
@@ -635,7 +710,7 @@ async def test_create_opens_the_pgvector_project_without_connecting(
 
 
 async def test_secret_never_reaches_a_file(tmp_path, monkeypatch):
-    from hunches import keys
+    from hunches import keys, search
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -645,13 +720,13 @@ async def test_secret_never_reaches_a_file(tmp_path, monkeypatch):
     async with app.run_test(size=(80, 24)) as pilot:
         form = await open_pg(app, pilot)
         await pick_embedding(form, pilot)
-        form.query_one("#pg-url", Input).value = URL
-        form.query_one("#save-url", Button).press()
-        await pilot.pause()
-        assert keys.resolve("HUNCHES_PG_URL") == URL  # in the (stubbed) keyring only
-        assert form.query_one("#pg-url", Input).value == ""
-        form.query_one("#pg-url", Input).value = URL  # typed but never saved
-        await submit(app, pilot, location=project, **{"pg-table": "items"})
+        await submit(
+            app, pilot, location=project, **{"pg-table": "items", "pg-url": URL}
+        )
+    url_id = files.read_config(project).pg_url_id
+    assert url_id == search.pg_url_id(URL)
+    # in the (stubbed) keyring only, under a name derived from the URL
+    assert keys.resolve(f"HUNCHES_PG_URL_{url_id.upper()}") == URL
     seen = [
         p for p in tmp_path.rglob("*") if p.is_file() and "__pycache__" not in str(p)
     ]
@@ -660,30 +735,53 @@ async def test_secret_never_reaches_a_file(tmp_path, monkeypatch):
         assert PASSWORD not in path.read_text(errors="replace"), path
 
 
-async def test_save_url_stores_in_the_keyring_and_updates_the_status(
-    tmp_path, monkeypatch
-):
-    from hunches import keys
+async def test_projects_on_two_databases_keep_two_urls(tmp_path, monkeypatch):
+    from hunches import keys, search
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("MY_PG", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    other = "postgresql://u:pw2@other.example.com:5432/app"
+    for name, url in (("a", URL), ("b", other)):
+        app = Host()
+        async with app.run_test(size=(80, 24)) as pilot:
+            form = await open_pg(app, pilot)
+            assert form.query_one("#pg-url", Input).password
+            await pick_embedding(form, pilot)
+            await submit(
+                app, pilot, location=tmp_path / name, **{"pg-table": "t", "pg-url": url}
+            )
+        os.chdir(tmp_path)
+    ids = [files.read_config(tmp_path / n).pg_url_id for n in ("a", "b")]
+    assert ids == [search.pg_url_id(URL), search.pg_url_id(other)]
+    assert ids[0] != ids[1]
+    names = [search.pg_url_name(i, None) for i in ids]
+    assert [keys.resolve(n) for n in names] == [URL, other]
+
+
+async def test_url_status_follows_the_saved_url(tmp_path, monkeypatch):
+    from hunches import keys, search
+
+    monkeypatch.chdir(tmp_path)
+    stub = StubCheck(canned())
+    monkeypatch.setattr(search, "check_store", stub)
+    saves = []
+    real_save = keys.save
+    monkeypatch.setattr(keys, "save", lambda v, k: saves.append(v) or real_save(v, k))
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         form = await open_pg(app, pilot)
         assert shown(form, "pg-url-status") == "missing"
-        form.query_one("#pg-url-var", Input).value = "MY_PG"
-        form.query_one("#save-url", Button).press()  # nothing typed: nothing stored
-        await pilot.pause()
-        assert keys.resolve("MY_PG") is None
-        assert form.query_one("#pg-url", Input).password
+        form.query_one("#pg-table", Input).value = "items"
         form.query_one("#pg-url", Input).value = URL
-        form.query_one("#save-url", Button).press()
-        await pilot.pause()
-        assert keys.resolve("MY_PG") == URL
+        await run_check(app, pilot, form)
         assert shown(form, "pg-url-status") == "keyring"
-        monkeypatch.setenv("MY_PG", "postgresql://x")
-        form.query_one("#pg-url-var", Input).value = "MY_PG "
-        await pilot.pause()
+        form.query_one("#pg-url", Input).value = URL  # the same URL again
+        await run_check(app, pilot, form)
+        assert len(saves) == 1  # already saved: not written again
+        name = search.pg_url_name(search.pg_url_id(URL), None)
+        monkeypatch.setenv(name, URL)
+        form.query_one("#pg-url", Input).value = URL
+        await run_check(app, pilot, form)
         assert shown(form, "pg-url-status") == "env"
 
 
@@ -750,6 +848,44 @@ async def run_check(app, pilot, form):
     await app.workers.wait_for_complete()
     await pilot.pause()
     return shown(form, "pg-status")
+
+
+async def test_check_store_saves_a_pasted_url_first(tmp_path, monkeypatch):
+    from hunches import keys, search
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MY_PG", raising=False)
+    stub = StubCheck(canned())
+    monkeypatch.setattr(search, "check_store", stub)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        form.query_one("#pg-table", Input).value = "items"
+        form.query_one("#pg-url", Input).value = URL
+        assert "sample: 7 hello world" in await run_check(app, pilot, form)
+        url_id = search.pg_url_id(URL)
+        assert keys.resolve(search.pg_url_name(url_id, None)) == URL
+        assert form.query_one("#pg-url", Input).value == ""
+        assert shown(form, "pg-url-status") == "keyring"
+    assert [c.pg_url_id for c in stub.configs] == [search.pg_url_id(URL)]
+
+
+async def test_check_store_does_not_run_when_the_pasted_url_cannot_be_saved(
+    tmp_path, monkeypatch
+):
+    from hunches import keys, search
+
+    monkeypatch.chdir(tmp_path)
+    stub = StubCheck(canned())
+    monkeypatch.setattr(search, "check_store", stub)
+    monkeypatch.setattr(keys, "save", lambda var, value: False)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        form.query_one("#pg-table", Input).value = "items"
+        form.query_one("#pg-url", Input).value = URL
+        assert "no keyring available" in await run_check(app, pilot, form)
+    assert not stub.configs
 
 
 async def test_check_store_shows_the_report_and_the_opclass_warning(

@@ -25,11 +25,13 @@ from hunches.screens.pg import (
     PG_CSS,
     compose_pg,
     pg_fields,
-    pg_input_changed,
+    pg_missing,
     pg_mount,
     pg_pressed,
     pg_refresh,
+    pg_save_url,
     pg_select_changed,
+    section,
     timeout_problem,
 )
 from hunches.screens.system import model_line, prices_note, saved_stores
@@ -185,6 +187,13 @@ class ProjectSettingsScreen(Screen):
         )
         self.query_one("#pg-region", Input).value = config.pg_aws_region or ""
         self.query_one("#pg-profile", Input).value = config.pg_aws_profile or ""
+        section(self).url_id, section(self).url_var = (
+            config.pg_url_id,
+            config.pg_url_var,
+        )
+        self.query_one("#pg-layout", Select).value = (
+            "two" if config.pg_text_table else "one"
+        )
         self.query_one("#pg-auth", Select).value = files.pg_setting(config, "pg_auth")
         self.query_one("#pg-search", Select).value = files.pg_setting(
             config, "pg_search"
@@ -237,7 +246,7 @@ class ProjectSettingsScreen(Screen):
             self.query_one("#region", Input).value = store.region or ""
             self.s3_embedding = store.embedding_model
             self.show_embedding()
-        elif event.select.id in ("pg-auth", "pg-search"):
+        elif event.select.id in ("pg-auth", "pg-search", "pg-layout"):
             pg_select_changed(self, event)
         elif event.select.id == "thinking":
             value = None if event.value == "default" else str(event.value)
@@ -250,8 +259,6 @@ class ProjectSettingsScreen(Screen):
             )
             self.show_embedding()
             self.refresh_save()
-        else:
-            pg_input_changed(self, event)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button.id or ""
@@ -299,13 +306,16 @@ class ProjectSettingsScreen(Screen):
         value = lambda i: self.query_one(f"#{i}", Input).value.strip()
         no_pg = {f: None for f in files.Config.model_fields if f.startswith("pg_")}
         if self.backend == "pgvector":
-            missing = ["table"] * (not value("pg-table"))
+            missing = pg_missing(self)
             if not self.embedding:
                 missing.append("embedding model")
             if missing or (problem := timeout_problem(self)):
                 self.query_one("#error", Static).update(
                     f"Required: {', '.join(missing)}" if missing else problem
                 )
+                return
+            if not pg_save_url(self):
+                self.query_one("#error", Static).update("URL: not saved (see above)")
                 return
             fields: dict = {
                 "backend": "pgvector",
@@ -357,6 +367,9 @@ class ProjectSettingsScreen(Screen):
             "pg_id_column",
             "pg_text_column",
             "pg_vector_column",
+            "pg_text_table",
+            "pg_text_id_column",
+            "pg_url_id",
             "embedding_model",
         )
         if any(getattr(new, f) != getattr(self.saved, f) for f in data):

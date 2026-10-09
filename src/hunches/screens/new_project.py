@@ -17,9 +17,10 @@ from hunches.screens.pg import (
     PG_CSS,
     compose_pg,
     pg_fields,
-    pg_input_changed,
+    pg_missing,
     pg_mount,
     pg_pressed,
+    pg_save_url,
     pg_select_changed,
     timeout_problem,
 )
@@ -223,8 +224,7 @@ class NewProjectScreen(Screen):
         ]
         problem = ""
         if pg:
-            if not value("pg-table"):
-                missing.append("table")
+            missing += pg_missing(self)
             if not self.embedding:
                 missing.append("embedding model")
             problem = timeout_problem(self)
@@ -251,7 +251,7 @@ class NewProjectScreen(Screen):
             self.query_one("#embedding-row").display = not local
             self.embedding = self.corpus_embedding() if local else self.s3_embedding
             self.refresh_summary()
-        elif event.select.id in ("pg-auth", "pg-search"):
+        elif event.select.id in ("pg-auth", "pg-search", "pg-layout"):
             pg_select_changed(self, event)
             self.refresh_create()
         elif event.select.id == "store" and event.value != -1:
@@ -285,7 +285,6 @@ class NewProjectScreen(Screen):
             self.embedding = model
             self.refresh_summary()
         else:
-            pg_input_changed(self, event)
             self.refresh_create()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -351,8 +350,10 @@ class NewProjectScreen(Screen):
         pg = backend == "pgvector"
         needed = ["location", *(["bucket", "index"] if s3 else ["corpus"])]
         if pg:
-            needed = ["location", "pg-table"]
-        missing = [name.removeprefix("pg-") for name in needed if not value(name)]
+            needed = ["location"]
+        missing = [name for name in needed if not value(name)]
+        if pg:
+            missing += pg_missing(self)
         if (s3 or pg) and not self.embedding:
             missing.append("embedding model")
         if pg and (problem := timeout_problem(self)):
@@ -370,6 +371,9 @@ class NewProjectScreen(Screen):
             return
         fields: dict = {"backend": backend} if backend != "local" else {}
         if pg:
+            if not pg_save_url(self):
+                self.fail("URL: not saved (see above)")
+                return
             fields |= pg_fields(self) | {"embedding_model": self.embedding}
         elif s3:
             fields |= {

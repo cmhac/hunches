@@ -122,6 +122,39 @@ def test_sample_query_maps_the_configured_columns(check):
     assert sample == 'SELECT "doc", left("body", 60) FROM "public"."docs" LIMIT 1'
 
 
+def test_two_tables_sample_joins_the_text_table(check):
+    conn = Conn()
+    got = check(
+        conn,
+        pg_table="public.item_embeddings",
+        pg_id_column="item_id",
+        pg_text_table="public.items",
+        pg_text_id_column="id",
+        pg_text_column="body",
+    )
+    sample = next(s for s in conn.executed if "left(" in s)
+    assert sample == (
+        'SELECT v."item_id", left(t."body", 60) FROM "public"."item_embeddings" v '
+        'JOIN "public"."items" t ON t."id" = v."item_id" LIMIT 1'
+    )
+    assert got["warnings"] == []
+
+
+def test_two_tables_without_a_matching_row_warns(check):
+    got = check(Conn(**{"left(": []}), pg_text_table="items")
+    assert got["sample"] is None
+    assert got["warnings"] == [
+        (
+            "No row of the table has a matching row in the text table: check the "
+            "id col and text id col."
+        )
+    ]
+
+
+def test_one_table_empty_sample_does_not_warn(check):
+    assert check(Conn(**{"left(": []}))["warnings"] == []
+
+
 @pytest.mark.parametrize(
     "row, expected",
     [([(True,)], True), ([(False,)], False), ([], None)],

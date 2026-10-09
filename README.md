@@ -100,10 +100,14 @@ sources. A query returns at most 10,000 hits; if a seed reaches that, the search
 
 **PostgreSQL with pgvector** (a table that already holds the embeddings): set `backend = "pgvector"` and `pg_table`
 (`table` or `schema.table`) in `config.toml`; the columns default to `pg_id_column = "id"`, `pg_text_column = "text"`
-and `pg_vector_column = "embedding"` (a `vector` or `halfvec` column). hunches only reads: the connection is
-read-only, it never creates a table, index or the extension, and never inserts. The connection URL holds a password,
-so it is never written to `config.toml` or `system.json`: it comes from the environment variable named by
-`pg_url_var` (default `HUNCHES_PG_URL`) or from the OS keyring (New project has a masked **Save URL...** field).
+and `pg_vector_column = "embedding"` (a `vector` or `halfvec` column). If the text is in a different table from the
+vectors, choose **Two tables** and set `pg_text_table` (joined on `pg_text_id_column`, default the id column).
+hunches only reads: the connection is read-only, it never creates a table, index or the extension, and never
+inserts. The connection URL holds a password, so it is never written to `config.toml` or `system.json`. Paste it
+into the masked **url** field: Check store, Create and Save keep it in the OS keyring under
+`HUNCHES_PG_URL_<id>`, where `<id>` (stored as `pg_url_id`) is a hash of host, port, database and user, never of the
+password. Projects on the same database share one entry, and projects on different databases never overwrite each
+other. Without a keyring, set that variable in the environment, or name your own with `pg_url_var`.
 Project settings and New project have a **Check store** button that reports the pgvector version, column type and
 dimension, an estimated row count, the indexes and one sample row.
 

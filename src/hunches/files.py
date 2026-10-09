@@ -34,7 +34,11 @@ class Config(BaseModel):
     pg_id_column: str | None = None
     pg_text_column: str | None = None
     pg_vector_column: str | None = None
-    pg_url_var: str | None = None
+    # two-table layout: the text lives in pg_text_table, joined on pg_text_id_column = pg_id_column
+    pg_text_table: str | None = None
+    pg_text_id_column: str | None = None  # None: the same name as pg_id_column
+    pg_url_var: str | None = None  # an explicit name; the form sets pg_url_id instead
+    pg_url_id: str | None = None  # search.pg_url_id of the URL: names its keyring entry
     pg_search: Literal["exact", "index"] | None = None
     pg_statement_timeout_s: int | None = None
     pg_auth: Literal["url", "rds_iam"] | None = None

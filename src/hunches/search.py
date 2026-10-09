@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -6,7 +7,7 @@ from urllib.parse import unquote, urlsplit
 import numpy as np
 
 from hunches import keys, system
-from hunches.files import Config, pg_setting, read_config
+from hunches.files import PG_DEFAULTS, Config, pg_setting, read_config
 
 # Max results per QueryVectors request: 10,000 (100 per page, followed via nextToken).
 # Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-limitations.html
@@ -60,10 +61,53 @@ IAM_CHECK = (
 )
 
 
+def pg_url_id(url: str) -> str:
+    """16 hex characters naming a database URL: a hash of host, port, database and user.
+
+    The password is left out, so the id (written to config.toml) reveals nothing secret and
+    survives a password change; the same database and user always get the same id."""
+    try:
+        from psycopg.conninfo import conninfo_to_dict
+
+        parts = conninfo_to_dict(url)
+    except ImportError as e:
+        raise ImportError(
+            "The pgvector backend needs psycopg: pip install hunches[pg]"
+        ) from e
+    except Exception:  # noqa: BLE001  the driver's text could quote the password
+        raise ValueError(
+            "not a PostgreSQL URL (postgresql://user:password@host:port/database)"
+        ) from None
+    if not parts.get("host"):
+        raise ValueError("the URL has no host")
+    user = str(parts.get("user") or "")
+    where = [
+        str(parts["host"]).lower(),
+        str(parts.get("port") or 5432),
+        str(parts.get("dbname") or user),  # libpq's default database is the user name
+        user,
+    ]
+    return hashlib.sha256(json.dumps(where).encode()).hexdigest()[:16]
+
+
+def pg_url_name(url_id: str | None, url_var: str | None) -> str:
+    """The environment variable / keyring entry holding the URL: an explicit pg_url_var,
+    else one per pg_url_id, else the default HUNCHES_PG_URL."""
+    if url_var:
+        return url_var
+    if url_id:
+        return f"HUNCHES_PG_URL_{url_id.upper()}"
+    return PG_DEFAULTS["pg_url_var"]
+
+
+def _url_name(config: Config) -> str:
+    return pg_url_name(config.pg_url_id, config.pg_url_var)
+
+
 def pg_message(e: Exception, config: Config, token: str | None = None) -> str:
     """An exception's text with the URL, password and IAM token replaced by ***, plus a hint."""
     text = str(e)
-    url = keys.resolve(pg_setting(config, "pg_url_var")) or ""
+    url = keys.resolve(_url_name(config)) or ""
     password = urlsplit(url).password or ""
     secrets = [url, password, unquote(password), token or ""]
     for secret in sorted(set(secrets), key=len, reverse=True):
@@ -100,8 +144,13 @@ def pg_connect(config: Config):
         ) from e
     if not config.pg_table:
         raise ValueError("config.toml: pg_table is required for pgvector")
-    var = pg_setting(config, "pg_url_var")
+    var = _url_name(config)
     url = keys.resolve(var)
+    if not url and config.pg_url_id and not config.pg_url_var:
+        raise ValueError(
+            "The database URL is not saved on this computer: paste it in Project "
+            f"settings (F3), or set {var} in the environment"
+        )
     if not url:
         raise ValueError(
             f"config.toml: pg_url_var {var} is not set (environment or keyring)"
@@ -160,6 +209,26 @@ def _regclass(table: str) -> str:
     schema, dot, name = table.partition(".")
     parts = [schema, name] if dot else [schema]
     return ".".join('"' + p.replace('"', '""') + '"' for p in parts)
+
+
+def text_source(config: Config) -> tuple[str, str]:
+    """(table, id column) the text is read from: pg_text_table in the two-table layout."""
+    id_column = pg_setting(config, "pg_id_column")
+    if config.pg_text_table:
+        return config.pg_text_table, config.pg_text_id_column or id_column
+    return config.pg_table or "", id_column
+
+
+def _texts_query(config: Config):
+    """SELECT id, text for a list of ids (the one parameter), from the text table."""
+    from psycopg import sql
+
+    table, id_column = text_source(config)
+    return sql.SQL("SELECT {id}, {text} FROM {table} WHERE {id} = ANY(%s)").format(
+        id=sql.Identifier(id_column),
+        text=sql.Identifier(pg_setting(config, "pg_text_column")),
+        table=sql.Identifier(*table.split(".", 1)),
+    )
 
 
 def extension_version(conn) -> tuple[tuple[int, int, int], str]:
@@ -277,7 +346,6 @@ def search_pg_exact(
         table_name = config.pg_table or ""  # pg_connect has checked it
         table = sql.Identifier(*table_name.split(".", 1))
         id_col = sql.Identifier(pg_setting(config, "pg_id_column"))
-        text_col = sql.Identifier(pg_setting(config, "pg_text_column"))
         vec_col = sql.Identifier(pg_setting(config, "pg_vector_column"))
         typename, type_schema, _ = column_type(
             conn, table_name, pg_setting(config, "pg_vector_column")
@@ -301,7 +369,7 @@ def search_pg_exact(
         )
         if limit:
             _, width = table_estimates(
-                conn, table_name, pg_setting(config, "pg_text_column")
+                conn, text_source(config)[0], pg_setting(config, "pg_text_column")
             )
             if width is not None:  # no statistics: nothing to check
                 per_row = width + PG_ROW_OVERHEAD
@@ -323,12 +391,9 @@ def search_pg_exact(
         ids = list(dict.fromkeys(id_ for rows in per_seed for id_, _ in rows))
         texts = {}
         if ids:
-            step2 = sql.SQL(
-                "SELECT {id}, {text} FROM {table} WHERE {id} = ANY(%s)"
-            ).format(id=id_col, text=text_col, table=table)
             with conn.cursor(name="hunches_texts") as cur:
                 cur.itersize = PG_BATCH
-                cur.execute(step2, (ids,))
+                cur.execute(_texts_query(config), (ids,))
                 for id_, text in cur:
                     count(id_, text)
                     texts[id_] = text
@@ -373,13 +438,17 @@ def _search_pg_index(
             schema=sql.Identifier(type_schema),
             vtype=sql.Identifier(type_schema, typename),
         )
+        two_tables = bool(config.pg_text_table)
         query = sql.SQL(
             "SELECT {id}, {text}, {dist} AS sim FROM {table} "
             "WHERE {dist} >= %s AND {dist} <> 'NaN' "
             "ORDER BY {vec} OPERATOR({schema}.<=>) %s::{vtype} LIMIT %s"
         ).format(
             id=sql.Identifier(pg_setting(config, "pg_id_column")),
-            text=sql.Identifier(pg_setting(config, "pg_text_column")),
+            # two tables: the text comes from a second query, as in exact step 2
+            text=sql.SQL("NULL")
+            if two_tables
+            else sql.Identifier(pg_setting(config, "pg_text_column")),
             dist=dist,
             table=sql.Identifier(*table_name.split(".", 1)),
             vec=sql.Identifier(vec_name),
@@ -392,6 +461,13 @@ def _search_pg_index(
             cur.execute(f"SET LOCAL hnsw.max_scan_tuples = {int(PG_MAX_SCAN)}")
             cur.execute(query, (literal, literal, floor, literal, literal, PG_TOP_K))
             rows = cur.fetchall()
+            if two_tables and rows:
+                cur.execute(_texts_query(config), ([r[0] for r in rows],))
+                texts = dict(cur.fetchall())
+                missing = [r[0] for r in rows if r[0] not in texts]
+                if missing:
+                    raise RuntimeError(f"no text row for id {str(missing[0])!r}")
+                rows = [(i, texts[i], sim) for i, _, sim in rows]
         # relaxed order: the index may return rows slightly out of order
         hits = sorted(
             ((str(i), t, float(sim)) for i, t, sim in rows), key=lambda h: -h[2]
@@ -520,7 +596,7 @@ def check_store(config: Config, seeds: int | None = None) -> dict:
     column = pg_setting(config, "pg_vector_column")
     text_column = pg_setting(config, "pg_text_column")
     mode = pg_setting(config, "pg_search")
-    parts = urlsplit(keys.resolve(pg_setting(config, "pg_url_var")) or "")
+    parts = urlsplit(keys.resolve(_url_name(config)) or "")
     if parts.port == 6543 or "pooler." in (parts.hostname or ""):
         out["notes"].append(POOLER_HINT)
 
@@ -569,12 +645,25 @@ def check_store(config: Config, seeds: int | None = None) -> dict:
             out["indexes"] = [tuple(r) for r in cur.fetchall()]
 
     def sample():
-        schema, dot, name = table.partition(".")
-        query = sql.SQL("SELECT {}, left({}, 60) FROM {} LIMIT 1").format(
-            sql.Identifier(pg_setting(config, "pg_id_column")),
-            sql.Identifier(text_column),
-            sql.Identifier(schema, name) if dot else sql.Identifier(schema),
-        )
+        id_column = sql.Identifier(pg_setting(config, "pg_id_column"))
+        vectors = sql.Identifier(*table.split(".", 1))
+        if config.pg_text_table:
+            # one joined row proves both tables, all four columns and comparable id types
+            text_table, text_id = text_source(config)
+            query = sql.SQL(
+                "SELECT v.{}, left(t.{}, 60) FROM {} v JOIN {} t ON t.{} = v.{} LIMIT 1"
+            ).format(
+                id_column,
+                sql.Identifier(text_column),
+                vectors,
+                sql.Identifier(*text_table.split(".", 1)),
+                sql.Identifier(text_id),
+                id_column,
+            )
+        else:
+            query = sql.SQL("SELECT {}, left({}, 60) FROM {} LIMIT 1").format(
+                id_column, sql.Identifier(text_column), vectors
+            )
         with conn.cursor() as cur:
             cur.execute(query)
             row = cur.fetchone()
@@ -597,6 +686,11 @@ def check_store(config: Config, seeds: int | None = None) -> dict:
     finally:
         conn.close()
 
+    if config.pg_text_table and out["sample"] is None and "sample" not in out["errors"]:
+        out["warnings"].append(
+            "No row of the table has a matching row in the text table: check the "
+            "id col and text id col."
+        )
     rows = "?" if out["rows"] is None else out["rows"]
     if "indexes" not in out["errors"]:
         cosine = f"{out['type'] or 'vector'}_cosine_ops"  # halfvec has its own class

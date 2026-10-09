@@ -251,3 +251,47 @@ def test_unsupported_column_type_refused_before_the_scan(monkeypatch):
     with pytest.raises(RuntimeError, match="has type sparsevec"):
         search.search_pg_exact([[1.0, 0, 0]], 0.3)
     assert conn.closed and len(conn.executed) == 2
+
+
+def test_two_tables_step2_reads_the_text_table(monkeypatch):
+    conn = conn_for([(7, 0, 0.9)], [(7, "text seven")])
+    setup(
+        monkeypatch,
+        conn,
+        pg_table="public.item_embeddings",
+        pg_id_column="item_id",
+        pg_text_table="public.items",
+        pg_text_column="body",
+    )
+    hits, _ = search.search_pg_exact([[1.0, 2.0, 3.0]], 0.3)
+    assert 'FROM "public"."item_embeddings" t' in conn.executed[2][0]
+    sql, params, _, _ = conn.executed[3]
+    assert sql == (
+        'SELECT "item_id", "body" FROM "public"."items" WHERE "item_id" = ANY(%s)'
+    )
+    assert params == ([7],)
+    assert hits == [[("7", "text seven", 0.9)]]
+
+
+def test_two_tables_text_id_column_names_the_join_column(monkeypatch):
+    conn = conn_for([(7, 0, 0.9)], [(7, "text seven")])
+    setup(
+        monkeypatch,
+        conn,
+        pg_id_column="item_id",
+        pg_text_table="items",
+        pg_text_id_column="id",
+    )
+    search.search_pg_exact([[1.0, 2.0, 3.0]], 0.3)
+    assert conn.executed[3][0] == (
+        'SELECT "id", "text" FROM "items" WHERE "id" = ANY(%s)'
+    )
+
+
+def test_text_table_is_ignored_without_it(monkeypatch):
+    conn = conn_for([(7, 0, 0.9)], [(7, "t")])
+    setup(monkeypatch, conn, pg_text_id_column="other")  # no pg_text_table
+    search.search_pg_exact([[1.0, 2.0, 3.0]], 0.3)
+    assert conn.executed[3][0] == (
+        'SELECT "id", "text" FROM "public"."docs" WHERE "id" = ANY(%s)'
+    )

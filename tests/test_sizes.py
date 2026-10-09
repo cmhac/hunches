@@ -273,6 +273,8 @@ async def test_new_project_pgvector(size, auth):
         await pilot.pause()
         app.screen.query_one("#backend", Select).value = "pgvector"
         app.screen.query_one("#pg-auth", Select).value = auth
+        if auth == "rds_iam":  # the tallest form: every optional row shown
+            app.screen.query_one("#pg-layout", Select).value = "two"
         await pilot.pause()
         await check(app, pilot, size[0])
 
@@ -331,6 +333,8 @@ async def test_project_settings_pgvector(size, auth):
         await pilot.pause()
         app.screen.query_one("#backend", Select).value = "pgvector"
         app.screen.query_one("#pg-auth", Select).value = auth
+        if auth == "rds_iam":  # the tallest form: every optional row shown
+            app.screen.query_one("#pg-layout", Select).value = "two"
         await pilot.pause()
         await check(app, pilot, size[0])
 

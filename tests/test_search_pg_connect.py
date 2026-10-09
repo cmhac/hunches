@@ -324,3 +324,68 @@ def test_message_missing_table_unchanged_and_scrubbed(monkeypatch):
     assert search.pg_message(RuntimeError(text), config) == text
     leaked = RuntimeError("bad s3cr@t and s3cr%40t")
     assert search.pg_message(leaked, config) == "bad *** and ***"
+
+
+def test_url_id_ignores_the_password_and_query():
+    url_id = search.pg_url_id(URL)
+    assert len(url_id) == 16 and int(url_id, 16) >= 0
+    for same in (
+        "postgresql://alice:other-password@db.example.com:5433/mydb",
+        "postgres://alice@DB.Example.com:5433/mydb?sslmode=require",
+        "host=db.example.com port=5433 dbname=mydb user=alice password=x",
+    ):
+        assert search.pg_url_id(same) == url_id, same
+
+
+def test_url_id_differs_by_host_port_database_and_user():
+    ids = {
+        search.pg_url_id(u)
+        for u in (
+            URL,
+            "postgresql://alice:s3cr%40t@db2.example.com:5433/mydb",
+            "postgresql://alice:s3cr%40t@db.example.com:5432/mydb",
+            "postgresql://alice:s3cr%40t@db.example.com:5433/other",
+            "postgresql://carol:s3cr%40t@db.example.com:5433/mydb",
+        )
+    }
+    assert len(ids) == 5
+
+
+def test_url_id_defaults_port_and_database_like_libpq():
+    assert search.pg_url_id("postgresql://u@h") == search.pg_url_id(
+        "postgresql://u@h:5432/u"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad", ["not a url s3cr3t", "postgresql://u:s3cr3t@/db", "user=u password=s3cr3t"]
+)
+def test_url_id_refuses_without_echoing_the_input(bad):
+    with pytest.raises(ValueError) as e:
+        search.pg_url_id(bad)
+    assert "s3cr3t" not in str(e.value)
+
+
+def test_url_name_prefers_an_explicit_var_then_the_id_then_the_default():
+    assert search.pg_url_name("ab12", "MY_PG") == "MY_PG"
+    assert search.pg_url_name("ab12", None) == "HUNCHES_PG_URL_AB12"
+    assert search.pg_url_name(None, None) == "HUNCHES_PG_URL"
+
+
+def test_connects_with_the_url_saved_under_the_id(monkeypatch):
+    url_id = search.pg_url_id(URL)
+    fake = setup(monkeypatch, url=None, pg_url_id=url_id)
+    monkeypatch.setenv("HUNCHES_PG_URL", "postgresql://wrong@elsewhere/db")
+    monkeypatch.setenv(f"HUNCHES_PG_URL_{url_id.upper()}", URL)
+    search.pg_connect(files.read_config())
+    assert fake.conns[0].args == (URL,)
+
+
+def test_unsaved_url_id_says_where_to_paste_it(monkeypatch):
+    setup(monkeypatch, url=None, pg_url_id="ab12")
+    with pytest.raises(ValueError) as e:
+        search.pg_connect(files.read_config())
+    assert str(e.value) == (
+        "The database URL is not saved on this computer: paste it in Project "
+        "settings (F3), or set HUNCHES_PG_URL_AB12 in the environment"
+    )
