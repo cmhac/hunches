@@ -26,12 +26,12 @@ These are my recommendations; the ones marked **ask** are open for Chris.
 | D2 | Table layout | **Configurable table and column names with defaults**: `pg_table` (required, may be schema-qualified `schema.table`), `pg_id_column="id"`, `pg_text_column="text"`, `pg_vector_column="embedding"`. The corpus is "already embedded" by someone else, so a fixed schema would be wrong. All identifiers are composed with `psycopg.sql.Identifier`, never string-formatted. | Mirrors S3, where `key` is the id and `metadata.text` the text. |
 | D3 | Where the connection URL lives | **Environment variable first, then the OS keyring**, through the existing `keys.status/save` (which already work for any variable name). Config stores only the variable name: `pg_url_var`, default `HUNCHES_PG_URL`. `keys.VARS` stays LLM-only, so `load_into_env` is unchanged; `search` resolves the URL itself with `os.environ.get(var) or keys._stored(var)`. | `keys.py` takes a `var` argument everywhere. |
 | D4 | Exact vs approximate search | `pg_search = "exact"` (default) or `"index"`. **Exact** forces a sequential scan and answers **all seeds in one query** (D10), so the result equals the local numpy backend: every item at or above the floor, no cap. **Index** lets an HNSW/IVFFlat index answer, one query per seed, with iterative scan; it shows an `APPROXIMATE` warning on the Search screen every time. | See "Why exact is the default". |
-| D5 | Similarity | `similarity = 1 - (column <=> query)`. pgvector documents cosine similarity as 1 minus cosine distance and `<=>` as cosine distance ([README](https://github.com/pgvector/pgvector#readme)); unlike S3 Vectors (001 open item), this is documented, not assumed. The operator is norm-invariant, so the corpus need not be normalised. Rows with a zero vector give NaN and never pass the floor; the local backend treats them as similarity 0. Equal outcome unless `floor <= 0`, which `FLOOR` never is. | pgvector README; `candidates.FLOOR`. |
-| D6 | Result cap | **None in `exact` mode** (Chris, 2026-10-09: return all records for now); `capped` is always `False`. `index` mode needs a `LIMIT` for the index to be used at all, so it keeps `PG_TOP_K = 10_000` per seed and the existing cap warning. | An unbounded result is one row per candidate item, the same size as `candidates.jsonl`, which the tool already holds in memory (`build_candidates`). |
+| D5 | Similarity | `similarity = 1 - (column <=> query)`. pgvector documents cosine similarity as 1 minus cosine distance and `<=>` as cosine distance ([README](https://github.com/pgvector/pgvector#readme)); unlike S3 Vectors (001 open item), this is documented, not assumed. The operator is norm-invariant, so the corpus need not be normalised. **A zero vector gives distance `NaN`, and in Postgres `NaN` compares greater than every number, so `1 - NaN >= floor` is TRUE** (checked on PostgreSQL 16 + pgvector 0.6.0: a zero row passed the floor). The SQL therefore also requires `sim <> 'NaN'` (in Postgres `NaN = NaN` is true, so `isnan()`, which does not exist for `double precision`, is not needed). The local backend gives such rows similarity 0. | pgvector README; `candidates.FLOOR`; tested 2026-10-09, see "Verified on a real database". |
+| D6 | Result cap | **Top `PG_TOP_K = 10_000` per seed in both modes** (Chris, 2026-10-09), same as S3 so the existing cap warning applies. `capped` is true when some seed has exactly `PG_TOP_K` hits. In `exact` mode the cap is applied per seed inside the single query (a window function; see below). In `index` mode it is the `LIMIT` the index needs anyway, and the permanent `APPROXIMATE` warning also applies. | S3 precedent (`search.S3_TOP_K`). |
 | D7 | Embedding model | Recorded in `config.toml` as `embedding_model` (as for S3), chosen with the model picker. There is no `meta.json` in a table, so hunches cannot detect a mismatch by itself; **Check store** (below) reports the column dimension so a human can compare it with the model's. | 002 New project, S3 path. |
 | D8 | Saved stores in `system.json` | **Not in this spec.** S3 stores exist so one bucket/index can back several projects (002). For Postgres the reusable parts are a secret (already shared by `pg_url_var`) and five short fields with defaults. Adding `pg_stores` also means a `system.json` schema change; defer until someone asks. | Minimal implementation. **ask.** |
 | D9 | Version/compat | Needs pgvector with `<=>` (any release) and, for `"index"` mode, **0.8.0+** for iterative scans. | README: "Starting with 0.8.0, you can enable iterative index scans". |
-| D10 | One query for all seeds | **Yes, for `exact`.** `build_candidates` keeps, per item, only its highest similarity across seeds and the seed that gave it (`max_similarity`, `best_seed`; ties go to the earlier seed because it only replaces on a strictly greater value). That reduction can be done in SQL, so Postgres reads each row once and returns **one row per qualifying item**, not one per (item, seed) pair. See "One query for all seeds". `index` mode stays one query per seed: a per-row lateral lookup cannot use an ANN index. | Reading of `candidates.build_candidates`. |
+| D10 | One query for all seeds | **Yes, for `exact`.** One scan of the table answers every seed, and the per-seed top-`PG_TOP_K` cap is kept, so the result is exactly what the per-seed loop would produce (`build_candidates` then merges per seed as today: highest similarity wins, ties to the earlier seed). `index` mode stays one query per seed: a per-row lateral lookup cannot use an ANN index. | Tested against numpy and against the per-seed SQL, 2026-10-09. |
 
 ## Why exact is the default
 
@@ -42,43 +42,69 @@ Hence:
 - **`exact` (default):** see "One query for all seeds" below. No index is used or needed, there is no `LIMIT`, and the distance floor is applied in SQL (safe, because index scans are off).
 - **`index`:** one query per seed (`SELECT id, text, 1 - (vec <=> q) AS sim FROM t WHERE … ORDER BY vec <=> q LIMIT PG_TOP_K`, the shape an index needs), but `SET LOCAL hnsw.iterative_scan = relaxed_order` (results may be slightly out of order; we re-sort client-side) and `SET LOCAL hnsw.max_scan_tuples = <PG_MAX_SCAN>`, with `WHERE 1 - (vec <=> q) >= floor` pushed into SQL so the scan continues until `LIMIT` or `max_scan_tuples`. Always shows: `WARNING: APPROXIMATE pgvector search; the index may hide hits above the floor. Switch to exact in Project settings for a complete pool.` (The 1000 upper bound of `ef_search` I remember is **not** in the README; do not hard-code it. Set only the parameters named here.)
 
-**Implementation must verify, on a real Postgres with pgvector, before this is trusted:** that `enable_indexscan = off` really yields a sequential scan on an HNSW-indexed table (`EXPLAIN`), that exact and local results agree on the same data, and the exact `SET LOCAL` names against the installed pgvector. These are marked "Needs a human" below because they need a database.
+**Tested (see "Verified on a real database"):** `enable_indexscan = off` on a table that has an HNSW index gives a sequential scan plus sort, i.e. exact search. Still to verify with a real pgvector 0.8+: the `index`-mode `SET LOCAL` names and what `index` mode misses under default settings.
 
 ## One query for all seeds (`exact`)
 
-Yes, one query can return the candidates for every seed phrase. The seed vectors are embedded first (as today, cached), then sent once as a text array. For each table row, Postgres finds the nearest seed and keeps the row only if that seed clears the floor:
+Yes: one query returns the candidates for every seed, with the top-`PG_TOP_K` cap applied **per seed**. The seed vectors are embedded first (as today, cached) and sent once as a text array. Every (row, seed) similarity is computed once; pairs below the floor (or `NaN`) are dropped; the survivors are ranked within each seed and the top `PG_TOP_K` of each seed are returned:
 
 ```sql
 WITH seeds AS MATERIALIZED (
-  SELECT u.i, u.q::vector AS q                     -- parse each seed vector once, not once per row
+  SELECT u.i - 1 AS i, u.q::vector AS q            -- parse each seed vector once, not once per row
   FROM unnest(%s::text[]) WITH ORDINALITY AS u(q, i)
+),
+pairs AS (
+  SELECT t.{id} AS id, t.{text} AS text, d.i, d.sim
+  FROM {table} t
+  CROSS JOIN LATERAL (                              -- refers to t, so the table is the outer side:
+    SELECT s.i, 1 - (t.{vec} <=> s.q) AS sim        --   it is scanned once, whatever S is
+    FROM seeds s
+    OFFSET 0                                        -- stops the planner pulling the expression up and computing it twice
+  ) d
+  WHERE t.{vec} IS NOT NULL
+    AND d.sim >= %s                                 -- the floor
+    AND d.sim <> 'NaN'                              -- zero vectors (D5)
+),
+ranked AS (
+  SELECT *, row_number() OVER (PARTITION BY i ORDER BY sim DESC, id) AS rn FROM pairs
 )
-SELECT t.{id}, t.{text}, best.i, best.sim
-FROM {table} t
-CROSS JOIN LATERAL (
-  SELECT s.i, 1 - (t.{vec} <=> s.q) AS sim
-  FROM seeds s
-  ORDER BY t.{vec} <=> s.q, s.i                    -- ties: the earlier seed, as build_candidates does
-  LIMIT 1
-) best
-WHERE t.{vec} IS NOT NULL AND best.sim >= %s       -- the floor
+SELECT id, text, i, sim FROM ranked WHERE rn <= {PG_TOP_K}
 ```
 
-with `SET LOCAL enable_indexscan = off` (and `enable_bitmapscan = off`) first, and the query vectors passed as `[x,y,…]` text literals. The table is read once however many seeds there are; the cost is one distance per (row, seed), done in the database. The result has at most one row per table row, and `build_candidates` receives `(id, text, max_similarity, best_seed index)` directly and sorts and writes as today.
+with `SET LOCAL enable_indexscan = off` and `enable_bitmapscan = off` first, in a read-only transaction. Each `OFFSET 0`, the `LATERAL` over `t`, the `MATERIALIZED` CTE and the `NaN` test is there for a reason shown below; do not "simplify" them away without re-running the checks.
 
-What this changes in the code (and why it is not a plain `if` inside `search()`): `search.search()` takes one vector and returns hits, which is right for local and S3 and for `index` mode. For `exact` the unit of work is all seeds, so there is one new function, `search.search_pg_exact(vectors, floor)`, returning the already-reduced rows, and `build_candidates` takes a plain `if config.backend == "pgvector" and config.pg_search == "exact":` to call it instead of looping. Local and S3 are untouched.
+**Result.** At most `S × PG_TOP_K` rows, `(id, text, seed index, similarity)`. `search.search_pg_exact(vectors, floor)` turns them into one hit list per seed (`list[list[(id, text, sim)]]`, best first) plus `capped` (any seed with exactly `PG_TOP_K` rows). `build_candidates` takes a plain `if config.backend == "pgvector" and config.pg_search == "exact":` to get those lists in one call instead of calling `search()` per seed; **the merge, sort, write and meta code below it is unchanged**, so the output is identical to the per-seed path. Local, S3 and `index` mode are untouched.
 
-Behaviour to preserve (test against the local backend on the same data): the same items, the same `max_similarity` (to float tolerance: pgvector computes in single precision), the same `best_seed`, including ties.
+**Cost, honestly.** The table is read once, but the database still computes S × N distances and ranks the pairs that pass the floor (a sort of those pairs; spills to disk if they exceed `work_mem`). The saving over S separate scans is **I/O**, which matters when the table does not fit in cache. When it does fit, the work is CPU-bound and one query is no faster than S queries (measured below). The reasons to prefer one query anyway: one pass over a table too big to cache, one round trip, one `statement_timeout`, one Stop, and one progress display.
 
-**Must be verified with `EXPLAIN (ANALYZE)` on a real database, not assumed:** that the `LATERAL … LIMIT 1` plan evaluates each (row, seed) distance once and does not sort or materialize the table, and that the `MATERIALIZED` CTE keeps seed parsing out of the per-row path. If a different shape performs better (for example `unnest` of an array of vectors with `min()` aggregation), switch to it; the contract above is what matters. If Postgres cannot be made to stay single-pass for large S, fall back to the per-seed loop and say so here.
+**Streaming and progress.** Read with a server-side (named) cursor so rows arrive in batches. One query has no per-seed progress, so the Search screen shows running time and rows received; `progress` is called as `(received, 0, "")` on this path and the screen handles the zero-total case (`LabelBar` has no total; test at 80×24).
 
-**Streaming and progress.** The result is read with a server-side (named) cursor in batches so Python is never handed the whole set in one call (psycopg: verify `cursor(name=…)` semantics and that it works inside the read-only transaction). A single query has no per-seed progress, so the Search screen shows the running time and the number of candidates received so far instead of `i/S`; `progress` in `build_candidates` is called with `(received, 0, "")` for this path and the screen formats it (the `LabelBar` has no total; handle the zero-total case, tested at 80×24).
+### Verified on a real database (2026-10-09)
+
+PostgreSQL 16.15 (Ubuntu package) with pgvector **0.6.0** (the apt version) and psycopg **3.3.6**, run in the build container. Scripts were scratch, not committed; task 05 turns them into the integration test.
+
+| Claim | Result |
+|---|---|
+| The query above equals the numpy per-seed reference | 20,000 rows × 32 dims, 5 seeds, cap 300, floor 0.30: 1,451 candidates, same `max_similarity` (1e-5) and `best_seed`, 0 mismatches; the cap was detected on all 5 seeds. |
+| It equals the per-seed SQL (`ORDER BY … LIMIT`) | 300,000 rows × 64 dims, S = 2, 10, 30: identical `(seed, id)` hit sets. |
+| One scan of the table whatever S is | `EXPLAIN ANALYZE`: `Seq Scan on big t (actual rows=300000 loops=1)` for S = 2, 10, 30. **My first draft (`FROM docs t CROSS JOIN seeds s CROSS JOIN LATERAL …`) did not guarantee this**: with 2 seeds the plan scanned the table twice (`loops=2`). Making the lateral subquery iterate the seeds (so it depends on `t`) fixes it. |
+| `OFFSET 0` prevents double evaluation | Without it the plan shows `1 - (t.embedding <=> s.q)` in both the output and a join filter. With it, one evaluation per pair. |
+| `enable_indexscan = off` gives exact search despite an HNSW index | With the index the plan is `Limit` over the index; with the setting off it is `Limit → Sort` over a seq scan. The [PostgreSQL docs](https://www.postgresql.org/docs/current/runtime-config-query.html) say `enable_indexscan` covers index-scan and index-only-scan plan types, and note it is impossible to suppress sequential scans entirely (the reverse of what we need). |
+| Read-only transaction | psycopg `conn.read_only = True`; `CREATE TABLE` fails with `ReadOnlySqlTransaction`. |
+| Server-side cursor | `conn.cursor(name=…)` with `itersize` streamed 20,000 rows inside the read-only transaction. The psycopg [cursor docs](https://www.psycopg.org/psycopg3/docs/advanced/cursors.html) do not mention itersize or transactions; the behaviour above was observed, not documented. |
+| Stop | `Connection.cancel()` called from another thread interrupted a running query with `QueryCanceled: canceling statement due to user request`. The psycopg [docs](https://www.psycopg.org/psycopg3/docs/api/connections.html) say `cancel()` is deprecated in libpq 17 and to use `cancel_safe()` (added in psycopg 3.2) where possible, which falls back to the same behaviour on older libpq, and do not address cross-thread use; the cross-thread call worked in the test. **Use `cancel_safe()`** if present. |
+| `statement_timeout` | `SET LOCAL statement_timeout='1s'` raised `QueryCanceled: canceling statement due to statement timeout`. |
+| Zero vectors | `'[0,0,0]' <=> '[1,2,3]'` is `NaN` and `1 - NaN >= 0.3` is true, so the unguarded query returned the zero row; `AND d.sim <> 'NaN'` removed it. **This corrected D5** (my earlier claim was wrong). |
+| Speed | On a 300,000 × 64 table that fits in memory: S = 2: 0.2 s vs 0.1 s per-seed loop; S = 10: 0.5 s vs 0.4 s; S = 30: 1.2 s vs 1.3 s. **No speed-up when cached**, as expected. The I/O saving on a table larger than memory was **not** measured. |
+| LATERAL semantics | The PostgreSQL [docs](https://www.postgresql.org/docs/current/queries-table-expressions.html) describe a lateral item as evaluated once per row of the table it references, matching the `loops` counts. CTE inlining and `MATERIALIZED`: [docs](https://www.postgresql.org/docs/current/queries-with.html). |
+
+**Not verified:** pgvector 0.8+ (iterative scan, `index` mode), tables larger than memory (the I/O saving and the ranking sort spilling to disk), `halfvec` columns, managed services (RDS, Cloud SQL, Supabase) and their default timeouts, and pgvector versions other than 0.6.0.
 
 ## Tables with no index (very large, rarely queried)
 
 Supported, and it is the case `exact` mode is built for: it needs no index and never looks for one, so a table with no index at all works the same as an indexed one. Nothing in Check store treats a missing index as a problem in `exact` mode (it only warns in `index` mode, where an index is the whole point). What changes is cost, so the spec adds these:
 
-- **Say it is slow, honestly.** In `exact` mode the whole seed set is one full scan of the table, however many seeds there are (previous section); only `index` mode, which needs an index anyway, runs a query per seed. Check store shows the planner's row estimate and, in `exact` mode with no usable index, a plain note: `No index: the search scans the whole table (~N rows).` Informational, not a warning; the user chose this.
+- **Say it is slow, honestly.** In `exact` mode the whole seed set is one full scan of the table, however many seeds there are (previous section, with the cost caveat there); only `index` mode, which needs an index anyway, runs a query per seed. Check store shows the planner's row estimate and, in `exact` mode with no usable index, a plain note: `No index: the search scans the whole table (~N rows).` Informational, not a warning; the user chose this.
 - **Progress and Stop work.** The Search screen shows elapsed time and candidates received so far (see previous section) and lets the user cancel. Cancelling a worker thread blocked in a driver call does not interrupt the query, so on Stop the code calls `connection.cancel()` (psycopg's way to ask the server to cancel the running statement; **verify in the psycopg docs**) and closes the connection. Otherwise an abandoned multi-minute scan keeps running on the server.
 - **Server timeouts are the user's, not ours.** We do not override `statement_timeout`; an admin may have set one on purpose. If a scan hits it, the error shown is Postgres's own (`canceling statement due to statement timeout`) plus `Fix: raise statement_timeout for this role, or set pg_statement_timeout_s in config.toml`. Optional field `pg_statement_timeout_s` (default unset = the server's setting); when set, `SET LOCAL statement_timeout` is issued. Setting it to `0` means no limit.
 - **Memory.** Nothing is sorted on the server: the lateral lookup is per row and the result is streamed. Python holds one dict entry per candidate item, as `build_candidates` does today. The integration test should include a table large enough to confirm both, and note `work_mem` if the plan spills.
@@ -132,8 +158,8 @@ Switching backend in Project settings writes only the active backend's fields an
 
 - `pyproject.toml`: extra `pg = ["psycopg[binary]"]`; add `psycopg` to the dev group so `ty` and tests can import it (as boto3 is handled today: check how and mirror it).
 - `files.py`: `Config.backend` literal, the new fields (above), and a validator that the pgvector fields are present when `backend == "pgvector"`. Verify what, if anything, already validates the S3 fields before adding this; do not add a validator S3 lacks.
-- `search.py`: a third branch in `search()` (a plain `if`/`elif`, not a class) for `index` mode, `PG_TOP_K`, and one new function `search_pg_exact(vectors, floor)` (the single-query path, D10). Local and S3 are untouched.
-- `candidates.py`: `build_candidates` takes one `if` to call `search_pg_exact` instead of the per-seed loop for `pgvector` + `exact`; the merge, sort, write and meta code is shared. Docstring `S3 topK cap` → `backend cap`.
+- `search.py`: a third branch in `search()` (a plain `if`/`elif`, not a class) for `index` mode, `PG_TOP_K`, and one new function `search_pg_exact(vectors, floor)` returning one hit list per seed (the single-query path, D10). Local and S3 are untouched.
+- `candidates.py`: `build_candidates` takes one `if` to get its per-seed hit lists from `search_pg_exact` instead of calling `search()` per seed, for `pgvector` + `exact`; the merge, sort, write and meta code is shared and unchanged. Docstring `S3 topK cap` → `backend cap`.
 - `system.py`: `project_status` (one line), no schema change (D8).
 - `screens/new_project.py`, `screens/project_settings.py`, `screens/projects.py`, `screens/search.py`, `app.py:857`: as under "UI".
 - Docs: `README.md` (install `hunches[pg]`, a "pgvector" paragraph next to "S3 Vectors" at line ~95, the env var), `AGENTS.md` (Stack, Layout, "Needs a human"), and 001's "other vector backends" out-of-scope line is superseded by this spec (note it in the "Behaviour that changes" section below).
@@ -143,7 +169,7 @@ Switching backend in Project settings writes only the active backend's fields an
 
 All default-run tests are offline.
 
-- **Stubbed connection (fast tier).** A fake `psycopg.connect` whose cursor records the SQL and parameters and returns canned rows, in the style of `FakeS3` in `tests/test_search.py`. Assert: results are `(id, text, similarity)` sorted best first with only `sim >= floor` kept (floor inclusive, hand-computed values); in `index` mode `capped` is true only when exactly `PG_TOP_K` rows return with the last still above the floor, and in `exact` mode it is always false and the SQL has no `LIMIT`; `exact` sends **one** query for any number of seeds (assert the fake saw exactly one `execute` with all seed vectors in one parameter) and issues `SET LOCAL enable_indexscan = off`, `index` issues `hnsw.iterative_scan` and one query per seed; the rows `search_pg_exact` returns feed `build_candidates` to the same `candidates.jsonl` as the per-seed path would for the same data (hand-built, ties to the earlier seed); the connection is read-only; identifiers are quoted (a column named `"text"; DROP TABLE x` stays an identifier); the vector parameter is a text literal; missing `psycopg`, missing URL var, missing table each give the exact message in "Errors"; a connection error containing the URL does not leak the password.
+- **Stubbed connection (fast tier).** A fake `psycopg.connect` whose cursor records the SQL and parameters and returns canned rows, in the style of `FakeS3` in `tests/test_search.py`. Assert: results are `(id, text, similarity)` sorted best first with only `sim >= floor` kept (floor inclusive, hand-computed values); `capped` is true only when some seed returns exactly `PG_TOP_K` hits (use a small `PG_TOP_K` via monkeypatch); the `NaN` guard and the `OFFSET 0` / `LATERAL` / `MATERIALIZED` shape are asserted on the SQL text; `exact` sends **one** query for any number of seeds (assert the fake saw exactly one `execute` with all seed vectors in one parameter) and issues `SET LOCAL enable_indexscan = off`, `index` issues `hnsw.iterative_scan` and one query per seed; the rows `search_pg_exact` returns feed `build_candidates` to the same `candidates.jsonl` as the per-seed path would for the same data (hand-built, ties to the earlier seed); the connection is read-only; identifiers are quoted (a column named `"text"; DROP TABLE x` stays an identifier); the vector parameter is a text literal; missing `psycopg`, missing URL var, missing table each give the exact message in "Errors"; a connection error containing the URL does not leak the password.
 - **Config:** old configs load; a pgvector config round-trips; switching backend nulls the other backend's fields.
 - **Screens (Pilot):** New project with pgvector chosen (required fields, Check store with a stubbed connection showing dimension and the opclass warning, Create writes the expected `config.toml` and no URL anywhere in it); Project settings switch S3 → pgvector with the confirmation; Projects row shows `pgvector` and the table; Search shows the cap warning and the `APPROXIMATE` warning. Add to the size sweep.
 - **No-index table (stubbed + integration):** a config with `pg_search = "exact"` and a table with no index searches normally; Check store shows the no-index note and no WARNING; in `index` mode with no index it shows the WARNING. Stop calls `cancel()` on the stub connection and closes it; `pg_statement_timeout_s` issues `SET LOCAL statement_timeout` with the value, and `0` is passed through (not treated as unset). The integration test also runs `exact` against a table created with no index, and compares its candidates (ids, `max_similarity`, `best_seed`) with the local backend on the same vectors with several seeds, including a tie; it also reads `EXPLAIN` to check the single-pass plan.
@@ -175,9 +201,8 @@ Same one-commit-per-task, red/green TDD process as 004.
 
 ## Open items
 
-- **ask:** whether `exact` should be the default (D4). My recommendation is yes. (`PG_TOP_K` now only applies to `index` mode; `exact` is uncapped per Chris, 2026-10-09.)
-- A later spec may add a cap or a progress-by-batch for `exact` if an unbounded result proves too large in practice; the spec for now follows "return all records".
+- **ask:** whether `exact` should be the default (D4). My recommendation is yes.
 - **ask:** saved Postgres stores in `system.json` (D8). My recommendation is defer.
-- Behaviour of `enable_indexscan = off` on an HNSW-indexed table, and the parameter names in `index` mode: verify with `EXPLAIN` on a real database (task 05).
+- `index` mode needs pgvector 0.8+ for iterative scans; the build container only had 0.6.0, so that mode's `SET LOCAL` names and its recall are unverified. Task 05 runs them against the `pgvector/pgvector` image.
 - `halfvec` columns need a `::halfvec` cast on the query, and the README caps indexed `halfvec` at 4,000 dimensions vs 2,000 for `vector`. Task 01 picks the cast from the column type reported by Check store, or supports `vector` only and says so; decide when implementing.
-- **Needs a human:** a PostgreSQL instance with pgvector and an embedded table for the manual end-to-end check, and the verification list above. Agents cannot fake these.
+- **Needs a human:** a PostgreSQL instance with pgvector and an embedded table for the manual end-to-end check, and the "Not verified" list above (tables larger than memory, managed services, pgvector 0.8+). Agents cannot fake these.
