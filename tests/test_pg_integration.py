@@ -521,7 +521,10 @@ def slow_table(admin, schema, project):
     return f"{schema}.slow"
 
 
-def test_stop_cancels_the_running_query(admin, slow_table, project):
+def test_stop_cancels_the_running_query(admin, slow_table, project, monkeypatch):
+    # other xdist workers use this database too: count only this test's own connection
+    app = "hn_stop_" + uuid.uuid4().hex[:8]
+    monkeypatch.setenv("PGAPPNAME", app)
     project(pg_table=slow_table)
     stop = search.Stop()
     timer = threading.Timer(1.0, stop.stop)
@@ -532,8 +535,9 @@ def test_stop_cancels_the_running_query(admin, slow_table, project):
     assert time.monotonic() - started < 6
     time.sleep(0.3)
     active = admin.execute(
-        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-        "AND pid <> pg_backend_pid() AND state = 'active'"
+        "SELECT count(*) FROM pg_stat_activity WHERE application_name = %s "
+        "AND state = 'active'",
+        (app,),
     ).fetchone()[0]
     assert active == 0
 
