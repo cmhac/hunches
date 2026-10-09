@@ -1,6 +1,6 @@
 # 005 — pgvector backend
 
-Status: proposal, for review. Not implemented. Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md`, `../003-tui-redesign/spec.md` and `../004-history-and-redo/spec.md`, all implemented. Written 2026-10-09 against `main` at `c8ebdf1`.
+Status: approved by Chris 2026-10-09 (exact default, 512 MB limit, refuse `index` below 0.8.0, IAM in scope); implementation in progress on `claude/intelligent-turing-asvhrl`, to be merged only after Chris has tested it against his RDS database. Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md`, `../003-tui-redesign/spec.md` and `../004-history-and-redo/spec.md`, all implemented. Written 2026-10-09 against `main` at `c8ebdf1`.
 
 **Read order for an implementer:** this spec → your task file (none yet; see "Proposed tasks") → the code named under "What changes in the code".
 
@@ -22,7 +22,7 @@ These are my recommendations; the ones marked **ask** are open for Chris.
 
 | # | Question | Decision | Evidence |
 |---|----------|----------|----------|
-| D1 | Driver | **psycopg 3**, optional extra `pg = ["psycopg[binary]"]`, imported lazily inside `search()` with the same "needs … `pip install hunches[pg]`" error as boto3. The query vector is sent as a text literal cast in SQL (`%s::vector`), so the separate `pgvector` Python package is not needed. | The pgvector README shows vectors as text literals (`'[1,2,3]'`); the `pgvector` package is only needed to register adapter types ([README](https://github.com/pgvector/pgvector#readme), [pgvector-python](https://pypi.org/project/pgvector/)). Binary-wheel behaviour of `psycopg[binary]` is from memory: verify against the psycopg install docs in task 01. |
+| D1 | Driver | **psycopg 3**, optional extras `pg = ["psycopg[binary]"]` and `rds = ["psycopg[binary]", "boto3"]` (the second only for IAM authentication, D11), imported lazily inside `search()` with the same "needs … `pip install hunches[pg]`" error as boto3. The query vector is sent as a text literal cast in SQL (`%s::vector`), so the separate `pgvector` Python package is not needed. | The pgvector README shows vectors as text literals (`'[1,2,3]'`); the `pgvector` package is only needed to register adapter types ([README](https://github.com/pgvector/pgvector#readme), [pgvector-python](https://pypi.org/project/pgvector/)). Binary-wheel behaviour of `psycopg[binary]` is from memory: verify against the psycopg install docs in task 01. |
 | D2 | Table layout | **Configurable table and column names with defaults**: `pg_table` (required, may be schema-qualified `schema.table`), `pg_id_column="id"`, `pg_text_column="text"`, `pg_vector_column="embedding"`. The corpus is "already embedded" by someone else, so a fixed schema would be wrong. All identifiers are composed with `psycopg.sql.Identifier`, never string-formatted. | Mirrors S3, where `key` is the id and `metadata.text` the text. |
 | D3 | Where the connection URL lives | **Environment variable first, then the OS keyring**, through the existing `keys.status/save` (which already work for any variable name). Config stores only the variable name: `pg_url_var`, default `HUNCHES_PG_URL`. `keys.VARS` stays LLM-only, so `load_into_env` is unchanged; `search` resolves the URL itself with `os.environ.get(var) or keys._stored(var)`. | `keys.py` takes a `var` argument everywhere. |
 | D4 | Exact vs approximate search | `pg_search = "exact"` (default; Chris agreed 2026-10-09) or `"index"`. **Exact** answers **all seeds in one query** (D10) with a query shape that cannot use an ANN index, so the result equals the local numpy backend (up to the per-seed cap). **Index** lets an HNSW/IVFFlat index answer, one query per seed, with iterative scan (pgvector 0.8.0+, D9); it shows an `APPROXIMATE` warning on the Search screen every time. | See "Why exact is the default". |
@@ -32,6 +32,8 @@ These are my recommendations; the ones marked **ask** are open for Chris.
 | D8 | Saved stores in `system.json` | **Not in this spec.** S3 stores exist so one bucket/index can back several projects (002). For Postgres the reusable parts are a secret (already shared by `pg_url_var`) and five short fields with defaults. Adding `pg_stores` also means a `system.json` schema change; defer until someone asks. | Minimal implementation. **ask.** |
 | D9 | pgvector version | **`exact` mode has no version floor beyond "the `vector` extension is installed"** (tested on 0.6.0 and 0.8.1; older versions untested, so none is promised). **`index` mode needs 0.8.0+** (iterative scans; [changelog](https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md)). **`halfvec` columns exist only in 0.7.0+**, so a table that has one is already on 0.7.0+. hunches reads `pg_extension.extversion` at the start of every search (same connection, one tiny query) and, in `index` mode on < 0.8.0, stops before issuing any `SET` with a message that names the found version. See "Versions". | Changelog: HNSW 0.5.0, halfvec 0.7.0, iterative scans 0.8.0. |
 | D10 | One query for all seeds | **Yes, for `exact`.** One scan of the table answers every seed, and the per-seed top-`PG_TOP_K` cap is kept, so the result is exactly what the per-seed loop would produce (`build_candidates` then merges per seed as today: highest similarity wins, ties to the earlier seed). `index` mode stays one query per seed: a per-row lateral lookup cannot use an ANN index. | Tested against numpy and against the per-seed SQL, 2026-10-09. |
+| D11 | Authentication | Two modes, `pg_auth = "url"` (default: the full URL, password included, from the environment or keyring) and **`"rds_iam"`: RDS / Aurora IAM database authentication**. See "Authentication". | Chris, 2026-10-09: in this spec; he will test it against his RDS instance. |
+| D12 | Result-size limit | **System-level** (`system.json`, `pg_max_result_mb`, default 512, editable in System settings, applies to every pgvector project on the machine); not a per-project field. `0` = no limit. | Chris, 2026-10-09. |
 
 ## Why exact is the default
 
@@ -117,8 +119,8 @@ Postgres does not run out of memory here: a sort that exceeds `work_mem` spills 
 - Show, in Check store and before a search, the worst-case pair count `S × estimated rows` with the note `A low floor on a large table sorts up to this many pairs on the server (spills to temporary files). Ask your DBA about temp_file_limit.`
 - Honour Stop and `pg_statement_timeout_s`; both end the query on the server.
 
-**2. In hunches (the result).** Bounded by construction: at most `S × PG_TOP_K` rows. But rows carry text, so that bound can still be large (30 seeds × 10,000 × 2 KB = 600 MB). **The escape hatch is `pg_max_result_mb`** (default **512**; `0` = no limit):
-- **Before the scan starts** (the failure that matters is the one that comes after a ten-minute scan), hunches reads the column's average width from the planner statistics (`pg_stats.avg_width` for the text column; **verify the view and column names in task 02**) and computes the worst case `S × PG_TOP_K × (avg_width + overhead)`. If that exceeds the limit it refuses to start: `Search could return up to ~N MB (S seeds × 10,000 hits × ~W bytes) which exceeds pg_max_result_mb = 512. Use fewer seeds or raise pg_max_result_mb in Project settings.` No statistics (table never analysed) skips this check.
+**2. In hunches (the result).** Bounded by construction: at most `S × PG_TOP_K` rows. But rows carry text, so that bound can still be large (30 seeds × 10,000 × 2 KB = 600 MB). **The escape hatch is the system-level setting `pg_max_result_mb`** (D12; default **512** MB, `0` = no limit; stored in `system.json`, edited in System settings, read at the start of every search):
+- **Before the scan starts** (the failure that matters is the one that comes after a ten-minute scan), hunches reads the column's average width from the planner statistics (`pg_stats.avg_width` for the text column; **verify the view and column names in task 02**) and computes the worst case `S × PG_TOP_K × (avg_width + overhead)`. If that exceeds the limit it refuses to start: `Search could return up to ~N MB (S seeds × 10,000 hits × ~W bytes) which exceeds the result limit of 512 MB. Use fewer seeds or raise the limit in System settings (F5).` No statistics (table never analysed) skips this check.
 - **While streaming**, hunches counts bytes received (id + text + a fixed per-row overhead) and when the limit is passed it calls `cancel_safe()`, closes the connection and raises the same message with the real count. Tested: a named cursor over a 303 MB result stopped after 4,931 rows / 5.0 MB against a 5 MB budget, without reading the rest.
 - Python's merge dict holds one entry per distinct candidate, never more than the rows received, so it is covered by the same limit.
 
@@ -136,7 +138,7 @@ Requirement from Chris: any managed service must work. hunches needs only a logi
 | Long queries through a pooler | Check store notes when the URL's port or host looks like a transaction pooler (6543, or a `pooler.` host) and suggests the direct or session-mode URL for the search. This is a hint, not a block. | docs; heuristic |
 | Server-side timeouts | Supabase's own [guide](https://supabase.com/docs/guides/database/postgres/timeouts) lists default role timeouts (anon 3 s, authenticated 8 s, `postgres` capped at 2 min by a global default; one copy of the page looked garbled, so confirm there) and shows `alter role … set statement_timeout`. A full scan on a large table can exceed them. Our error carries the hint from "Tables with no index"; `pg_statement_timeout_s` overrides it for the one transaction with `SET LOCAL`. Whether `SET LOCAL` is honoured through a given pooler is untested. | docs; untested |
 | Read replicas (RDS replicas, Aurora readers) | Allowed (the transaction is read-only anyway). A long query on a replica can be cancelled by replication: `canceling statement due to conflict with recovery`, a standby setting (`max_standby_streaming_delay`, [default 30 s on the source I found](https://docs.azure.cn/en-us/postgresql/troubleshoot/troubleshoot-canceling-statement-due-to-conflict-with-recovery)). hunches recognises that message and adds `Fix: run the search against the primary/writer endpoint, or a replica configured for long queries.` The sources I found were general PostgreSQL and Azure; Aurora's behaviour may differ. | docs (not AWS-specific); error hint only |
-| IAM / token authentication (RDS, Aurora) | Out of scope for v1. The URL variable can hold a URL with a short-lived token that the user generates; hunches does not refresh it. | not researched |
+| IAM / token authentication (RDS, Aurora) | In scope (D11); see "Authentication". | AWS docs; **untested against a real instance** until Chris runs it |
 | Connection limits, IP allow-lists, VPN / bastion / SSH tunnel | Out of scope; the user arranges network access. Supabase's direct host is IPv6 unless the project has the IPv4 add-on; the shared pooler is IPv4 only ([docs](https://supabase.com/docs/guides/database/connecting-to-postgres)). | docs |
 | Extension version lag | Handled by "Versions": `exact` works without 0.8. | docs |
 
@@ -176,13 +178,13 @@ Supported, and it is the case `exact` mode is built for: it needs no index and n
 - **Say it is slow, honestly.** In `exact` mode the whole seed set is one full scan of the table, however many seeds there are (previous section, with the cost caveat there); only `index` mode, which needs an index anyway, runs a query per seed. Check store shows the planner's row estimate and, in `exact` mode with no usable index, a plain note: `No index: the search scans the whole table (~N rows).` Informational, not a warning; the user chose this.
 - **Progress and Stop work.** The Search screen shows elapsed time and candidates received so far (see previous section) and lets the user cancel. Cancelling a worker thread blocked in a driver call does not interrupt the query, so on Stop the code calls `connection.cancel()` (psycopg's way to ask the server to cancel the running statement; **verify in the psycopg docs**) and closes the connection. Otherwise an abandoned multi-minute scan keeps running on the server.
 - **Server timeouts are the user's, not ours.** We do not override `statement_timeout`; an admin may have set one on purpose. If a scan hits it, the error shown is Postgres's own (`canceling statement due to statement timeout`) plus `Fix: raise statement_timeout for this role, or set pg_statement_timeout_s in config.toml`. Optional field `pg_statement_timeout_s` (default unset = the server's setting); when set, `SET LOCAL statement_timeout` is issued. Setting it to `0` means no limit.
-- **Memory and result size:** see "Result size and memory guards"; `pg_max_result_mb` applies here too.
+- **Memory and result size:** see "Result size and memory guards"; the system-level `pg_max_result_mb` applies here too.
 
 What this spec does **not** promise: speed. A table of tens of millions of 1,536-dimension vectors will take a long time (minutes at least) for the one scan on typical hardware; I have not measured it. That is inherent to exact search without an index; the product answer is the progress display, working Stop, and the honest note in Check store.
 
 ## Config
 
-`.hunches/config.toml` gains (all optional, only read when `backend = "pgvector"`):
+`.hunches/config.toml` gains these fields, all optional, only read when `backend = "pgvector"`. **In the file they default to absent** (`write_config` omits `None`, so a local or S3 project's config is unchanged); the defaults in the "Default" column are applied when the value is read:
 
 | Field | Default | Notes |
 |---|---|---|
@@ -194,10 +196,38 @@ What this spec does **not** promise: speed. A table of tens of millions of 1,536
 | `pg_url_var` | `"HUNCHES_PG_URL"` | name of the env var / keyring entry holding the URL |
 | `pg_search` | `"exact"` | `"exact"` or `"index"` |
 | `pg_statement_timeout_s` | unset | seconds; unset = the server's `statement_timeout`; `0` = no limit |
-| `pg_max_result_mb` | `512` | refuse / abort when the search could return, or has returned, more than this; `0` = no limit |
+| `pg_auth` | `"url"` | `"url"` or `"rds_iam"` (D11) |
+| `pg_aws_region` | unset | `rds_iam` only; unset = boto3's default region resolution (like `s3_region`) |
+| `pg_aws_profile` | unset | `rds_iam` only; a named AWS profile; unset = boto3's default credential chain |
 | `embedding_model` | — | required, as for S3 |
 
 Switching backend in Project settings writes only the active backend's fields and sets the others to `None` (002 rule, unchanged). Old configs have none of these and load unchanged.
+
+**System level (`system.json`, per user, never in git):** one new field, `pg_max_result_mb: int = 512`. An older `system.json` without it loads with 512. `VERSION` stays 1: the field is additive and has a default; a hunches that predates it ignores the field when reading and drops it if it rewrites the file, which is the same exposure any additive field has had (002 added fields the same way).
+
+## Authentication
+
+`pg_auth = "url"` (default): `pg_url_var` names an environment variable, or a keyring entry, holding a full libpq URL including the password (D3).
+
+`pg_auth = "rds_iam"`: for RDS and Aurora PostgreSQL with IAM database authentication enabled. `pg_url_var` holds a URL **without a password**: `postgresql://db_user@my-instance.abc123.us-east-1.rds.amazonaws.com:5432/mydb?sslmode=verify-full&sslrootcert=/path/global-bundle.pem`. At the start of every connection hunches asks boto3 for a token and uses it as the password:
+
+```python
+session = boto3.Session(profile_name=config.pg_aws_profile)           # None = default chain
+region = config.pg_aws_region or session.region_name                   # error if neither
+token = session.client("rds", region_name=region).generate_db_auth_token(
+    DBHostname=host, Port=port, DBUsername=user, Region=region)        # host/port/user parsed from the URL
+```
+
+What the AWS docs say, and what follows from it ([IAM database authentication](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html), [Python example](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.Connecting.Python.html), [IAM policy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.IAMPolicy.html)):
+- A token lives 15 minutes and "is only used for authentication and doesn't affect the session after it is established". So a token is generated per connection, immediately before connecting, and never stored or refreshed; a search that runs longer than 15 minutes is unaffected. (A new token is generated for each search because each opens its own connection.)
+- The host must be the real endpoint: "You cannot use a custom Route 53 DNS record instead of the DB instance endpoint to generate the authentication token." hunches uses the URL's host verbatim and says so in the error text if authentication fails.
+- Tokens are large ("generally about 1 KB but can be larger") and a truncated one fails; hunches passes it to psycopg as the `password` argument, not through a URL string.
+- If temporary credentials made the token, they must still be valid when connecting (docs); hunches generates the token immediately before connecting.
+- The connection is encrypted (IAM database authentication runs over SSL/TLS). If the URL has no `sslmode`, hunches adds `sslmode=require`. `verify-full` with the AWS root bundle in the URL is the user's choice and is passed through.
+- The database user needs the `rds_iam` role in Postgres, and the AWS identity needs `rds-db:connect` on `arn:aws:rds-db:<region>:<account>:dbuser:<DbiResourceId>/<db_user>` (for Aurora, the cluster resource id; through RDS Proxy, the proxy's `prx-…` id). hunches cannot check either; when authentication fails, the error text lists both as the likely causes.
+- The sandbox cannot test this (no AWS account). Chris tests it against his own instance; the code is covered by tests with `boto3` and `psycopg` stubbed (arguments passed to `generate_db_auth_token`, the token reaching psycopg as `password`, `sslmode` defaulting, the token and URL scrubbed from errors).
+
+Where the credentials come from is boto3's business (environment, `~/.aws`, SSO, instance role); hunches stores no AWS secrets. Errors from boto3 (no credentials, no region, expired SSO session) are shown as `AWS: <message>`.
 
 ## UI
 
@@ -223,16 +253,19 @@ Switching backend in Project settings writes only the active backend's fields an
 | `pg_table` missing | `config.toml: pg_table is required for pgvector` |
 | Connection/auth/SQL error | The driver's message, passed through a scrubber that replaces the URL and, defensively, the password portion with `***`. Never print the URL. |
 | Table or column missing | The Postgres error text (it names the object). |
+| `rds_iam` without boto3 | `IAM authentication needs boto3: pip install hunches[rds]` |
+| `rds_iam`, no credentials / region | `AWS: <botocore message>`; `pg_aws_region is not set and boto3 found no default region` |
+| `rds_iam`, authentication failed | The server's message, then `Check: the database user has the rds_iam role, the AWS identity may rds-db:connect on this DbiResourceId/user, and the URL host is the instance endpoint (not a custom DNS name).` |
 | Extension missing | `The vector extension is not installed in this database (CREATE EXTENSION vector needs a DBA).` |
 | `index` mode on pgvector < 0.8.0 | `pg_search = "index" needs pgvector 0.8.0 or newer (found X). Use pg_search = "exact", or upgrade the extension.` |
 | Unsupported column type | `Column "embedding" has type sparsevec; hunches supports vector and halfvec.` |
-| Result too large (before or during) | `Search could return up to ~N MB … exceeds pg_max_result_mb = 512. Use fewer seeds or raise pg_max_result_mb in Project settings.` |
+| Result too large (before or during) | `Search could return up to ~N MB … exceeds the result limit of 512 MB. Use fewer seeds or raise the limit in System settings (F5).` |
 | Replica conflict | Postgres text, then `Fix: run the search against the primary/writer endpoint, or a replica configured for long queries.` |
 | Column dimension ≠ query dimension | Postgres raises on the distance operator; pass its message through and append `Fix: embedding_model in .hunches/config.toml must be the model the table was embedded with.` |
 
 ## What changes in the code
 
-- `pyproject.toml`: extra `pg = ["psycopg[binary]"]`; add `psycopg` to the dev group so `ty` and tests can import it (as boto3 is handled today: check how and mirror it).
+- `pyproject.toml`: extras `pg = ["psycopg[binary]"]` and `rds = ["psycopg[binary]", "boto3"]`; add `psycopg` to the dev group so `ty` and tests can import it (as boto3 is handled today: check how and mirror it).
 - `files.py`: `Config.backend` literal, the new fields (above), and a validator that the pgvector fields are present when `backend == "pgvector"`. Verify what, if anything, already validates the S3 fields before adding this; do not add a validator S3 lacks.
 - `search.py`: a third branch in `search()` (a plain `if`/`elif`, not a class) for `index` mode, `PG_TOP_K`, and one new function `search_pg_exact(vectors, floor)` returning one hit list per seed (the single-query path, D10; two queries in one transaction). Local and S3 are untouched.
 - `candidates.py`: `build_candidates` takes one `if` to get its per-seed hit lists from `search_pg_exact` instead of calling `search()` per seed, for `pgvector` + `exact`; the merge, sort, write and meta code is shared and unchanged. Docstring `S3 topK cap` → `backend cap`.
@@ -280,9 +313,6 @@ Same one-commit-per-task, red/green TDD process as 004.
 
 ## Open items
 
-- **ask:** whether `exact` should be the default (D4). My recommendation is yes.
 - **ask:** saved Postgres stores in `system.json` (D8). My recommendation is defer.
 - `index` mode needs pgvector 0.8+ for iterative scans; the build container only had 0.6.0, so that mode's `SET LOCAL` names and its recall are unverified. Task 05 runs them against the `pgvector/pgvector` image.
-- **ask:** default `pg_max_result_mb = 512` and the fail-hard behaviour (a refusal rather than a truncated list). My recommendation is yes to both.
-- **ask:** is it acceptable that `index` mode simply refuses on pgvector < 0.8.0, rather than falling back to a non-iterative `LIMIT` (which returned 40 of 1,296 hits in the test)? I recommend refusing.
 - **Needs a human:** a PostgreSQL instance with pgvector and an embedded table for the manual end-to-end check, and the "Not verified" list above, above all every managed service (RDS, Aurora, Supabase, each with and without its pooler) and tables larger than memory. Agents cannot fake these.
