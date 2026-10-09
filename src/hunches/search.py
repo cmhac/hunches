@@ -483,3 +483,138 @@ def search(
             break
         response = client.query_vectors(**params, nextToken=response["nextToken"])
     return hits, len(hits) >= S3_TOP_K and not below_floor
+
+
+POOLER_HINT = (
+    "The URL looks like a transaction pooler (port 6543 or a pooler. host). Long "
+    "searches can be cut off there; consider the direct or session-mode URL."
+)
+
+
+def check_store(config: Config, seeds: int | None = None) -> dict:
+    """Read-only report on the configured table for Check store; does not raise.
+
+    Each piece runs in its own savepoint, so a failing query (its scrubbed text goes in
+    "errors" under the piece's name) does not hide the others. No count(*)."""
+    from psycopg import sql
+
+    out: dict = {
+        "version": None,
+        "schema": None,
+        "encrypted": None,
+        "type": None,
+        "dimension": None,
+        "rows": None,
+        "indexes": [],
+        "sample": None,
+        "warnings": [],
+        "notes": [],
+        "errors": {},
+    }
+    try:
+        conn = pg_connect(config)
+    except Exception as e:  # noqa: BLE001  pg_connect has already scrubbed the text
+        out["errors"]["connect"] = str(e)
+        return out
+    table = config.pg_table or ""
+    column = pg_setting(config, "pg_vector_column")
+    text_column = pg_setting(config, "pg_text_column")
+    mode = pg_setting(config, "pg_search")
+    parts = urlsplit(keys.resolve(pg_setting(config, "pg_url_var")) or "")
+    if parts.port == 6543 or "pooler." in (parts.hostname or ""):
+        out["notes"].append(POOLER_HINT)
+
+    def version():
+        out["version"], out["schema"] = extension_version(conn)
+        try:
+            require_index_mode_version(out["version"], mode)
+        except RuntimeError as e:
+            out["warnings"].append(str(e))
+
+    def encryption():
+        with conn.cursor() as cur:
+            cur.execute("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+            row = cur.fetchone()
+        out["encrypted"] = bool(row[0]) if row else None
+
+    def vector_column():
+        try:
+            out["type"], _, out["dimension"] = column_type(conn, table, column)
+        except RuntimeError as e:
+            if not str(e).startswith(
+                "Column "
+            ):  # an unsupported type; else it is missing
+                raise
+            out["warnings"].append(str(e))
+
+    def estimates():
+        out["rows"] = table_estimates(conn, table, text_column)[0]
+
+    def indexes():
+        with conn.cursor() as cur:
+            # indkey and indclass are parallel arrays; an expression index has attnum 0,
+            # never matches the column, and so is not listed
+            cur.execute(
+                "SELECT i.relname, am.amname, oc.opcname FROM pg_index x "
+                "JOIN pg_class i ON i.oid = x.indexrelid "
+                "JOIN pg_am am ON am.oid = i.relam "
+                "JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attname = %s "
+                "AND NOT a.attisdropped "
+                "CROSS JOIN LATERAL unnest(x.indkey::int2[], x.indclass::oid[]) "
+                "AS k(attnum, opc) JOIN pg_opclass oc ON oc.oid = k.opc "
+                "WHERE x.indrelid = %s::regclass AND k.attnum = a.attnum "
+                "ORDER BY i.relname",
+                (column, _regclass(table)),
+            )
+            out["indexes"] = [tuple(r) for r in cur.fetchall()]
+
+    def sample():
+        schema, dot, name = table.partition(".")
+        query = sql.SQL("SELECT {}, left({}, 60) FROM {} LIMIT 1").format(
+            sql.Identifier(pg_setting(config, "pg_id_column")),
+            sql.Identifier(text_column),
+            sql.Identifier(schema, name) if dot else sql.Identifier(schema),
+        )
+        with conn.cursor() as cur:
+            cur.execute(query)
+            row = cur.fetchone()
+        out["sample"] = (row[0], row[1] or "") if row else None
+
+    try:
+        for name, fn in [
+            ("version", version),
+            ("encryption", encryption),
+            ("column", vector_column),
+            ("estimates", estimates),
+            ("indexes", indexes),
+            ("sample", sample),
+        ]:
+            try:
+                with conn.transaction():
+                    fn()
+            except Exception as e:  # noqa: BLE001  whatever the driver raises
+                out["errors"][name] = pg_message(e, config)
+    finally:
+        conn.close()
+
+    rows = "?" if out["rows"] is None else out["rows"]
+    if "indexes" not in out["errors"]:
+        cosine = f"{out['type'] or 'vector'}_cosine_ops"  # halfvec has its own class
+        if mode == "index" and not any(i[2] == cosine for i in out["indexes"]):
+            out["warnings"].append(
+                f'pg_search = "index" but no index on "{column}" uses {cosine}; '
+                "the search orders by <=> (cosine), so Postgres would not use it."
+            )
+        if mode == "exact" and not out["indexes"]:
+            out["notes"].append(
+                f"No index: the search scans the whole table (~{rows} rows)."
+            )
+    if seeds is not None:
+        pairs = "?" if out["rows"] is None else f"{seeds * out['rows']:,}"
+        shown = "?" if out["rows"] is None else f"{out['rows']:,}"
+        out["notes"].append(
+            f"Worst case {pairs} pairs ({seeds} seeds x {shown} rows). A low floor on a "
+            "large table sorts up to this many pairs on the server (spills to temporary "
+            "files). Ask your DBA about temp_file_limit."
+        )
+    return out
