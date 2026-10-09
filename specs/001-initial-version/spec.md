@@ -15,7 +15,7 @@ Status: draft for implementation. Source: Notion "Hunches tool" idea page, plus 
 
 An interactive TUI toolkit for content analysis over a corpus that is already embedded: seed phrases → semantic search → candidate set → LLM classifier (validated against a hand-labelled gold set) → classified output. Two kinds of AI are used: a smart model for talking to the user, a cheap model for bulk classification.
 
-Out of scope for v1: corpus ingestion/embedding/index creation, other vector backends, web UI, multi-user use, any git operation by the tool.
+Out of scope for v1: corpus ingestion/embedding/index creation, other vector backends, web UI, multi-user use, any git operation by the tool. (Superseded in part: `../005-pgvector/spec.md` adds a PostgreSQL/pgvector backend as a third, read-only one.)
 
 ## Stack
 

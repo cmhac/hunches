@@ -1,6 +1,6 @@
 # 005 — pgvector backend
 
-Status: approved by Chris 2026-10-09 (exact default, 512 MB limit, refuse `index` below 0.8.0, IAM in scope); **not implemented**; this branch holds the spec only. Chris will test the implementation against his RDS database before anything is merged. Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md`, `../003-tui-redesign/spec.md` and `../004-history-and-redo/spec.md`, all implemented. Written 2026-10-09 against `main` at `c8ebdf1`.
+Status: approved by Chris 2026-10-09 (exact default, 512 MB limit, refuse `index` below 0.8.0, IAM in scope); **implemented** (tasks 01 to 13, one commit each, `005/NN`), **pending Chris's test against his RDS database** before anything is merged; the managed-service steps are in `manual-checklist.md`. Sections titled "Verified in task NN" record what implementation found and where it deviated from the first draft; where they differ from the text above them, they win. Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md`, `../003-tui-redesign/spec.md` and `../004-history-and-redo/spec.md`, all implemented. Written 2026-10-09 against `main` at `c8ebdf1`.
 
 **Read order for an implementer:** this spec → your task file in `tasks/` (`tasks/README.md` has the order and rules) → the code named under "What changes in the code".
 
@@ -142,7 +142,7 @@ Requirement from Chris: any managed service must work. hunches needs only a logi
 | Connection limits, IP allow-lists, VPN / bastion / SSH tunnel | Out of scope; the user arranges network access. Supabase's direct host is IPv6 unless the project has the IPv4 add-on; the shared pooler is IPv4 only ([docs](https://supabase.com/docs/guides/database/connecting-to-postgres)). | docs |
 | Extension version lag | Handled by "Versions": `exact` works without 0.8. | docs |
 
-**Cannot be tested in the build container:** every managed service above (no network access to AWS or Supabase, and no accounts). The acceptance for this requirement is a manual checklist in task 12 that a human runs once per service: Check store, an `exact` search on a small table, a search that deliberately exceeds the host's statement timeout (to see the hint), and the pooler URL variants. **Needs a human.**
+**Cannot be tested in the build container:** every managed service above (no network access to AWS or Supabase, and no accounts). The acceptance for this requirement is `manual-checklist.md` (written in task 12) that a human runs once per service: Check store, an `exact` search on a small table, a search that deliberately exceeds the host's statement timeout (to see the hint), and the pooler URL variants. **Needs a human.**
 
 ### Verified on a real database (2026-10-09)
 
@@ -269,12 +269,25 @@ Project settings reuses `screens/pg.py` unchanged (`compose_pg`, `pg_mount`, `pg
 - **`index` mode, measured** (100,000 x 32 random unit vectors, HNSW `vector_cosine_ops`, one seed, floor 0.3, true hits 4,647; the numbers vary a little between index builds): with the planner's own choice (a sequential scan) hunches' `index` mode and a plain query both returned all 4,647. With `enable_seqscan = off` (set on the scratch database only) so the index is used: **hunches `index` mode 4,299** (4,317 on another build), a plain `ORDER BY ... LIMIT 10000` query with pgvector's defaults **40**, `exact` 4,647. Same story as above, so the shortfall is real and `index` mode only narrows it.
 - **Found and fixed:** `screens/pg.py:report` called `escape()` on `check_store`'s `version`, which is a tuple `(0, 8, 1)` (task 08), so Check store would have raised `TypeError` on any real connection; the task-10 test stubbed the version as a string. `report` now joins the tuple, the stub in `tests/test_new_project.py` uses a tuple, and the integration test renders a real result. `tests/test_sizes.py` gained `test_new_project_pgvector_check_store_result` (a full report and an error report, 3 sizes).
 
+### Clarifications from implementation (task 13)
+
+Where the first draft above and the code differ, the code and the "Verified in task NN" notes win. In one place:
+
+- The cosine operator class is `<type>_cosine_ops` (`vector_cosine_ops`, `halfvec_cosine_ops`), and the `index`-mode warning names the one matching the column (task 08).
+- `check_store` runs each piece in a `SAVEPOINT` (`conn.transaction()`), so one failing query does not hide the others; `SAVEPOINT` is the one statement that is neither a `SELECT` nor a `SET LOCAL`, and it writes nothing (task 08).
+- `cap_warning(backend, top_k)` (task 07); `Stop` only cancels and `search_pg_exact` closes the connection (task 05); `PG_ROW_OVERHEAD = 128`, `PG_MAX_SCAN = 20_000`, `PG_BATCH = 5_000` (tasks 05, 06, 04).
+- The `Check:` hint for `rds_iam` is attached only when the message contains `authentication failed`. AWS's own text for a denied token is documented as `Failed to authorize the connection request for user ... is not authorized to perform rds-db:connect`, which does not contain it, so the hint may not appear for the most likely failure. Unverified until Chris runs checklist item C12 (and C13, C14), which asks him to record the real wording; widen the match then.
+- `index` mode does not set `hnsw.scan_mem_multiplier`, so it stays approximate by design: raising `max_scan_tuples` alone added nothing, and the plateau was the scan's memory budget (task 06 measurement). Adding it is Chris's call (memory per query), and the `APPROXIMATE` banner is shown either way.
+- Index-mode shortfall, measured twice on pgvector 0.8.1 with an HNSW index in use: plain `ORDER BY ... LIMIT 10000` with defaults returned 40 of 1,296 / 4,456 / 4,647 true hits (three tables); hunches' `index` mode 4,148 of 4,456 and about 4,299 of 4,647; `exact` all of them. With the planner's own choice (a sequential scan) every variant returned everything, so the shortfall appears only when the index is actually used.
+- No config validator for the pgvector fields (see "What changes in the code").
+- CI: the optional `pgvector` job (`continue-on-error`, image `pgvector/pgvector:pg16`) has not run yet.
+
 ## Tables with no index (very large, rarely queried)
 
 Supported, and it is the case `exact` mode is built for: it needs no index and never looks for one, so a table with no index at all works the same as an indexed one. Nothing in Check store treats a missing index as a problem in `exact` mode (it only warns in `index` mode, where an index is the whole point). What changes is cost, so the spec adds these:
 
 - **Say it is slow, honestly.** In `exact` mode the whole seed set is one full scan of the table, however many seeds there are (previous section, with the cost caveat there); only `index` mode, which needs an index anyway, runs a query per seed. Check store shows the planner's row estimate and, in `exact` mode with no usable index, a plain note: `No index: the search scans the whole table (~N rows).` Informational, not a warning; the user chose this.
-- **Progress and Stop work.** The Search screen shows elapsed time and candidates received so far (see previous section) and lets the user cancel. Cancelling a worker thread blocked in a driver call does not interrupt the query, so on Stop the code calls `connection.cancel()` (psycopg's way to ask the server to cancel the running statement; **verify in the psycopg docs**) and closes the connection. Otherwise an abandoned multi-minute scan keeps running on the server.
+- **Progress and Stop work.** The Search screen shows elapsed time and candidates received so far (see previous section) and lets the user cancel. Cancelling a worker thread blocked in a driver call does not interrupt the query, so on Stop the code calls `connection.cancel()` (psycopg's way to ask the server to cancel the running statement; verified in task 05: `Connection.cancel_safe()`, falling back to `cancel()`) and closes the connection (the searching thread closes it; the Stop handle only cancels). Otherwise an abandoned multi-minute scan keeps running on the server.
 - **Server timeouts are the user's, not ours.** We do not override `statement_timeout`; an admin may have set one on purpose. If a scan hits it, the error shown is Postgres's own (`canceling statement due to statement timeout`) plus `Fix: raise statement_timeout for this role, or set pg_statement_timeout_s in config.toml`. Optional field `pg_statement_timeout_s` (default unset = the server's setting); when set, `SET LOCAL statement_timeout` is issued. Setting it to `0` means no limit.
 - **Memory and result size:** see "Result size and memory guards"; the system-level `pg_max_result_mb` applies here too.
 
@@ -332,15 +345,15 @@ Where the credentials come from is boto3's business (environment, `~/.aws`, SSO,
 
 - **New project** (`screens/new_project.py`): Backend Select gets a third option `PostgreSQL (pgvector)`. A `#pg` section (shown like `#s3`): table, id/text/vector column, URL variable (with a status word `env` / `keyring` / `missing` from `keys.status` and a **Save URL…** that stores it in the keyring via `keys.save`, input masked), search mode Select (Exact / Index), embedding model (picker). Required: location, table, embedding model. **Check store** runs in a thread worker like S3's `get_index` and is the only network call on the screen: it opens the connection read-only and shows
   - the pgvector version (`extversion`), the extension's schema, and whether the connection is encrypted,
-  - the vector column's type and dimension (`format_type(atttypid, atttypmod)` from `pg_attribute`), with a WARNING when the column is not `vector`/`halfvec`,
+  - the vector column's type and dimension (`pg_attribute` and `pg_type`, `atttypmod` is the dimension; task 03), with a WARNING when the column is not `vector`/`halfvec`,
   - the planner row estimate (`pg_class.reltuples`; **not** `count(*)`, which is a full scan),
-  - the indexes on the column and their operator class, with a WARNING in `index` mode when none uses `vector_cosine_ops` (the index would not be used by `<=>`; the README says the operator class must match the operator). In `exact` mode no index is required: with none, it shows the informational `No index: the search scans the whole table (~N rows).`,
+  - the indexes on the column and their operator class, with a WARNING in `index` mode when none uses the cosine operator class of the column's type (`vector_cosine_ops`, or `halfvec_cosine_ops` for `halfvec`; the index would not be used by `<=>`; the README says the operator class must match the operator). In `exact` mode no index is required: with none, it shows the informational `No index: the search scans the whole table (~N rows).`,
   - a one-row sample (id and the first 60 characters of text), proving the column mapping works.
   The catalog queries are in "Verified in task 03".
 - **Project settings** (`screens/project_settings.py`): same section, same Check store, same consequence confirmation as S3 (changing table/columns/model says "Candidates were generated from the old corpus/model; re-run Search").
 - **Projects** (`screens/projects.py`): Backend column `pgvector`; Where column `table` (never the URL or host).
 - **Status** (`system.project_status`, `app.open_project`): pgvector projects show `OK (pgvector not checked)`; the allow-list in `open_project` gains it, as for S3. No network on open.
-- **Search screen** (`screens/search.py`): `cap_warning(top_k)` says `S3 returned its cap…` today; it becomes backend-aware (`WARNING: <backend> returned its cap of N hits …`), and `search.S3_TOP_K` is joined by `search.PG_TOP_K`. The `APPROXIMATE` warning above shows for `pg_search = "index"`. A connection failure surfaces in the existing `#error` line with the exception text, **with the URL's password removed** (see Errors).
+- **Search screen** (`screens/search.py`): `cap_warning(top_k)` said `S3 returned its cap…`; it is now `cap_warning(backend, top_k)` (task 07: `WARNING: S3 returned its cap of N hits …` or `WARNING: pgvector returned its cap of N hits …`), and `search.S3_TOP_K` is joined by `search.PG_TOP_K`. The `APPROXIMATE` warning above shows for `pg_search = "index"`. A connection failure surfaces in the existing `#error` line with the exception text, **with the URL's password removed** (see Errors).
 - Every new widget works at 80×24; add the new section to the `tests/test_sizes.py` sweep. Keys and buttons follow the `key_button` rule.
 
 ## Errors
@@ -365,12 +378,12 @@ Where the credentials come from is boto3's business (environment, `~/.aws`, SSO,
 ## What changes in the code
 
 - `pyproject.toml`: extras `pg = ["psycopg[binary]"]` and `rds = ["psycopg[binary]", "boto3"]`; add `psycopg` to the dev group so `ty` and tests can import it (as boto3 is handled today: check how and mirror it).
-- `files.py`: `Config.backend` literal, the new fields (above), and a validator that the pgvector fields are present when `backend == "pgvector"`. Verify what, if anything, already validates the S3 fields before adding this; do not add a validator S3 lacks.
+- `files.py`: `Config.backend` literal, the new fields (above), and (task 01) no validator: nothing validates the S3 fields either, so a missing `pg_table` is reported by `search.pg_connect` (`config.toml: pg_table is required for pgvector`), as a missing bucket is for S3.
 - `search.py`: a third branch in `search()` (a plain `if`/`elif`, not a class) for `index` mode, `PG_TOP_K`, and one new function `search_pg_exact(vectors, floor)` returning one hit list per seed (the single-query path, D10; two queries in one transaction). Local and S3 are untouched.
 - `candidates.py`: `build_candidates` takes one `if` to get its per-seed hit lists from `search_pg_exact` instead of calling `search()` per seed, for `pgvector` + `exact`; the merge, sort, write and meta code is shared and unchanged. Docstring `S3 topK cap` → `backend cap`.
 - `system.py`: `project_status` (one line), no schema change (D8).
 - `screens/new_project.py`, `screens/project_settings.py`, `screens/projects.py`, `screens/search.py`, `app.py:857`: as under "UI".
-- Docs: `README.md` (install `hunches[pg]`, a "pgvector" paragraph next to "S3 Vectors" at line ~95, the env var), `AGENTS.md` (Stack, Layout, "Needs a human"), and 001's "other vector backends" out-of-scope line is superseded by this spec (note it in the "Behaviour that changes" section below).
+- Docs (task 13): `README.md` (install `hunches[pg]` / `hunches[rds]`, a pgvector paragraph after "S3 Vectors", the env var), `AGENTS.md` (Current state, Stack, Layout, "Needs a human"; `CLAUDE.md` is a symlink to it), and one-line notes in 001 and 002 pointing here.
 - `.github/workflows/ci.yml`: optional job for the integration test (below).
 
 ## Tests
@@ -389,7 +402,7 @@ All default-run tests are offline.
 
 ## Behaviour that changes in 001–004
 
-- 001 "Out of scope: other vector backends" is no longer true; pgvector is the third. The "Vector search" section gains the pgvector paragraph (this spec's "Why exact is the default" is the reference).
+- 001 "Out of scope: other vector backends" is no longer true; pgvector is the third (task 13 added a one-line pointer to 001 and 002 and left their text as written). The "Vector search" section gains the pgvector paragraph (this spec's "Why exact is the default" is the reference).
 - 002 New project / Project settings gain a third backend; "S3 stores" behaviour is unchanged and there are no saved Postgres stores (D8).
 - 003/004: nothing. `candidates.jsonl` and `candidates.meta.json` are backend-independent.
 
@@ -399,7 +412,7 @@ Creating or loading a table, creating an index, embedding a corpus, writes of an
 
 ## Proposed tasks
 
-Same one-commit-per-task, red/green TDD process as 004.
+Same one-commit-per-task, red/green TDD process as 004 (history: `git log --oneline --grep '^005/'`).
 
 | # | Task | Depends on |
 |---|------|-----------|
@@ -417,10 +430,10 @@ Same one-commit-per-task, red/green TDD process as 004.
 | 12 | Integration tests, optional CI job, size sweep, manual checklist | all |
 | 13 | Docs (README, AGENTS.md, 001/002 notes) | all |
 
-Task files: `tasks/README.md` and `tasks/NN-*.md`.
+All thirteen are committed (`005/01` to `005/13`; the order of the commits differs slightly from the table, e.g. 09 before 03). Task files: `tasks/README.md` and `tasks/NN-*.md`.
 
 ## Open items
 
 - **ask:** saved Postgres stores in `system.json` (D8). My recommendation is defer.
-- `index` mode needs pgvector 0.8+ for iterative scans; the build container only had 0.6.0, so that mode's `SET LOCAL` names and its recall were unverified; task 06 checked them on 0.8.1 ("Verified in task 06").
+- `index` mode needs pgvector 0.8+ for iterative scans; resolved: the `SET LOCAL` names and the recall were checked on 0.8.1 in task 06 and task 12. Open for Chris: whether `index` mode should also set `hnsw.scan_mem_multiplier` (see "Verified in task 06"; not set, because the mode stays approximate and the setting changes memory use per query).
 - **Needs a human:** a PostgreSQL instance with pgvector and an embedded table for the manual end-to-end check, and the "Not verified" list above, above all every managed service (RDS, Aurora, Supabase, each with and without its pooler) and tables larger than memory. Agents cannot fake these. The steps are in `manual-checklist.md`, including the RDS IAM setup.
