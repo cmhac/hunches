@@ -278,6 +278,48 @@ async def test_new_project_pgvector(size, auth):
 
 
 @pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("variant", ["report", "error"])
+async def test_new_project_pgvector_check_store_result(size, variant):
+    from textual.widgets import Select
+
+    from hunches.screens import pg
+
+    result = {
+        "version": (0, 8, 1),
+        "schema": "extensions",
+        "encrypted": False,
+        "type": "vector",
+        "dimension": 1536,
+        "rows": 12_000_000,
+        "indexes": [("docs_embedding_idx", "hnsw", "vector_l2_ops")],
+        "sample": (
+            "doc-1",
+            "A sample text of up to sixty characters, cut by the query",
+        ),
+        "warnings": [
+            (
+                'pg_search = "index" but no index on "embedding" uses vector_cosine_ops; '
+                "the search orders by <=> (cosine), so Postgres would not use it."
+            )
+        ],
+        "notes": ["No index: the search scans the whole table (~12000000 rows)."],
+        "errors": {},
+    }
+    if variant == "error":
+        result["errors"] = {"column": 'relation "public.nope" does not exist ' * 3}
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.push_screen(NewProjectScreen())
+        await pilot.pause()
+        app.screen.query_one("#backend", Select).value = "pgvector"
+        await pilot.pause()
+        pg.done(app.screen, result)
+        await pilot.pause()
+        await check(app, pilot, size[0])
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
 @pytest.mark.parametrize("auth", ["url", "rds_iam"])
 async def test_project_settings_pgvector(size, auth):
     from textual.widgets import Select

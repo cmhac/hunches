@@ -199,7 +199,7 @@ def report(result: dict) -> list[str]:
             result["encrypted"], "encryption unknown"
         )
         lines.append(
-            f"pgvector {escape(result['version'])} in schema "
+            f"pgvector {'.'.join(map(str, result['version']))} in schema "
             f"{escape(str(result['schema']))}, {encrypted}"
         )
     if result["type"]:

@@ -500,7 +500,7 @@ URL = f"postgresql://u:{PASSWORD}@db.example.com:5432/app"
 def canned(**changes) -> dict:
     """What search.check_store returns (a hand-built result, never derived from the code)."""
     result = {
-        "version": "0.8.1",
+        "version": (0, 8, 1),  # a tuple, as check_store returns it
         "schema": "extensions",
         "encrypted": False,
         "type": "vector",
