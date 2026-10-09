@@ -249,6 +249,10 @@ PostgreSQL 16 + pgvector **0.8.1** (extension in schema `extensions`, UTF8 clust
 - A `sparsevec` column is a warning (`Column "embedding" has type sparsevec; ...`) with `type` `None`; a missing column is an error under `column`.
 - Not verified: TLS, a pooler (the hint is a port/host check on the URL), a managed service.
 
+### Task 10 (New project, 2026-10-09)
+
+The pgvector section is `screens/pg.py` (`compose_pg`, `pg_fields`, `pg_pressed`, `report`), shared with Project settings (task 11). Ids: `#pg`, `#pg-table`, `#pg-id`, `#pg-text`, `#pg-vector`, `#pg-url-var` (+ `#pg-url-status`), `#pg-url` (masked) with `#save-url`, `#pg-auth`, `#pg-region-row`, `#pg-profile-row`, `#pg-search`, `#pg-timeout`, `#check-pg`, `#pg-status`. The embedding row is no longer inside `#s3`: it is `#embedding-row`, shown for S3 and pgvector. Empty fields are written as absent (the default shows as the placeholder). Check store passes no `seeds` (none exist on this screen), so the worst-case pairs note never shows, and it shows only the first error of `errors`. **Create writes the config and registers the project, but `app.open_project` still refuses `OK (pgvector not checked)`; its allow-list is task 11's.**
+
 ## Tables with no index (very large, rarely queried)
 
 Supported, and it is the case `exact` mode is built for: it needs no index and never looks for one, so a table with no index at all works the same as an indexed one. Nothing in Check store treats a missing index as a problem in `exact` mode (it only warns in `index` mode, where an index is the whole point). What changes is cost, so the spec adds these:

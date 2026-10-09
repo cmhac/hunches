@@ -488,3 +488,362 @@ async def test_every_button_has_a_visible_label(tmp_path, monkeypatch):
         for button in app.screen.query(Button):
             assert not str(button.label).startswith("Button#"), button.id
         assert str(app.screen.query_one("#browse-location", Button).label) == "Browse"
+
+
+# --- pgvector backend (005/10) ---
+
+EMBEDDING = "openai:text-embedding-3-small"
+PASSWORD = "s3cr3t-pw-91"
+URL = f"postgresql://u:{PASSWORD}@db.example.com:5432/app"
+
+
+def canned(**changes) -> dict:
+    """What search.check_store returns (a hand-built result, never derived from the code)."""
+    result = {
+        "version": "0.8.1",
+        "schema": "extensions",
+        "encrypted": False,
+        "type": "vector",
+        "dimension": 3,
+        "rows": 120,
+        "indexes": [("items_emb_idx", "hnsw", "vector_l2_ops")],
+        "sample": (7, "hello world"),
+        "warnings": [],
+        "notes": [],
+        "errors": {},
+    }
+    return result | changes
+
+
+class StubCheck:
+    def __init__(self, result):
+        self.result, self.configs = result, []
+
+    def __call__(self, config, seeds=None):
+        self.configs.append(config)
+        return self.result
+
+
+async def open_pg(app, pilot):
+    from textual.widgets import Select
+
+    await pilot.pause()
+    form = app.screen
+    form.query_one("#backend", Select).value = "pgvector"
+    await pilot.pause()
+    return form
+
+
+async def pick_embedding(form, pilot):
+    form.s3_embedding = form.embedding = EMBEDDING
+    form.refresh_summary()
+    await pilot.pause()
+
+
+def shown(form, id_) -> str:
+    return str(form.query_one(f"#{id_}", Static).render())
+
+
+async def test_pgvector_shows_its_section_and_hides_the_others(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        assert form.query_one("#pg").display
+        assert not form.query_one("#s3").display
+        assert not form.query_one("#local").display
+
+
+async def test_pgvector_requires_location_table_and_embedding(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        form.query_one("#location", Input).value = ""
+        await pilot.pause()
+        assert shown(form, "error") == "Required: location, table, embedding model"
+        assert form.query_one("#create", Button).disabled
+        form.query_one("#location", Input).value = str(tmp_path / "proj")
+        form.query_one("#pg-table", Input).value = "items"
+        await pilot.pause()
+        assert shown(form, "error") == "Required: embedding model"
+        await pick_embedding(form, pilot)
+        assert shown(form, "error") == ""
+        assert not form.query_one("#create", Button).disabled
+        form.query_one("#pg-timeout", Input).value = "soon"
+        await pilot.pause()
+        assert "timeout" in shown(form, "error")
+        assert form.query_one("#create", Button).disabled
+
+
+async def test_create_writes_only_pgvector_fields_and_registers(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    project = tmp_path / "proj"
+    from textual.widgets import Select
+
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        await pick_embedding(form, pilot)
+        form.query_one("#pg-search", Select).value = "index"
+        await submit(
+            app,
+            pilot,
+            location=project,
+            **{"pg-table": "public.items", "pg-text": "body", "pg-timeout": "30"},
+        )
+    assert (project / ".hunches" / "config.toml").read_text() == (
+        'backend = "pgvector"\n'
+        f'embedding_model = "{EMBEDDING}"\n'
+        'pg_table = "public.items"\n'
+        'pg_text_column = "body"\n'
+        'pg_search = "index"\n'
+        "pg_statement_timeout_s = 30\n"
+        f'assistant_model = "{ASSISTANT}"\n'
+        'assistant_thinking = "medium"\n'
+        f'classifier_model = "{CLASSIFIER}"\n'
+        'target_metric = "accuracy"\n'
+        "target_score = 0.9\n"
+    )
+    assert [p.path for p in system.projects_by_recent()] == [str(project.resolve())]
+
+
+async def test_secret_never_reaches_a_file(tmp_path, monkeypatch):
+    from hunches import keys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delenv("HUNCHES_PG_URL", raising=False)
+    project = tmp_path / "proj"
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        await pick_embedding(form, pilot)
+        form.query_one("#pg-url", Input).value = URL
+        form.query_one("#save-url", Button).press()
+        await pilot.pause()
+        assert keys.resolve("HUNCHES_PG_URL") == URL  # in the (stubbed) keyring only
+        assert form.query_one("#pg-url", Input).value == ""
+        form.query_one("#pg-url", Input).value = URL  # typed but never saved
+        await submit(app, pilot, location=project, **{"pg-table": "items"})
+    seen = [
+        p for p in tmp_path.rglob("*") if p.is_file() and "__pycache__" not in str(p)
+    ]
+    assert (project / ".hunches" / "config.toml") in seen
+    for path in seen:
+        assert PASSWORD not in path.read_text(errors="replace"), path
+
+
+async def test_save_url_stores_in_the_keyring_and_updates_the_status(
+    tmp_path, monkeypatch
+):
+    from hunches import keys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MY_PG", raising=False)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        assert shown(form, "pg-url-status") == "missing"
+        form.query_one("#pg-url-var", Input).value = "MY_PG"
+        form.query_one("#save-url", Button).press()  # nothing typed: nothing stored
+        await pilot.pause()
+        assert keys.resolve("MY_PG") is None
+        assert form.query_one("#pg-url", Input).password
+        form.query_one("#pg-url", Input).value = URL
+        form.query_one("#save-url", Button).press()
+        await pilot.pause()
+        assert keys.resolve("MY_PG") == URL
+        assert shown(form, "pg-url-status") == "keyring"
+        monkeypatch.setenv("MY_PG", "postgresql://x")
+        form.query_one("#pg-url-var", Input).value = "MY_PG "
+        await pilot.pause()
+        assert shown(form, "pg-url-status") == "env"
+
+
+async def test_rds_iam_fields_appear_only_for_that_mode(tmp_path, monkeypatch):
+    from textual.widgets import Select
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    project = tmp_path / "proj"
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        await pick_embedding(form, pilot)
+        assert not form.query_one("#pg-region-row").display
+        assert not form.query_one("#pg-profile-row").display
+        form.query_one("#pg-auth", Select).value = "rds_iam"
+        await pilot.pause()
+        assert form.query_one("#pg-region-row").display
+        assert form.query_one("#pg-profile-row").display
+        form.query_one("#pg-auth", Select).value = "url"
+        await pilot.pause()
+        assert not form.query_one("#pg-region-row").display
+        form.query_one("#pg-auth", Select).value = "rds_iam"
+        await pilot.pause()
+        await submit(
+            app,
+            pilot,
+            location=project,
+            **{"pg-table": "items", "pg-region": "eu-west-1", "pg-profile": "dev"},
+        )
+    config = files.read_config(project)
+    assert (config.pg_auth, config.pg_aws_region, config.pg_aws_profile) == (
+        "rds_iam",
+        "eu-west-1",
+        "dev",
+    )
+
+
+async def test_url_auth_drops_hidden_region_and_profile(tmp_path, monkeypatch):
+    from textual.widgets import Select
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    project = tmp_path / "proj"
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        await pick_embedding(form, pilot)
+        form.query_one("#pg-auth", Select).value = "rds_iam"
+        form.query_one("#pg-region", Input).value = "eu-west-1"
+        await pilot.pause()
+        form.query_one("#pg-auth", Select).value = "url"
+        await submit(app, pilot, location=project, **{"pg-table": "items"})
+    config = files.read_config(project)
+    assert (config.pg_auth, config.pg_aws_region, config.pg_aws_profile) == (
+        None,
+        None,
+        None,
+    )
+
+
+async def run_check(app, pilot, form):
+    form.query_one("#check-pg", Button).press()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    return shown(form, "pg-status")
+
+
+async def test_check_store_shows_the_report_and_the_opclass_warning(
+    tmp_path, monkeypatch
+):
+    from textual.widgets import Select
+
+    from hunches import search
+
+    monkeypatch.chdir(tmp_path)
+    warning = (
+        'pg_search = "index" but no index on "embedding" uses vector_cosine_ops; '
+        "the search orders by <=> (cosine), so Postgres would not use it."
+    )
+    stub = StubCheck(canned(warnings=[warning]))
+    monkeypatch.setattr(search, "check_store", stub)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        assert "Required: table" in await run_check(app, pilot, form)
+        assert not stub.configs  # no connection without a table
+        form.query_one("#pg-table", Input).value = "items"
+        form.query_one("#pg-search", Select).value = "index"
+        text = await run_check(app, pilot, form)
+        assert "pgvector 0.8.1 in schema extensions, not encrypted" in text
+        assert "column type vector, dimension 3" in text
+        assert "~120 rows" in text
+        assert "items_emb_idx (hnsw, vector_l2_ops)" in text
+        assert "sample: 7 hello world" in text
+        assert f"WARNING: {warning}" in text
+        assert not form.query_one("#check-pg", Button).disabled
+    [config] = stub.configs
+    assert (config.backend, config.pg_table, config.pg_search) == (
+        "pgvector",
+        "items",
+        "index",
+    )
+    assert config.pg_id_column is None  # defaults stay unset
+
+
+async def test_check_store_no_index_note_and_no_warning(tmp_path, monkeypatch):
+    from hunches import search
+
+    monkeypatch.chdir(tmp_path)
+    note = "No index: the search scans the whole table (~120 rows)."
+    monkeypatch.setattr(
+        search, "check_store", StubCheck(canned(indexes=[], notes=[note]))
+    )
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        form.query_one("#pg-table", Input).value = "items"
+        text = await run_check(app, pilot, form)
+        assert note in text
+        assert "WARNING" not in text
+
+
+async def test_check_store_shows_only_the_first_distinct_error(tmp_path, monkeypatch):
+    from hunches import search
+
+    monkeypatch.chdir(tmp_path)
+    missing = 'relation "nope" does not exist'
+    errors = {
+        "column": missing,
+        "estimates": missing,
+        "indexes": missing,
+        "sample": missing,
+    }
+    monkeypatch.setattr(
+        search,
+        "check_store",
+        StubCheck(canned(type=None, dimension=None, rows=None, errors=errors)),
+    )
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        form.query_one("#pg-table", Input).value = "nope"
+        text = await run_check(app, pilot, form)
+        assert text.count(missing) == 1
+        assert f"ERROR: {missing}" in text
+
+
+async def test_check_store_is_disabled_while_it_runs(tmp_path, monkeypatch):
+    import threading
+
+    from hunches import search
+
+    monkeypatch.chdir(tmp_path)
+    release = threading.Event()
+
+    def slow(config, seeds=None):
+        release.wait(5)
+        return canned()
+
+    monkeypatch.setattr(search, "check_store", slow)
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        form.query_one("#pg-table", Input).value = "items"
+        form.query_one("#check-pg", Button).press()
+        await pilot.pause()
+        assert form.query_one("#check-pg", Button).disabled
+        assert shown(form, "pg-status") == "checking…"
+        release.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not form.query_one("#check-pg", Button).disabled
+
+
+async def test_pgvector_fits_80x24_with_create_visible(tmp_path, monkeypatch):
+    from textual.widgets import Select
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        form = await open_pg(app, pilot)
+        form.query_one("#pg-auth", Select).value = "rds_iam"
+        await pilot.pause()
+        for id_ in ("create", "open-system", "keys", "error"):
+            assert form.query_one(f"#{id_}").region.bottom <= 23, id_
