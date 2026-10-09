@@ -1,6 +1,6 @@
 # 005 — pgvector backend
 
-Status: approved by Chris 2026-10-09 (exact default, 512 MB limit, refuse `index` below 0.8.0, IAM in scope); implementation in progress on `claude/intelligent-turing-asvhrl`, to be merged only after Chris has tested it against his RDS database. Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md`, `../003-tui-redesign/spec.md` and `../004-history-and-redo/spec.md`, all implemented. Written 2026-10-09 against `main` at `c8ebdf1`.
+Status: approved by Chris 2026-10-09 (exact default, 512 MB limit, refuse `index` below 0.8.0, IAM in scope); **not implemented**; this branch holds the spec only. Chris will test the implementation against his RDS database before anything is merged. Builds on `../001-initial-version/spec.md`, `../002-onboarding-setup/spec.md`, `../003-tui-redesign/spec.md` and `../004-history-and-redo/spec.md`, all implemented. Written 2026-10-09 against `main` at `c8ebdf1`.
 
 **Read order for an implementer:** this spec → your task file (none yet; see "Proposed tasks") → the code named under "What changes in the code".
 
