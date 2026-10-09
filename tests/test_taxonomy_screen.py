@@ -15,7 +15,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import Button, Input, Select, TextArea
 
-from hunches import files
+from hunches import files, history
 from hunches.app import ChatPanel, ConfirmScreen, HunchesApp
 from hunches.screens import taxonomy as tx
 from hunches.screens.taxonomy import TaxonomyScreen
@@ -834,6 +834,12 @@ async def test_approve_is_disabled_without_a_prompt_and_confirm_text_is_exact(
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().taxonomy_approved
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["stage"], entry["flag"], entry["summary"]) == (
+            3,
+            "taxonomy_approved",
+            "Approved: Taxonomy and prompt (single, 2 labels)",
+        )
         assert files.read_config().target_metric == "accuracy"
         assert app.stage == 4
 

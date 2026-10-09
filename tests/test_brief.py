@@ -4,7 +4,7 @@ from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import Button, Input, Static
 
-from hunches import candidates, files
+from hunches import candidates, files, history
 from hunches.app import ChatPanel, HunchesApp, StatusHeader
 from hunches.screens.brief import BriefScreen, SeedInput
 
@@ -243,6 +243,12 @@ async def test_buttons_follow_seeds_and_approve_confirm_text(tmp_path, monkeypat
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().seeds_approved
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["stage"], entry["flag"], entry["summary"]) == (
+            1,
+            "seeds_approved",
+            "Approved: 2 seeds",
+        )
         assert app.stage == 2
 
 

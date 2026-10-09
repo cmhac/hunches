@@ -8,7 +8,7 @@ from pydantic_ai.usage import RunUsage
 from textual.containers import Vertical
 from textual.widgets import Button, Input
 
-from hunches import cost, files
+from hunches import cost, files, history
 from hunches.app import ChatPanel, HunchesApp, StatusHeader, confirm_approve
 
 
@@ -231,12 +231,21 @@ async def test_confirm_approve_sets_flag(tmp_path, monkeypatch):
     app = HunchesApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        confirm_approve(app.screen, "seeds_approved", "Approve seeds?")
+        confirm_approve(
+            app.screen, "seeds_approved", 1, "Approve seeds?", "Approved: 3 seeds"
+        )
         await pilot.pause()
         assert not files.read_state().seeds_approved
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().seeds_approved
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["kind"], entry["stage"], entry["flag"], entry["summary"]) == (
+            "approval",
+            1,
+            "seeds_approved",
+            "Approved: 3 seeds",
+        )
 
 
 async def test_quit(tmp_path, monkeypatch):
@@ -284,7 +293,9 @@ async def test_confirm_modal_layout_and_focus(tmp_path, monkeypatch):
     app = HunchesApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        confirm_approve(app.screen, "seeds_approved", "Approve seeds?")
+        confirm_approve(
+            app.screen, "seeds_approved", 1, "Approve seeds?", "Approved: 3 seeds"
+        )
         await pilot.pause()
         modal = app.screen
         assert [b.id for b in modal.query(Button)] == ["no", "yes"]  # Cancel, Approve

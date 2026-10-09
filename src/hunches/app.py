@@ -288,14 +288,14 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
-def confirm_approve(screen: Screen, flag: str, question: str, then=None) -> None:
-    """Ask the user; if they approve, set `flag` (a files.State field) in state.json and call `then()`."""
+def confirm_approve(
+    screen: Screen, flag: str, stage: int, question: str, summary: str, then=None
+) -> None:
+    """Ask the user; if they approve, `files.approve` the `flag` (a files.State field) and call `then()`."""
 
     def done(approved: bool | None) -> None:
         if approved:
-            state = files.read_state()
-            setattr(state, flag, True)
-            files.write_state(state)
+            files.approve(flag, stage, summary)
             if then:
                 then()
 

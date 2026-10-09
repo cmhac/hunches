@@ -445,3 +445,60 @@ def test_description_only_undo_never_needs_a_version():
     history.undo("taxonomy")
     assert gold_labels() == [["a"], []]
     assert files.read_taxonomy().labels[0].description == "A"
+
+
+# ---- files.approve and State.inputs (task 03)
+
+
+def test_old_state_json_without_inputs_loads():
+    (files.root() / "state.json").write_text('{"seeds_approved": true}')
+    state = files.read_state()
+    assert state.seeds_approved is True
+    assert state.inputs == {}
+
+
+def test_approve_sets_flag_records_inputs_and_logs(monkeypatch):
+    monkeypatch.setattr(
+        files, "current_inputs", lambda flag: {"prompt": "h", "f": flag}
+    )
+    files.approve("dev_done", 5, "Approved: Tuning loop (dev accuracy 0.920)")
+    state = files.read_state()
+    assert state.dev_done is True
+    assert state.inputs == {"dev_done": {"prompt": "h", "f": "dev_done"}}
+    (entry,) = history.entries()
+    assert entry["kind"] == "approval"
+    assert entry["stage"] == 5
+    assert entry["flag"] == "dev_done"
+    assert entry["inputs"] == {"prompt": "h", "f": "dev_done"}
+    assert entry["summary"] == "Approved: Tuning loop (dev accuracy 0.920)"
+
+
+def test_approve_keeps_other_flags_and_inputs(monkeypatch):
+    monkeypatch.setattr(files, "current_inputs", lambda flag: {"k": flag})
+    files.approve("seeds_approved", 1, "Approved: seeds")
+    files.approve("taxonomy_approved", 3, "Approved: taxonomy")
+    state = files.read_state()
+    assert state.seeds_approved and state.taxonomy_approved
+    assert state.inputs == {
+        "seeds_approved": {"k": "seeds_approved"},
+        "taxonomy_approved": {"k": "taxonomy_approved"},
+    }
+
+
+def test_approve_seam_defaults_to_no_components():
+    assert files.current_inputs("seeds_approved") == {}
+    files.approve("seeds_approved", 1, "Approved")
+    assert files.read_state().inputs == {"seeds_approved": {}}
+
+
+def test_start_new_version_clears_inputs_with_the_flags(monkeypatch):
+    monkeypatch.setattr(files, "current_inputs", lambda flag: {"k": "v"})
+    files.write_taxonomy(tax("a", "b"))
+    files.approve("seeds_approved", 1, "s")
+    files.approve("taxonomy_approved", 3, "t")
+    files.approve("dev_done", 5, "d")
+    files.start_new_version(tax("c", "d"))
+    state = files.read_state()
+    assert not (state.taxonomy_approved or state.dev_done)
+    assert state.seeds_approved
+    assert state.inputs == {"seeds_approved": {"k": "v"}}

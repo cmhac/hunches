@@ -294,7 +294,8 @@ class ThresholdScreen(Screen):
                 indent=2,
             ),
         )
-        state = files.read_state()
-        state.threshold_chosen = True
-        files.write_state(state)
+        n = sum(c["max_similarity"] >= cutoff for c in self.cands)
+        files.approve(
+            "threshold_chosen", 7, f"Approved: Cutoff {cutoff:.3f} ({n} candidates)"
+        )
         self.app.goto_stage(self.app.stage + 1)  # ty: ignore[unresolved-attribute]

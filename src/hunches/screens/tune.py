@@ -836,17 +836,18 @@ class TuneScreen(Screen):
         if not self.ready or self.running or self.stopped or not self.metrics:
             return
         goto = lambda: self.app.goto_stage(self.app.stage + 1)  # ty: ignore[unresolved-attribute]
+        score = f"dev {self.config.target_metric} {self.target():.3f}"
         if self.met():
-            state = files.read_state()
-            state.dev_done = True
-            files.write_state(state)
+            files.approve("dev_done", 5, f"Approved: Tuning loop ({score})")
             goto()
             return
         confirm_approve(
             self,
             "dev_done",
+            5,
             f"{self.config.target_metric} {self.target():.3f} is below the target "
             f"{self.config.target_score:.2f}. Accept tuning anyway?",
+            f"Approved: Tuning loop ({score}, below target)",
             then=goto,
         )
 

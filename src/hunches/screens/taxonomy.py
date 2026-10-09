@@ -1011,6 +1011,8 @@ class TaxonomyScreen(Screen):
         confirm_approve(
             self,
             "taxonomy_approved",
+            3,
             f"Approve taxonomy ({taxonomy.mode}, {len(taxonomy.labels)} labels) and prompt, and start labelling?",
+            f"Approved: Taxonomy and prompt ({taxonomy.mode}, {len(taxonomy.labels)} labels)",
             then=save_target,
         )

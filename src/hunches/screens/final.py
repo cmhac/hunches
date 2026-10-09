@@ -296,7 +296,13 @@ class FinalScreen(Screen):
             self.note = "The result is stale: re-run (r) before accepting."
             self.show()
             return
-        state = files.read_state()
-        state.test_done = True
-        files.write_state(state)
+        score = metrics.target_value(
+            metrics.Metrics.from_dict(self.result["metrics"]),
+            self.config.target_metric,
+        )
+        files.approve(
+            "test_done",
+            6,
+            f"Approved: Gold test (test {self.config.target_metric} {score:.3f})",
+        )
         self.app.goto_stage(self.app.stage + 1)  # ty: ignore[unresolved-attribute]

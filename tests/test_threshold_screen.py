@@ -7,7 +7,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from textual.widgets import Button, DataTable, Static
 
-from hunches import files
+from hunches import files, history
 from hunches.app import HunchesApp
 from hunches.screens import threshold
 from hunches.screens.progress import RunIndicator
@@ -152,6 +152,12 @@ async def test_screen_classifies_and_saves_chosen_band(monkeypatch):
     assert data["threshold"] == 0.65 and data["n_candidates"] == 10
     assert len(data["bands"]) == 7
     assert files.read_state().threshold_chosen
+    (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+    assert (entry["stage"], entry["flag"], entry["summary"]) == (
+        7,
+        "threshold_chosen",
+        "Approved: Cutoff 0.650 (10 candidates)",
+    )
     assert files.first_incomplete_stage() == 8
 
 

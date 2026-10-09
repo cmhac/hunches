@@ -65,6 +65,8 @@ class State(BaseModel):
     dev_done: bool = False
     test_done: bool = False
     threshold_chosen: bool = False
+    # per approved flag, the components of its inputs at approval time (spec 004); absent = current
+    inputs: dict[str, dict[str, str]] = {}
 
 
 class Label(BaseModel):
@@ -138,6 +140,22 @@ def read_state() -> State:
 
 def write_state(state: State) -> None:
     write_text("state.json", state.model_dump_json(indent=2) + "\n")
+
+
+def current_inputs(flag: str) -> dict[str, str]:
+    """The components `flag`'s stage depends on, as they are now. Filled in by task 04."""
+    return {}
+
+
+def approve(flag: str, stage: int, summary: str) -> None:
+    """Set a State flag, record the inputs it was approved under and log the approval."""
+    from hunches import history  # history imports this module
+
+    state = read_state()
+    setattr(state, flag, True)
+    state.inputs[flag] = current_inputs(flag)
+    write_state(state)
+    history.approval(stage, flag, state.inputs[flag], summary)
 
 
 def read_jsonl(name: str) -> list[dict]:
@@ -270,6 +288,8 @@ def start_new_version(new: Taxonomy) -> int:
     state = read_state()
     state.taxonomy_approved = state.dev_done = state.test_done = False
     state.threshold_chosen = False
+    for flag in ("taxonomy_approved", "dev_done", "test_done", "threshold_chosen"):
+        state.inputs.pop(flag, None)  # inputs only describe a flag that is set
     write_state(state)
     for (
         name

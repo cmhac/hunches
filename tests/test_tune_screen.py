@@ -9,7 +9,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Select, Static, TextArea
 
-from hunches import files, metrics
+from hunches import files, history, metrics
 from hunches.app import ChatLine, ChatPanel, FoldLine, HunchesApp
 from hunches.screens import tune
 from hunches.screens.progress import RunIndicator
@@ -141,6 +141,12 @@ async def test_disagreements_listed_then_accepted_prompt_improves_and_cache_hold
         await pilot.press("f2")
         await pilot.pause()
         assert files.read_state().dev_done
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (entry["stage"], entry["flag"], entry["summary"]) == (
+            5,
+            "dev_done",
+            "Approved: Tuning loop (dev accuracy 1.000)",
+        )
         assert app.stage == 6
 
 
@@ -175,6 +181,11 @@ async def test_target_metric_flips_pass_fail():
         await pilot.click("#yes")
         await pilot.pause()
         assert files.read_state().dev_done and app.stage == 6
+        (entry,) = [e for e in history.entries() if e["kind"] == "approval"]
+        assert (
+            entry["summary"]
+            == "Approved: Tuning loop (dev micro_f1 0.500, below target)"
+        )
 
 
 async def test_redesigned_panels_summary_and_tables():

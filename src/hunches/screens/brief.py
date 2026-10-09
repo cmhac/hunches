@@ -314,7 +314,9 @@ class BriefScreen(Screen):
         confirm_approve(
             self,
             "seeds_approved",
+            1,
             f"Approve {len(self.seeds)} seeds and start searching?",
+            f"Approved: {len(self.seeds)} seeds",
             then=lambda: self.app.goto_stage(2),  # ty: ignore[unresolved-attribute]
         )
 
