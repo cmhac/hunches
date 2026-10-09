@@ -5,7 +5,7 @@ from urllib.parse import unquote, urlsplit
 
 import numpy as np
 
-from hunches import keys
+from hunches import keys, system
 from hunches.files import Config, pg_setting, read_config
 
 # Max results per QueryVectors request: 10,000 (100 per page, followed via nextToken).
@@ -13,6 +13,41 @@ from hunches.files import Config, pg_setting, read_config
 S3_TOP_K = 10_000
 PG_TOP_K = 10_000
 PG_BATCH = 5_000  # rows per round trip of the server-side cursors
+# bytes added to every received row (id + text) when sizing a result: Python's tuple, float
+# and str headers; a deliberately round estimate, not a measurement
+PG_ROW_OVERHEAD = 128
+MB = 1024 * 1024
+
+
+class SearchCancelled(Exception):
+    """The search was stopped with Stop.stop()."""
+
+
+class Stop:
+    """Handle for stopping a search from another thread: pass it to search_pg_exact and call
+    stop(). Cancelling the Textual worker alone would leave the driver blocked in the query."""
+
+    def __init__(self):
+        self.conn = None
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+        if self.conn is not None:
+            _cancel(self.conn)
+
+
+def _cancel(conn):
+    # cancel_safe() is psycopg 3.2+; the extras do not pin a version, so fall back plainly
+    (getattr(conn, "cancel_safe", None) or conn.cancel)()
+
+
+def _too_large(text: str, limit_mb: int) -> RuntimeError:
+    return RuntimeError(
+        f"{text} which exceeds the result limit of {limit_mb} MB. "
+        "Use fewer seeds or raise the limit in System settings (F5)."
+    )
+
 
 IAM_CHECK = (
     "Check: the database user has the rds_iam role, the AWS identity may rds-db:connect "
@@ -195,19 +230,45 @@ def table_estimates(
 
 
 def search_pg_exact(
-    vectors, floor: float
+    vectors, floor: float, progress=None, stop: Stop | None = None
 ) -> tuple[list[list[tuple[str, str, float]]], bool]:
     """One pass over the table for every seed: ([hits per seed], capped), best first.
 
     Runs in the one read-only REPEATABLE READ transaction pg_connect opened. Step 1 returns
     ids only (a narrow sort), step 2 the text of the distinct ids. `capped` is True when some
-    seed has exactly PG_TOP_K hits.
+    seed has exactly PG_TOP_K hits. The result size is limited by system.pg_max_result_mb
+    (0 = none): refused up front from the planner statistics, or aborted while streaming.
+    `progress(received, 0, "")` is called per row received (a zero total is unknown); `stop`
+    is a Stop whose stop() cancels the running query, after which SearchCancelled is raised.
     """
     config = read_config()
+    sys_ = system.read_system()
+    limit_mb = sys_.pg_max_result_mb if sys_ else 512
+    limit = limit_mb * MB
     conn = pg_connect(config)
+    if stop:
+        stop.conn = conn
+    received = rows_in = 0
+
+    def count(id_, text=""):
+        nonlocal received, rows_in
+        received += len(str(id_)) + len(text.encode()) + PG_ROW_OVERHEAD
+        rows_in += 1
+        if progress:
+            progress(rows_in, 0, "")
+        if limit and received > limit:
+            _cancel(conn)
+            conn.close()
+            raise _too_large(
+                f"Search has already received {received / MB:.1f} MB ({rows_in:,} rows),",
+                limit_mb,
+            )
+
     try:
         from psycopg import sql
 
+        if stop and stop.stopped:
+            raise SearchCancelled
         extension_version(conn)  # for its "not installed" error
         table_name = config.pg_table or ""  # pg_connect has checked it
         table = sql.Identifier(*table_name.split(".", 1))
@@ -234,12 +295,26 @@ def search_pg_exact(
             vec=vec_col,
             schema=sql.Identifier(type_schema),
         )
+        if limit:
+            _, width = table_estimates(
+                conn, table_name, pg_setting(config, "pg_text_column")
+            )
+            if width is not None:  # no statistics: nothing to check
+                per_row = width + PG_ROW_OVERHEAD
+                worst = len(vectors) * PG_TOP_K * per_row
+                if worst > limit:
+                    raise _too_large(
+                        f"Search could return up to ~{worst / MB:.0f} MB "
+                        f"({len(vectors)} seeds × {PG_TOP_K:,} hits × ~{per_row} bytes)",
+                        limit_mb,
+                    )
         literals = ["[" + ",".join(repr(float(x)) for x in v) + "]" for v in vectors]
         per_seed: list[list[tuple]] = [[] for _ in literals]
         with conn.cursor(name="hunches_pairs") as cur:
             cur.itersize = PG_BATCH
             cur.execute(step1, (literals, floor, PG_TOP_K))
             for id_, i, sim in cur:
+                count(id_)
                 per_seed[i].append((id_, sim))
         ids = list(dict.fromkeys(id_ for rows in per_seed for id_, _ in rows))
         texts = {}
@@ -250,7 +325,9 @@ def search_pg_exact(
             with conn.cursor(name="hunches_texts") as cur:
                 cur.itersize = PG_BATCH
                 cur.execute(step2, (ids,))
-                texts = {id_: text for id_, text in cur}
+                for id_, text in cur:
+                    count(id_, text)
+                    texts[id_] = text
         hits = []
         for rows in per_seed:
             rows.sort(key=lambda r: (-r[1], r[0]))
@@ -259,7 +336,11 @@ def search_pg_exact(
                     raise RuntimeError(f"no text row for id {str(id_)!r}")
             hits.append([(str(id_), texts[id_], sim) for id_, sim in rows])
         return hits, any(len(rows) == PG_TOP_K for rows in per_seed)
+    except SearchCancelled:
+        raise
     except Exception as e:  # noqa: BLE001  the driver's own classes are not imported here
+        if stop and stop.stopped:
+            raise SearchCancelled from None
         raise RuntimeError(pg_message(e, config)) from None
     finally:
         conn.close()

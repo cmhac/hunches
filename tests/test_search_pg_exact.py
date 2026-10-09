@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from hunches import files, keys, search
+from hunches import files, keys, search, system
 
 EXT_VERSION = ("0.8.1", "extensions")
 
@@ -48,6 +48,16 @@ class Conn:
 @pytest.fixture(autouse=True)
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # no result limit, so these tests do not run the size guards' estimate queries
+    monkeypatch.setenv("HUNCHES_HOME", str(tmp_path / "home"))
+    system.write_system(
+        system.System(
+            provider="anthropic",
+            assistant_model="a",
+            classifier_model="c",
+            pg_max_result_mb=0,
+        )
+    )
     monkeypatch.delenv("HUNCHES_PG_URL", raising=False)
     monkeypatch.setattr(keys, "_stored", lambda var: None)
 
