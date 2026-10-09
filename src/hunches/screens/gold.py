@@ -8,15 +8,18 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.markup import escape
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Static
+from textual.widgets.data_table import ColumnKey
 
 from hunches import files
 from hunches.app import (
     AppFooter,
     ConfirmScreen,
     StatusHeader,
+    current_status,
     key_button,
+    modal_box,
     panel,
     retitle,
     say,
@@ -77,6 +80,233 @@ def remove(ids: list[str], reason: str) -> int:
     return len(gone)
 
 
+HELD_OUT = (
+    "Test rows are held out so that the test result is an honest estimate. Replacing labelled "
+    "test rows changes the items the result is measured on, and the test evaluation has to be "
+    "run again. Do not remove rows because the classifier got them wrong."
+)
+STALE_REASON = "no longer in the candidate pool"
+
+
+def rows_word(n: int) -> str:
+    return f"{n} row{'' if n == 1 else 's'}"
+
+
+def removal_text(rows: list[files.GoldRow], orphan_ids: set[str]) -> str:
+    """What removing these rows does: how many are out of the pool, how many labels are discarded."""
+    n = len(rows)
+    out = sum(r.id in orphan_ids for r in rows)
+    labelled = sum(bool(r.labels) for r in rows)
+    splits = " and ".join(s for s in ("dev", "test") if any(r.split == s for r in rows))
+    verb = "is" if n == 1 else "are"
+    if out == n:
+        head = f"{rows_word(n)} {verb} no longer in the candidate pool."
+    else:
+        head = f"{rows_word(n)} will be removed from the {splits} set{'s' if ' and ' in splits else ''}."
+        if out:
+            head += f" {out} of them {'is' if out == 1 else 'are'} no longer in the candidate pool."
+    if n == 1:
+        who = (
+            "It is labelled; that 1 label is discarded."
+            if labelled
+            else "It has no labels; no labels are discarded."
+        )
+    elif not labelled:
+        who = "None of them is labelled; no labels are discarded."
+    elif labelled == 1:
+        who = "1 of them is labelled; that 1 label is discarded."
+    else:
+        who = f"{labelled} of them are labelled; those {labelled} labels are discarded."
+    return f"{head} {who} The rows are kept in gold_removed.jsonl and are never drawn again."
+
+
+class RemoveGoldScreen(ModalScreen[bool]):
+    """Confirm removing gold rows, for the Gold screen (the user) and remove_gold (the assistant, who
+    gives a `reason`). Nothing is written before Remove is pressed."""
+
+    AUTO_FOCUS = "#cancel"
+    BINDINGS: ClassVar = [("escape", "cancel", "Cancel")]
+    DEFAULT_CSS = """
+    RemoveGoldScreen > Vertical { height: auto; }
+    RemoveGoldScreen Static { height: auto; margin-bottom: 1; }
+    RemoveGoldScreen .buttons Button { margin-left: 1; }
+    """
+
+    def __init__(self, rows: list[files.GoldRow], reason: str | None = None) -> None:
+        super().__init__()
+        self.rows = rows
+        self.reason = reason
+        what = " and ".join(
+            f"{n} {split} row{'' if n == 1 else 's'}"
+            for split in ("dev", "test")
+            if (n := sum(r.split == split for r in rows))
+        )
+        self.heading = (
+            f"Remove {what}?"
+            if reason is None
+            else f"The assistant wants to remove {what}"
+        )
+        self.body = removal_text(rows, {r.id for r in files.orphaned_gold()})
+        if reason is not None:
+            self.body += f"\n\nReason: {reason}"
+        self.warning = HELD_OUT if any(r.split == "test" for r in rows) else ""
+        self.text = self.body + (f"\n\n{self.warning}" if self.warning else "")
+
+    def compose(self) -> ComposeResult:
+        with modal_box(Vertical(), self.heading):
+            yield Static(self.body, id="body", markup=False)
+            if self.warning:
+                yield Static(self.warning, id="held-out", classes="warn", markup=False)
+            with Horizontal(classes="buttons"):
+                yield key_button(
+                    "Cancel" if self.reason is None else "Reject", "Esc", id="cancel"
+                )
+                yield Button(
+                    f"Remove {rows_word(len(self.rows))}", id="remove", variant="error"
+                )
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "remove")
+
+
+def ask_removal(screen: Screen, rows: list[files.GoldRow], then) -> None:
+    """Ask the user to confirm removing `rows` (their own choice); on yes remove them and call `then(rows)`."""
+    stale = {r.id for r in files.orphaned_gold()}
+
+    def answered(yes: bool | None) -> None:
+        if yes:
+            remove(
+                [r.id for r in rows],
+                STALE_REASON
+                if all(r.id in stale for r in rows)
+                else "removed by the user",
+            )
+            current_status(fresh=True)  # the rail and banners follow at once
+            then(rows)
+
+    screen.app.push_screen(RemoveGoldScreen(rows), answered)
+
+
+TEXT = ColumnKey("text")
+
+
+class GoldRowsScreen(ModalScreen[list[files.GoldRow]]):
+    """Every row of a split with its pool status; remove the selected row or the stale ones.
+    Dismisses with the rows removed while it was open."""
+
+    AUTO_FOCUS = "#rows"
+    BINDINGS: ClassVar = [
+        ("escape", "close", "Close"),
+        ("delete", "remove_row", "Remove row"),
+        ("x", "remove_stale", "Remove stale rows"),
+    ]
+    DEFAULT_CSS = """
+    GoldRowsScreen > Vertical { width: 1fr; height: 1fr; margin: 1 2; padding: 0 1; }
+    GoldRowsScreen #summary { height: auto; color: $text-muted; }
+    GoldRowsScreen #rows-panel { height: 1fr; }
+    GoldRowsScreen #rows { height: 1fr; }
+    GoldRowsScreen .buttons Button { margin-left: 1; }
+    """
+
+    def __init__(self, split: str) -> None:
+        super().__init__()
+        self.split = split
+        self.removed: list[files.GoldRow] = []
+        self.shown: list[files.GoldRow] = []
+
+    def compose(self) -> ComposeResult:
+        with modal_box(Vertical(), f"{self.split} set rows"):
+            yield Static("", id="summary", markup=False)
+            with panel(Vertical(id="rows-panel"), "rows"):
+                yield DataTable(id="rows", cursor_type="row")
+            with Horizontal(classes="buttons"):
+                yield key_button("Remove row", "Del", id="remove-row", variant="error")
+                yield key_button("Remove stale rows", "x", id="remove-stale")
+                yield key_button("Close", "Esc", id="close", variant="primary")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#rows", DataTable)
+        table.add_column(Text("#", justify="right"), width=4)
+        table.add_column("Pool", width=9)
+        table.add_column("Labels", width=16)
+        table.add_column("Text", key="text", width=20)
+        self.fill()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self.fill)
+
+    def fill(self) -> None:
+        table = self.query_one("#rows", DataTable)
+        taxonomy = files.read_taxonomy()
+        names = files.all_labels(taxonomy)
+        stale = {r.id for r in files.orphaned_gold(self.split)}
+        self.shown = [r for r in files.read_gold() if r.split == self.split]
+        keep = table.cursor_row
+        table.columns[TEXT].width = max(10, table.size.width - 4 - 9 - 16 - 4 * 2 - 2)
+        table.clear()
+        for i, r in enumerate(self.shown, 1):
+            labels = Text(" ").join(label_text(names, n) for n in r.labels) or Text(
+                "unlabelled", style="dim"
+            )
+            table.add_row(
+                Text(str(i), justify="right"),
+                Text("ORPHANED", style="bold reverse") if r.id in stale else "in pool",
+                labels,
+                Text(r.text.replace("\n", " "), no_wrap=True, overflow="ellipsis"),
+                key=r.id,
+            )
+        if self.shown:
+            table.move_cursor(row=min(keep, len(self.shown) - 1))
+        labelled = sum(bool(r.labels) for r in self.shown)
+        self.query_one("#summary", Static).update(
+            f"{len(self.shown)} rows · {labelled} labelled · {len(stale)} orphaned. "
+            "Orphaned rows are not in the candidate pool any more."
+        )
+        self.query_one("#remove-stale", Button).disabled = not stale
+        self.query_one("#remove-row", Button).disabled = not self.shown
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if (
+            action == "remove_stale"
+            and self.query_one("#remove-stale", Button).disabled
+        ):
+            return None
+        return True
+
+    def asked(self, rows: list[files.GoldRow]) -> None:
+        if rows:
+            ask_removal(self, rows, self.removed_rows)
+
+    def removed_rows(self, rows: list[files.GoldRow]) -> None:
+        self.removed += rows
+        self.fill()
+        self.refresh_bindings()
+
+    def action_remove_row(self) -> None:
+        table = self.query_one("#rows", DataTable)
+        if self.shown:
+            self.asked([self.shown[table.cursor_row]])
+
+    def action_remove_stale(self) -> None:
+        self.asked(files.orphaned_gold(self.split))
+
+    def action_close(self) -> None:
+        self.dismiss(self.removed)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        match event.button.id:
+            case "remove-row":
+                self.action_remove_row()
+            case "remove-stale":
+                self.action_remove_stale()
+            case "close":
+                self.action_close()
+
+
 class GoldScreen(Screen):
     """Label a random sample of candidates one at a time (stage 4 dev, stage 6 test)."""
 
@@ -85,6 +315,8 @@ class GoldScreen(Screen):
         ("right", "move(1)", "Skip"),
         ("enter", "confirm", "Confirm labels"),
         ("d", "draw_more", "Draw 10 more"),
+        ("r", "rows", "Rows"),
+        ("x", "remove_stale", "Remove stale rows"),
         ("f2", "finish", "Finish"),
     ]
     AUTO_FOCUS = ""  # the counts table would swallow the arrow and Enter keys
@@ -98,6 +330,9 @@ class GoldScreen(Screen):
     GoldScreen #short-buttons > Button { width: auto; margin: 0 1; }
     GoldScreen #main { height: 1fr; }
     GoldScreen #left { width: 1fr; }
+    GoldScreen #orphans { height: auto; }
+    GoldScreen #remove-stale { width: auto; margin: 1 0; }
+    GoldScreen #info { width: 1fr; }
     GoldScreen #progress-block {
         height: auto; padding: 0 1; background: $surface; border-left: outer $primary;
     }
@@ -139,6 +374,12 @@ class GoldScreen(Screen):
         self.celebrate = (
             False  # show the milestone message until the next label or move
         )
+        self.info = (
+            ""  # banner: rows were removed; cleared on the next label, move or draw
+        )
+        self.stale: set[str] = (
+            set()
+        )  # ids of this split's rows not in the candidate pool
         # key "1".."9" for the user labels in order, "0" for off_topic
         self.keys = {
             str(i + 1): n
@@ -182,6 +423,12 @@ class GoldScreen(Screen):
         with Horizontal(id="main"):
             with Vertical(id="left"):
                 yield Static("", id="exhausted", classes="banner -stale", markup=False)
+                with Vertical(id="orphans"):
+                    yield Static(
+                        "", id="orphan-banner", classes="banner -warning", markup=False
+                    )
+                    yield key_button("Remove stale rows", "x", id="remove-stale")
+                yield Static("", id="info", classes="banner -info", markup=False)
                 with Vertical(id="progress-block"):
                     with Horizontal():
                         yield Static("", id="p-split")
@@ -204,19 +451,25 @@ class GoldScreen(Screen):
                         f"Finish {self.split} set", "F2", id="finish", variant="success"
                     )
                     yield key_button(f"Draw {DRAW_MORE} more", "d", id="more")
+                    yield key_button("Rows", "r", id="show-rows")
         yield AppFooter()
 
     def on_mount(self) -> None:
         if not self.ready:
             return
-        if len(self.rows) < files.SAMPLE_SIZE:
+        # after a removal the user draws the replacements (Draw N replacements), nothing is drawn here
+        removed = any(
+            r["split"] == self.split for r in files.read_jsonl("gold_removed.jsonl")
+        )
+        if len(self.rows) < files.SAMPLE_SIZE and not removed:
             self.add_rows(files.SAMPLE_SIZE - len(self.rows))
         table = self.query_one("#counts", DataTable)
         table.add_column("Label")
         table.add_column(Text("Count", justify="right"))
-        if len(self.rows) < files.SAMPLE_SIZE:
+        if len(self.rows) < files.SAMPLE_SIZE and not removed:
             self.block()
             return
+        self.stale = {r.id for r in files.orphaned_gold(self.split)}
         self.query_one("#short-banner").display = False
         self.query_one("#short").display = False
         self.index = next((i for i, r in enumerate(self.rows) if not r.labels), 0)
@@ -265,7 +518,11 @@ class GoldScreen(Screen):
         complete = total > 0 and left == 0
         self.show_progress(done, total, complete)
         self.query_one("#text", Static).update(row.text if row else "")
-        retitle(self.query_one("#item"), f"item {row.id}" if row else "item")
+        retitle(
+            self.query_one("#item"),
+            f"item {row.id}" if row else "item",
+            "[b reverse $warning] ORPHANED [/]" if row and row.id in self.stale else "",
+        )
         single = self.taxonomy.mode == "single"
         labels_panel = self.query_one("#labels-panel")
         retitle(
@@ -291,7 +548,21 @@ class GoldScreen(Screen):
         self.query_one("#labels", Static).update("\n".join(lines))
         say(self.query_one("#note", Static), self.note)
         say(self.query_one("#exhausted", Static), self.exhausted)
-        retitle(self.query_one("#counts-panel"), subtitle=f"{done} of {total}")
+        say(self.query_one("#info", Static), self.info)
+        orphans = [r for r in self.rows if r.id in self.stale]
+        say(
+            self.query_one("#orphan-banner", Static),
+            f"ORPHANED: {len(orphans)} of {total} {self.split} rows are no longer in the "
+            f"candidate pool ({sum(bool(r.labels) for r in orphans)} labelled)."
+            if orphans
+            else "",
+        )
+        self.query_one("#orphans").display = bool(orphans)
+        retitle(
+            self.query_one("#counts-panel"),
+            subtitle=f"{done} of {total}"
+            + (f" · {len(orphans)} orphaned" if orphans else ""),
+        )
         table = self.query_one("#counts", DataTable)
         table.clear()
         for name in files.all_labels(self.taxonomy):
@@ -300,7 +571,16 @@ class GoldScreen(Screen):
                 Text(str(sum(name in r.labels for r in self.rows)), justify="right"),
                 key=name,
             )
-        self.query_one("#finish", Button).disabled = left > 0
+        short = total < files.SAMPLE_SIZE  # rows were removed: draw replacements first
+        self.query_one("#finish", Button).disabled = left > 0 or short
+        more = self.query_one("#more", Button)
+        missing = files.SAMPLE_SIZE - total
+        more.label = (
+            f"Draw {missing} replacement{'' if missing == 1 else 's'}  d"
+            if short
+            else f"Draw {DRAW_MORE} more  d"
+        )
+        more.variant = "primary" if short else "default"
         self.refresh_bindings()
 
     def show_progress(self, done: int, total: int, complete: bool) -> None:
@@ -328,10 +608,21 @@ class GoldScreen(Screen):
         self.query_one("#p-pct", Static).update(f"[$text-muted]{pct}%[/]")
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if self.pool_short and action in ("move", "confirm", "draw_more", "finish"):
+        if self.pool_short and action in (
+            "move",
+            "confirm",
+            "draw_more",
+            "finish",
+            "rows",
+            "remove_stale",
+        ):
             return False
-        if action == "finish" and any(not r.labels for r in self.rows):
+        if action == "finish" and (
+            any(not r.labels for r in self.rows) or len(self.rows) < files.SAMPLE_SIZE
+        ):
             return None  # dimmed until every row is labelled
+        if action == "remove_stale" and not self.stale:
+            return None
         return True
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -345,13 +636,17 @@ class GoldScreen(Screen):
                 self.action_finish()
             case "more":
                 self.action_draw_more()
+            case "show-rows":
+                self.action_rows()
+            case "remove-stale":
+                self.action_remove_stale()
 
     def on_key(self, event) -> None:
         name = self.keys.get(event.character or "")
         if name is None or not self.rows or self.pool_short:
             return
         event.stop()
-        self.note = self.exhausted = ""
+        self.note = self.exhausted = self.info = ""
         self.celebrate = False
         if self.taxonomy.mode == "single":
             self.pending = [name]
@@ -398,25 +693,75 @@ class GoldScreen(Screen):
                 return
         self.index = i
         self.pending = list(self.rows[i].labels)
-        self.note = self.exhausted = ""
+        self.note = self.exhausted = self.info = ""
         self.celebrate = False
         self.show()
 
     def action_draw_more(self) -> None:
         if not self.ready or self.pool_short:
             return
-        got = self.add_rows(DRAW_MORE)
+        n = (
+            max(files.SAMPLE_SIZE - len(self.rows), 0) or DRAW_MORE
+        )  # replacements, or 10 more
+        got = self.add_rows(n)
+        self.info = ""
         self.exhausted = (
             f"No more candidates to draw: only {got} were left, so the set has "
             f"{len(self.rows)} items. If you need more, your corpus may be too small "
             "for this analysis."
-            if got < DRAW_MORE
+            if got < n
             else ""
         )
         self.show()
 
+    def action_rows(self) -> None:
+        if self.ready and not self.pool_short:
+            self.app.push_screen(GoldRowsScreen(self.split), self.rows_closed)
+
+    def action_remove_stale(self) -> None:
+        if self.stale:
+            ask_removal(self, files.orphaned_gold(self.split), self.removed)
+
+    def rows_closed(self, removed: list[files.GoldRow] | None) -> None:
+        if removed:
+            self.removed(removed)
+
+    def removed(self, gone: list[files.GoldRow]) -> None:
+        """Follow rows that were removed: reload them, say what happened, and show what is missing."""
+        n = len(gone)
+        discarded = sum(bool(r.labels) for r in gone)
+        every = all(r.id in self.stale for r in gone)
+        self.all = files.read_gold()
+        self.rows = [r for r in self.all if r.split == self.split]
+        self.stale = {r.id for r in files.orphaned_gold(self.split)}
+        self.index = min(self.index, max(len(self.rows) - 1, 0))
+        self.pending = list(self.rows[self.index].labels) if self.rows else []
+        missing = files.SAMPLE_SIZE - len(self.rows)
+        self.info = (
+            f"Removed {n} {'stale ' if every else ''}row{'' if n == 1 else 's'} "
+            f"({discarded} label{'' if discarded == 1 else 's'} discarded). "
+            f"The set has {len(self.rows)} of {files.SAMPLE_SIZE} rows."
+            + (
+                f" Draw {missing} replacement{'' if missing == 1 else 's'} to continue."
+                if missing > 0
+                else ""
+            )
+            + (
+                " The test result is stale until you re-run it."
+                if self.split == "test"
+                else ""
+            )
+        )
+        self.exhausted = self.note = ""
+        self.show()
+
     def action_finish(self) -> None:
-        if not self.ready or self.pool_short or any(not r.labels for r in self.rows):
+        if (
+            not self.ready
+            or self.pool_short
+            or any(not r.labels for r in self.rows)
+            or len(self.rows) < files.SAMPLE_SIZE
+        ):
             return
 
         def done(approved: bool | None) -> None:

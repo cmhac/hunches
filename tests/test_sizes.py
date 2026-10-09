@@ -17,6 +17,7 @@ from textual.widgets import DataTable
 
 from hunches import classifier, files, history, metrics, system
 from hunches.app import ConfirmScreen, HunchesApp, StatusHeader
+from hunches.screens.gold import GoldRowsScreen, GoldScreen, RemoveGoldScreen
 from hunches.screens.history import HistoryScreen, NeedsVersionScreen
 from hunches.screens.model_picker import ModelPicker
 from hunches.screens.new_project import NewProjectScreen
@@ -166,6 +167,10 @@ MODALS = [
     "history",
     "needs-version-restore",
     "needs-version-new",
+    "gold-rows",
+    "remove-gold-dev",
+    "remove-gold-test",
+    "remove-gold-assistant",
 ]
 
 
@@ -189,6 +194,13 @@ def modals():
         ),
         "needs-version-new": lambda: NeedsVersionScreen(
             history.NeedsVersion("new_version", labels, 2), "undo"
+        ),
+        "gold-rows": lambda: GoldRowsScreen("dev"),
+        "remove-gold-dev": lambda: RemoveGoldScreen(files.read_gold()[:6]),
+        "remove-gold-test": lambda: RemoveGoldScreen(files.read_gold()[48:52]),
+        # the longest text: both splits, a reason, the held-out warning
+        "remove-gold-assistant": lambda: RemoveGoldScreen(
+            files.read_gold()[48:52], "seeds changed " * 6
         ),
     }
 
@@ -388,3 +400,39 @@ async def test_search_with_the_embedding_warning(size):
         await pilot.pause()
         await check(app, pilot, size[0])
         assert app.screen.query_one("#embedding-warning").display
+
+
+def lose_gold_from_the_pool() -> None:
+    """Six dev rows and two test rows are no longer candidates."""
+    gone = {f"i{i}" for i in (0, 1, 2, 3, 4, 5, 50, 51)}
+    files.write_jsonl(
+        "candidates.jsonl",
+        [c for c in files.read_jsonl("candidates.jsonl") if c["id"] not in gone],
+    )
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("stage", [4, 6], ids=["gold-dev", "gold-test"])
+@pytest.mark.parametrize("variant", ["orphans", "removed"])
+async def test_gold_screens_with_orphans(size, stage, variant):
+    lose_gold_from_the_pool()
+    app = HunchesApp()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        if stage == 4:
+            app.goto_stage(4)
+        else:  # stage 6 shows the evaluation once the test result exists
+            await app.push_screen(GoldScreen("test"))
+        await pilot.pause()
+        screen = app.screen
+        assert screen.query_one("#orphans").display
+        if variant == "removed":
+            await pilot.press("x")
+            await pilot.pause()
+            await check(app, pilot, size[0])  # the confirmation
+            await pilot.click("#remove")
+            await pilot.pause()
+            assert screen.query_one("#info").display
+            assert not screen.query_one("#orphans").display
+        await check(app, pilot, size[0])

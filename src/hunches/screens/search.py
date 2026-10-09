@@ -70,6 +70,7 @@ class SearchScreen(Screen):
         yield Static(
             "", id="embedding-warning", classes="banner -warning", markup=False
         )
+        yield Static("", id="gold-orphans", classes="warn", markup=False)
         yield Label("", id="warning", classes="warn")
         yield Label("", id="error", classes="error")
         with Vertical(id="results"):
@@ -140,6 +141,20 @@ class SearchScreen(Screen):
             if model and not self.searching
             else "",
         )
+        coverage = files.gold_coverage()
+        lost = []
+        for split, stage in (("dev", 4), ("test", 6)):
+            c = coverage[split]
+            if not exists or not c["orphaned"]:
+                continue
+            what = f"{c['orphaned']} of your {c['rows']} {split} items are no longer in the"
+            if lost:
+                lost.append(f"{what} pool.")
+            else:
+                lost.append(
+                    f"{what} candidate pool. Review them on the Gold screen (stage {stage})."
+                )
+        say(self.query_one("#gold-orphans", Static), " ".join(lost))
         count = len(files.read_jsonl("candidates.jsonl")) if exists else 0
         need = 2 * files.SAMPLE_SIZE
         say(

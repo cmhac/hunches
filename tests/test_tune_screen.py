@@ -11,8 +11,9 @@ from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Select, Static, TextArea
 
 from hunches import files, history, metrics
-from hunches.app import ChatLine, ChatPanel, ConfirmScreen, FoldLine, HunchesApp
+from hunches.app import ChatLine, ChatPanel, FoldLine, HunchesApp
 from hunches.screens import tune
+from hunches.screens.gold import RemoveGoldScreen
 from hunches.screens.progress import RunIndicator
 from hunches.screens.tune import (
     PromptEditScreen,
@@ -1258,8 +1259,14 @@ async def test_get_gold_coverage_tool_returns_the_section_for_a_split(assistant)
 
 def question(app) -> str:
     screen = app.screen
-    assert isinstance(screen, ConfirmScreen)
-    return screen.question
+    assert isinstance(screen, RemoveGoldScreen)
+    return screen.heading + "\n" + screen.text
+
+
+def screen_title(app) -> str:
+    screen = app.screen
+    assert isinstance(screen, RemoveGoldScreen)
+    return screen.heading
 
 
 def removal_args(*ids):
@@ -1279,11 +1286,14 @@ async def test_remove_gold_writes_nothing_until_confirmed_and_returns_the_answer
         box.focus()
         box.value = "remove"
         await pilot.press("enter")
-        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
-        assert "2 dev rows" in question(app)
+        await wait_for(pilot, lambda: isinstance(app.screen, RemoveGoldScreen))
+        assert screen_title(app) == "The assistant wants to remove 2 dev rows"
+        assert "Reason: seeds changed" in question(app)
+        assert str(app.screen.query_one("#cancel", Button).label) == "Reject  Esc"
+        assert str(app.screen.query_one("#remove", Button).label) == "Remove 2 rows"
         assert files.read_text("gold.jsonl") == before  # still nothing written
         assert files.read_text("gold_removed.jsonl") is None
-        await pilot.click("#no")
+        await pilot.click("#cancel")
         await quiesce(app, pilot)
         assert tool_returns("remove_gold") == ["The user rejected the removal."]
         assert files.read_text("gold.jsonl") == before
@@ -1292,8 +1302,8 @@ async def test_remove_gold_writes_nothing_until_confirmed_and_returns_the_answer
         box.focus()
         box.value = "remove"
         await pilot.press("enter")
-        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
-        await pilot.click("#yes")
+        await wait_for(pilot, lambda: isinstance(app.screen, RemoveGoldScreen))
+        await pilot.click("#remove")
         await quiesce(app, pilot)
     assert tool_returns("remove_gold")[-1] == "Removed 2 rows."
     assert [r.id for r in files.read_gold()] == ["2", "3", "4", "5", "6", "7"]
@@ -1318,10 +1328,10 @@ async def test_remove_gold_names_the_split_in_the_question(assistant):
         box.focus()
         box.value = "remove"
         await pilot.press("enter")
-        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await wait_for(pilot, lambda: isinstance(app.screen, RemoveGoldScreen))
         assert "1 test row" in question(app)
         assert "held out" in question(app)
-        await pilot.click("#no")
+        await pilot.click("#cancel")
         await quiesce(app, pilot)
 
 
@@ -1582,8 +1592,8 @@ async def test_removing_gold_through_the_assistant_makes_the_run_not_current(ass
         box.focus()
         box.value = "remove"
         await pilot.press("enter")
-        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
-        await pilot.click("#yes")
+        await wait_for(pilot, lambda: isinstance(app.screen, RemoveGoldScreen))
+        await pilot.click("#remove")
         await quiesce(app, pilot)
         assert (
             done.disabled and len(screen.rows) == 8

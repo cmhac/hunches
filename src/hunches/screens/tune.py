@@ -21,7 +21,6 @@ from hunches import files, history, metrics
 from hunches.app import (
     AppFooter,
     ChatPanel,
-    ConfirmScreen,
     StageBanner,
     StatusHeader,
     confirm_approve,
@@ -36,6 +35,7 @@ from hunches.app import (
 from hunches.classifier import classify_many
 from hunches.screens import gold as gold_screen
 from hunches.screens import report
+from hunches.screens.gold import RemoveGoldScreen
 from hunches.screens.progress import RunIndicator, eta_text
 from hunches.screens.taxonomy import prompt_change, taxonomy_text
 from hunches.theme import diff_markup, editor
@@ -84,29 +84,6 @@ UPDATE_REPLY = (
 def status_digest() -> str:
     """What the assistant was last told about the pipeline: the two context sections."""
     return hashlib.sha256(files.assistant_context().encode()).hexdigest()
-
-
-def removal_question(rows: list[files.GoldRow], reason: str) -> str:
-    """The confirmation for the assistant's remove_gold; the held-out warning whenever a test row is in it."""
-    counts = [
-        (n, split)
-        for split in ("dev", "test")
-        if (n := sum(r.split == split for r in rows))
-    ]
-    what = " and ".join(
-        f"{n} {split} row{'' if n == 1 else 's'}" for n, split in counts
-    )
-    text = (
-        f"The assistant wants to remove {what}.\n\nReason: {reason}\n\n"
-        "The rows and their labels are kept in gold_removed.jsonl and are never drawn again."
-    )
-    if any(r.split == "test" for r in rows):
-        text += (
-            "\n\nTest rows are held out so that the test result is an honest estimate. "
-            "Replacing labelled test rows changes the items the result is measured on, and the "
-            "test evaluation has to be run again."
-        )
-    return text
 
 
 def digest_of(prompt: str, model: str, rows: list, m: metrics.Metrics) -> str:
@@ -533,9 +510,7 @@ class TuneScreen(Screen):
             rows = [r for r in files.read_gold() if r.id in wanted]
             if not rows:
                 return "No gold row has those ids. Nothing removed."
-            if not await self.app.push_screen_wait(
-                ConfirmScreen(removal_question(rows, reason))
-            ):
+            if not await self.app.push_screen_wait(RemoveGoldScreen(rows, reason)):
                 return "The user rejected the removal."
             n = gold_screen.remove(ids, reason)
             self.run_worker(self.sync_status(), group="status")
