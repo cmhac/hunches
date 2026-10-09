@@ -11,6 +11,8 @@ from hunches.files import Config, pg_setting, read_config
 # Max results per QueryVectors request: 10,000 (100 per page, followed via nextToken).
 # Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-limitations.html
 S3_TOP_K = 10_000
+PG_TOP_K = 10_000
+PG_BATCH = 5_000  # rows per round trip of the server-side cursors
 
 IAM_CHECK = (
     "Check: the database user has the rds_iam role, the AWS identity may rds-db:connect "
@@ -190,6 +192,77 @@ def table_estimates(
         )
         row = cur.fetchone()
     return rows, row[0] if row and row[0] is not None else None
+
+
+def search_pg_exact(
+    vectors, floor: float
+) -> tuple[list[list[tuple[str, str, float]]], bool]:
+    """One pass over the table for every seed: ([hits per seed], capped), best first.
+
+    Runs in the one read-only REPEATABLE READ transaction pg_connect opened. Step 1 returns
+    ids only (a narrow sort), step 2 the text of the distinct ids. `capped` is True when some
+    seed has exactly PG_TOP_K hits.
+    """
+    config = read_config()
+    conn = pg_connect(config)
+    try:
+        from psycopg import sql
+
+        extension_version(conn)  # for its "not installed" error
+        table_name = config.pg_table or ""  # pg_connect has checked it
+        table = sql.Identifier(*table_name.split(".", 1))
+        id_col = sql.Identifier(pg_setting(config, "pg_id_column"))
+        text_col = sql.Identifier(pg_setting(config, "pg_text_column"))
+        vec_col = sql.Identifier(pg_setting(config, "pg_vector_column"))
+        typename, type_schema, _ = column_type(
+            conn, table_name, pg_setting(config, "pg_vector_column")
+        )
+        step1 = sql.SQL(
+            "WITH seeds AS MATERIALIZED (SELECT u.i - 1 AS i, u.q::{vtype} AS q "
+            "FROM unnest(%s::text[]) WITH ORDINALITY AS u(q, i)), "
+            "pairs AS (SELECT t.{id} AS id, d.i, d.sim FROM {table} t "
+            "CROSS JOIN LATERAL (SELECT s.i, 1 - (t.{vec} OPERATOR({schema}.<=>) s.q) AS sim "
+            "FROM seeds s OFFSET 0) d "
+            "WHERE t.{vec} IS NOT NULL AND d.sim >= %s AND d.sim <> 'NaN'), "
+            "ranked AS (SELECT *, row_number() OVER "
+            "(PARTITION BY i ORDER BY sim DESC, id) AS rn FROM pairs) "
+            "SELECT id, i, sim FROM ranked WHERE rn <= %s"
+        ).format(
+            vtype=sql.Identifier(type_schema, typename),
+            id=id_col,
+            table=table,
+            vec=vec_col,
+            schema=sql.Identifier(type_schema),
+        )
+        literals = ["[" + ",".join(repr(float(x)) for x in v) + "]" for v in vectors]
+        per_seed: list[list[tuple]] = [[] for _ in literals]
+        with conn.cursor(name="hunches_pairs") as cur:
+            cur.itersize = PG_BATCH
+            cur.execute(step1, (literals, floor, PG_TOP_K))
+            for id_, i, sim in cur:
+                per_seed[i].append((id_, sim))
+        ids = list(dict.fromkeys(id_ for rows in per_seed for id_, _ in rows))
+        texts = {}
+        if ids:
+            step2 = sql.SQL(
+                "SELECT {id}, {text} FROM {table} WHERE {id} = ANY(%s)"
+            ).format(id=id_col, text=text_col, table=table)
+            with conn.cursor(name="hunches_texts") as cur:
+                cur.itersize = PG_BATCH
+                cur.execute(step2, (ids,))
+                texts = {id_: text for id_, text in cur}
+        hits = []
+        for rows in per_seed:
+            rows.sort(key=lambda r: (-r[1], r[0]))
+            for id_, _ in rows:
+                if id_ not in texts:
+                    raise RuntimeError(f"no text row for id {str(id_)!r}")
+            hits.append([(str(id_), texts[id_], sim) for id_, sim in rows])
+        return hits, any(len(rows) == PG_TOP_K for rows in per_seed)
+    except Exception as e:  # noqa: BLE001  the driver's own classes are not imported here
+        raise RuntimeError(pg_message(e, config)) from None
+    finally:
+        conn.close()
 
 
 def search(

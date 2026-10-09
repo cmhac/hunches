@@ -192,6 +192,18 @@ PostgreSQL 16 + pgvector **0.8.1** with the extension in schema `extensions`, ps
 
 **Not verified:** any managed service; a transaction-mode pooler; TLS; tables larger than memory (the I/O saving, and the temp-file spill at scale); `index` mode's `max_scan_tuples` plateau (why raising it to 1,000,000 added nothing; maybe `hnsw.scan_mem_multiplier`, untested); IVFFlat; partitioned tables and views as `pg_table` (the id join in step 2 should work, untested); integer and uuid id columns; pgvector versions other than 0.6.0 and 0.8.1.
 
+### Verified in task 04 (`search_pg_exact`, 2026-10-09)
+
+PostgreSQL 16 + pgvector 0.8.1 (extension in schema `extensions`), psycopg 3.3.6, the real function against 3,000 rows x 16 dims, 4 seeds, two zero vectors in the table.
+
+- **Result equals numpy** for an integer-id table, a uuid-id table (same `(seed, id)` order as the numpy reference, tie broken by the native id) and a `halfvec` table with text ids (similarities within 3e-3; one boundary row near the floor differs, as expected for half precision). Floor 0.3: 350 / 373 / 365 / 363 hits per seed; floor 0.0 with `PG_TOP_K` patched to 50: 50 per seed and `capped` true. The zero-vector rows never appear. A row whose vector is NULL is skipped.
+- **Isolation level and read-only:** set in `pg_connect` (task 02): `conn.read_only = True` and `conn.isolation_level = IsolationLevel.REPEATABLE_READ` on the `autocommit=False` connection, so both statements and both named cursors share one transaction and one snapshot. `search_pg_exact` sets nothing else.
+- **Named cursor:** `conn.cursor(name=...)` returns a `ServerCursor`; `itersize` is an attribute of the installed class (default 100 rows per fetch while iterating) and is set to `PG_BATCH = 5000`. The psycopg cursor docs still do not describe it for this use, so this stays observed rather than documented (iterating 3,000 rows in batches worked).
+- **Identifiers:** composed with `psycopg.sql.Identifier(schema, name)`; the table is split at the first `.` (same rule as the `regclass` quoting of task 03). `Composed.as_string()` works without a connection in 3.3.6 (the tests use it); the cast and the operator use the schema of the column's own type.
+- **Ids:** a Python list of `int` / `uuid.UUID` / `str` reaches `= ANY(%s)` unchanged and is accepted for integer, uuid and text id columns. Step 2 is skipped when step 1 returned no rows (an empty list parameter has no element type to infer).
+- **Ordering:** step 1's outer `SELECT` has no `ORDER BY`, so the client re-sorts each seed by `(-similarity, id)`. For text ids Python compares code points while the server's `ORDER BY ..., id` uses the database collation, so which row falls at the cap boundary among exactly tied similarities can differ in a non-C collation; irrelevant unless a seed has more than `PG_TOP_K` hits.
+- **Errors:** a missing table gives Postgres's `relation "nope.x" does not exist` and a dimension mismatch `different vector dimensions 16 and 3` plus the `Fix:` hint; the connection is closed and not reused. A missing text row is `no text row for id '<id>'`.
+
 ## Tables with no index (very large, rarely queried)
 
 Supported, and it is the case `exact` mode is built for: it needs no index and never looks for one, so a table with no index at all works the same as an indexed one. Nothing in Check store treats a missing index as a problem in `exact` mode (it only warns in `index` mode, where an index is the whole point). What changes is cost, so the spec adds these:
